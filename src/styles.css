@@ -1130,7 +1130,7 @@ code {
 .source-overview {
     display: grid;
     max-width: 1180px;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 14px;
     margin: 0 auto 20px;
 }
@@ -1160,6 +1160,40 @@ code {
     color: #deded8;
     font-size: 15px;
     font-weight: 550;
+}
+
+.source-overview .source-default-control {
+    grid-template-columns: auto minmax(0, 1fr);
+}
+
+.source-default-control label {
+    display: grid;
+    min-width: 0;
+    gap: 5px;
+}
+
+.source-default-control select {
+    width: 100%;
+    min-width: 0;
+    height: 28px;
+    padding: 0 28px 0 9px;
+    color: #deded8;
+    background: #191b19;
+    border: 1px solid #343631;
+    border-radius: 6px;
+    font: inherit;
+    font-size: 12px;
+}
+
+.source-default-control select:focus-visible {
+    border-color: var(--gold-dark);
+    outline: 2px solid rgba(240, 207, 106, 0.16);
+    outline-offset: 2px;
+}
+
+.source-default-control select:disabled {
+    cursor: wait;
+    opacity: 0.58;
 }
 
 .source-grid {

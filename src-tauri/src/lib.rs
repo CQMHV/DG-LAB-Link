@@ -47,6 +47,7 @@ pub fn run() {
             commands::stop_output,
             commands::emergency_stop,
             commands::set_device_source,
+            commands::set_default_source,
             commands::select_device,
             commands::set_sync_all_devices,
             commands::set_channel_limit,

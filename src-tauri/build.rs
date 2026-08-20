@@ -9,6 +9,7 @@ fn main() {
         "stop_output",
         "emergency_stop",
         "set_device_source",
+        "set_default_source",
         "select_device",
         "set_sync_all_devices",
         "set_channel_limit",

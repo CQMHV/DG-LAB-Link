@@ -85,6 +85,7 @@ export interface HubSnapshot {
     syncAllDevices: boolean;
     outputDeviceCount: number;
     sources: SourceSnapshot[];
+    defaultSourceId: string | null;
     output: OutputSnapshot;
     channels: {
         a: ChannelSnapshot;

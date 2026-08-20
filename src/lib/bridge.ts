@@ -94,6 +94,7 @@ const createDefaultMockSnapshot = (): HubSnapshot => {
             assignedDeviceCount: 1,
         },
     ],
+    defaultSourceId: "source-test-pattern",
     output: {
         state: "idle",
         framesSent: 1284,
@@ -476,6 +477,35 @@ export const setDeviceSource = async (
             snapshot,
             "info",
             `${device.name} 已切换输入源：${target.name}`,
+        );
+    });
+};
+
+export const setDefaultSource = async (sourceId: string | null): Promise<void> => {
+    if (isTauriRuntime()) {
+        await invoke("set_default_source", { sourceId });
+        return;
+    }
+
+    updateMockSnapshot((snapshot) => {
+        if (sourceId === null) {
+            snapshot.defaultSourceId = null;
+            prependMockLog(
+                snapshot,
+                "info",
+                "默认输入源已改为每次询问；已有设备绑定保持不变",
+            );
+            return;
+        }
+        const target = snapshot.sources.find((source) => source.id === sourceId);
+        if (!target || !target.enabled) {
+            throw new Error("输入源不可用");
+        }
+        snapshot.defaultSourceId = sourceId;
+        prependMockLog(
+            snapshot,
+            "info",
+            `默认输入源已切换：${target.name}；已有设备绑定保持不变`,
         );
     });
 };

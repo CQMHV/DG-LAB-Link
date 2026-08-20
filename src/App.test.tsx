@@ -485,6 +485,35 @@ describe("DG-LAB Link 前端", () => {
         expect(screen.getByText("混合 · 2 种")).toBeTruthy();
     });
 
+    it("可以在输入源页面选择新设备的默认输入源", async () => {
+        const user = userEvent.setup();
+        render(<App />);
+
+        await user.click(await screen.findByRole("button", { name: "输入源" }));
+        const defaultSource = screen.getByRole("combobox", {
+            name: "选择默认输入源",
+        }) as HTMLSelectElement;
+        expect(defaultSource.value).toBe("source-test-pattern");
+        await user.selectOptions(defaultSource, "source-manual");
+
+        await waitFor(async () => {
+            const snapshot = await getHubSnapshot();
+            expect(snapshot.defaultSourceId).toBe("source-manual");
+            expect(snapshot.devices[0].sourceId).toBe("source-test-pattern");
+            expect(snapshot.devices[1].sourceId).toBe("source-manual");
+        });
+        expect(screen.getByText("新接入设备将默认使用此输入源")).toBeTruthy();
+
+        await user.selectOptions(defaultSource, "");
+        await waitFor(async () => {
+            const snapshot = await getHubSnapshot();
+            expect(snapshot.defaultSourceId).toBeNull();
+            expect(snapshot.devices[0].sourceId).toBe("source-test-pattern");
+            expect(snapshot.devices[1].sourceId).toBe("source-manual");
+        });
+        expect(defaultSource.value).toBe("");
+    });
+
     it("可以把设备仪表盘拉出为独立窗口", async () => {
         const user = userEvent.setup();
         const focus = vi.fn();

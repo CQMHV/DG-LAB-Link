@@ -79,6 +79,14 @@ pub async fn set_device_source(
 }
 
 #[tauri::command]
+pub async fn set_default_source(
+    hub: State<'_, HubHandle>,
+    source_id: Option<String>,
+) -> Result<(), CommandError> {
+    hub.set_default_source(source_id).await.map_err(Into::into)
+}
+
+#[tauri::command]
 pub async fn select_device(
     hub: State<'_, HubHandle>,
     device_id: String,

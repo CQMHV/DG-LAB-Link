@@ -159,6 +159,7 @@ pub struct HubSnapshot {
     pub sync_all_devices: bool,
     pub output_device_count: usize,
     pub sources: Vec<SourceSnapshot>,
+    pub default_source_id: Option<String>,
     pub output: OutputSnapshot,
     pub channels: ChannelsSnapshot,
     pub safety: SafetySnapshot,
@@ -166,7 +167,11 @@ pub struct HubSnapshot {
 }
 
 impl HubSnapshot {
-    fn initial(endpoint: String, sources: Vec<SourceSnapshot>) -> Self {
+    fn initial(
+        endpoint: String,
+        sources: Vec<SourceSnapshot>,
+        default_source_id: Option<String>,
+    ) -> Self {
         Self {
             revision: 0,
             connection: ConnectionSnapshot {
@@ -183,6 +188,7 @@ impl HubSnapshot {
             sync_all_devices: false,
             output_device_count: 0,
             sources,
+            default_source_id,
             output: OutputSnapshot {
                 state: OutputState::Idle,
                 frames_sent: 0,
@@ -286,6 +292,10 @@ enum HubCommand {
     SetDeviceSource {
         device_id: String,
         source_id: String,
+        reply: oneshot::Sender<Result<(), HubError>>,
+    },
+    SetDefaultSource {
+        source_id: Option<String>,
         reply: oneshot::Sender<Result<(), HubError>>,
     },
     SelectDevice {
@@ -398,6 +408,15 @@ impl HubHandle {
                 source_id,
                 reply,
             })
+            .await
+            .map_err(|_| HubError::Stopped)?;
+        response.await.map_err(|_| HubError::Stopped)?
+    }
+
+    pub async fn set_default_source(&self, source_id: Option<String>) -> Result<(), HubError> {
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .send(HubCommand::SetDefaultSource { source_id, reply })
             .await
             .map_err(|_| HubError::Stopped)?;
         response.await.map_err(|_| HubError::Stopped)?
@@ -592,7 +611,7 @@ pub fn create_hub(endpoint: String) -> (HubHandle, HubRuntime) {
     }
 
     let default_source_id = source_snapshots.first().map(|source| source.id.clone());
-    let snapshot = HubSnapshot::initial(endpoint, source_snapshots);
+    let snapshot = HubSnapshot::initial(endpoint, source_snapshots, default_source_id.clone());
     let (snapshot_sender, snapshot_receiver) = watch::channel(snapshot.clone());
     let (command_sender, command_receiver) = mpsc::channel(HUB_COMMAND_CAPACITY);
     let (safety_sender, safety_receiver) = mpsc::channel(HUB_SAFETY_COMMAND_CAPACITY);
@@ -821,6 +840,10 @@ impl HubRuntime {
                 reply,
             } => {
                 let result = self.set_device_source(device_id, source_id).await;
+                let _ = reply.send(result);
+            }
+            HubCommand::SetDefaultSource { source_id, reply } => {
+                let result = self.set_default_source(source_id);
                 let _ = reply.send(result);
             }
             HubCommand::SelectDevice { device_id, reply } => {
@@ -1740,6 +1763,30 @@ impl HubRuntime {
         Ok(())
     }
 
+    fn set_default_source(&mut self, source_id: Option<String>) -> Result<(), HubError> {
+        if let Some(source_id) = &source_id {
+            let source = self
+                .sources
+                .get(source_id)
+                .ok_or_else(|| HubError::SourceUnavailable(source_id.clone()))?;
+            if !source.snapshot.enabled {
+                return Err(HubError::SourceUnavailable(source_id.clone()));
+            }
+        }
+        if self.default_source_id == source_id {
+            return Ok(());
+        }
+        self.default_source_id.clone_from(&source_id);
+        self.snapshot.default_source_id.clone_from(&source_id);
+        let message = source_id.map_or_else(
+            || "默认输入源已改为每次询问；已有设备绑定保持不变".to_owned(),
+            |source_id| format!("默认输入源已切换：{source_id}；已有设备绑定保持不变"),
+        );
+        self.log(LogLevel::Info, message);
+        self.publish();
+        Ok(())
+    }
+
     async fn select_device(&mut self, device_id: String) -> Result<(), HubError> {
         let device = self
             .devices
@@ -2534,6 +2581,7 @@ mod tests {
         assert_eq!(value["channels"]["a"]["status"], "disconnected");
         assert_eq!(value["sources"][0]["kind"], "builtin.test_pattern");
         assert!(value["sources"][0].get("assignedDeviceCount").is_some());
+        assert_eq!(value["defaultSourceId"], "source-test-pattern");
         assert!(value.get("devices").is_some());
         assert!(value.get("selectedDeviceId").is_some());
         assert_eq!(value["syncAllDevices"], false);
@@ -2598,6 +2646,71 @@ mod tests {
                 .iter()
                 .all(|source| { source.assigned_device_count == 1 })
         );
+    }
+
+    #[test]
+    fn changing_default_source_only_affects_new_devices() {
+        let (_hub, mut runtime) = create_hub("wss://example.test/v4".to_owned());
+        install_test_device(&mut runtime, "app-1", "slot-a", 10);
+        let first = runtime.selected_device.clone().unwrap();
+
+        runtime
+            .set_default_source(Some("source-manual".to_owned()))
+            .unwrap();
+        install_test_device(&mut runtime, "app-2", "slot-b", 20);
+        let second = runtime
+            .devices
+            .keys()
+            .find(|device| device.client_id == "app-2")
+            .cloned()
+            .unwrap();
+
+        assert_eq!(runtime.default_source_id.as_deref(), Some("source-manual"));
+        assert_eq!(
+            runtime.snapshot.default_source_id.as_deref(),
+            Some("source-manual")
+        );
+        assert_eq!(
+            runtime
+                .device_source_bindings
+                .get(&first)
+                .map(String::as_str),
+            Some("source-test-pattern")
+        );
+        assert_eq!(
+            runtime
+                .device_source_bindings
+                .get(&second)
+                .map(String::as_str),
+            Some("source-manual")
+        );
+    }
+
+    #[test]
+    fn clearing_default_source_leaves_new_devices_unassigned() {
+        let (_hub, mut runtime) = create_hub("wss://example.test/v4".to_owned());
+        install_test_device(&mut runtime, "app-1", "slot-a", 10);
+        let first = runtime.selected_device.clone().unwrap();
+
+        runtime.set_default_source(None).unwrap();
+        install_test_device(&mut runtime, "app-2", "slot-b", 20);
+        let second = runtime
+            .devices
+            .keys()
+            .find(|device| device.client_id == "app-2")
+            .cloned()
+            .unwrap();
+
+        assert_eq!(runtime.snapshot.default_source_id, None);
+        assert_eq!(
+            runtime
+                .device_source_bindings
+                .get(&first)
+                .map(String::as_str),
+            Some("source-test-pattern")
+        );
+        assert!(!runtime.device_source_bindings.contains_key(&second));
+        assert_eq!(runtime.start_output(), Err(HubError::NoSource));
     }
 
     #[tokio::test]

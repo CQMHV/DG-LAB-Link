@@ -225,6 +225,12 @@
           "markdownDescription": "Enables the set_channel_limit command without any pre-configured scope."
         },
         {
+          "description": "Enables the set_default_source command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-default-source",
+          "markdownDescription": "Enables the set_default_source command without any pre-configured scope."
+        },
+        {
           "description": "Enables the set_device_source command without any pre-configured scope.",
           "type": "string",
           "const": "allow-set-device-source",
@@ -301,6 +307,12 @@
           "type": "string",
           "const": "deny-set-channel-limit",
           "markdownDescription": "Denies the set_channel_limit command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_default_source command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-default-source",
+          "markdownDescription": "Denies the set_default_source command without any pre-configured scope."
         },
         {
           "description": "Denies the set_device_source command without any pre-configured scope.",

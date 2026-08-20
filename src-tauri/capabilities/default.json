@@ -20,6 +20,7 @@
         "allow-stop-output",
         "allow-emergency-stop",
         "allow-set-device-source",
+        "allow-set-default-source",
         "allow-select-device",
         "allow-set-sync-all-devices",
         "allow-set-channel-limit",

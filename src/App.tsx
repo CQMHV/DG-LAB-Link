@@ -18,6 +18,7 @@ import {
     emergencyStop,
     isBrowserDemo,
     selectDevice,
+    setDefaultSource,
     setDeviceSource,
     setSyncAllDevices,
     startOutput,
@@ -236,7 +237,15 @@ export default function App() {
                             />
                         )}
                         {!windowContext.detached && page === "sources" && (
-                            <SourcesPage snapshot={snapshot} />
+                            <SourcesPage
+                                onSetDefaultSource={(sourceId) =>
+                                    void runAction("default-source", () =>
+                                        setDefaultSource(sourceId),
+                                    )
+                                }
+                                pendingAction={pendingAction}
+                                snapshot={snapshot}
+                            />
                         )}
                         {!windowContext.detached && page === "devices" && (
                             <DevicesPage

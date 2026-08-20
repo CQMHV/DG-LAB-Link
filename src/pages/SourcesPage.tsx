@@ -2,6 +2,7 @@ import {
     CirclesThreePlus,
     DeviceMobile,
     SlidersHorizontal,
+    Star,
     Waveform,
 } from "@phosphor-icons/react";
 
@@ -10,6 +11,8 @@ import type { HubSnapshot } from "../lib/contracts";
 
 interface SourcesPageProps {
     snapshot: HubSnapshot;
+    pendingAction: string | null;
+    onSetDefaultSource: (sourceId: string | null) => void;
 }
 
 const sourceDescription = (kind: string): string => {
@@ -19,7 +22,11 @@ const sourceDescription = (kind: string): string => {
     return "循环生成 DG-LAB-VRCOSC 默认呼吸波形，以明显的渐强、保持和停顿验证设备链路。";
 };
 
-export const SourcesPage = ({ snapshot }: SourcesPageProps) => {
+export const SourcesPage = ({
+    snapshot,
+    pendingAction,
+    onSetDefaultSource,
+}: SourcesPageProps) => {
     const assignedDeviceCount = snapshot.sources.reduce(
         (total, source) => total + source.assignedDeviceCount,
         0,
@@ -45,6 +52,30 @@ export const SourcesPage = ({ snapshot }: SourcesPageProps) => {
                     <strong>
                         {assignedDeviceCount} / {snapshot.devices.length}
                     </strong>
+                </div>
+                <div className="source-default-control">
+                    <Star aria-hidden="true" size={22} weight="light" />
+                    <label htmlFor="default-source-select">
+                        <span>默认输入源</span>
+                        <select
+                            aria-label="选择默认输入源"
+                            disabled={pendingAction !== null}
+                            id="default-source-select"
+                            onChange={(event) =>
+                                onSetDefaultSource(event.target.value || null)
+                            }
+                            value={snapshot.defaultSourceId ?? ""}
+                        >
+                            <option value="">每次询问</option>
+                            {snapshot.sources
+                                .filter((source) => source.enabled)
+                                .map((source) => (
+                                    <option key={source.id} value={source.id}>
+                                        {source.name}
+                                    </option>
+                                ))}
+                        </select>
+                    </label>
                 </div>
             </section>
 
@@ -75,7 +106,11 @@ export const SourcesPage = ({ snapshot }: SourcesPageProps) => {
                                 <span
                                     className={`source-enabled ${source.enabled ? "enabled" : ""}`}
                                 >
-                                    {source.enabled ? "已启用" : "已停用"}
+                                    {snapshot.defaultSourceId === source.id
+                                        ? "默认"
+                                        : source.enabled
+                                          ? "已启用"
+                                          : "已停用"}
                                 </span>
                             </div>
                             <p>{sourceDescription(source.kind)}</p>
@@ -94,10 +129,16 @@ export const SourcesPage = ({ snapshot }: SourcesPageProps) => {
                                 </div>
                             </dl>
                             <div className="source-assignment-note">
-                                <DeviceMobile aria-hidden="true" size={18} />
-                                {source.assignedDeviceCount > 0
-                                    ? `正由 ${source.assignedDeviceCount} 台设备使用`
-                                    : "尚未分配；请在控制台设备标签中选择"}
+                                {snapshot.defaultSourceId === source.id ? (
+                                    <Star aria-hidden="true" size={18} weight="fill" />
+                                ) : (
+                                    <DeviceMobile aria-hidden="true" size={18} />
+                                )}
+                                {snapshot.defaultSourceId === source.id
+                                    ? "新接入设备将默认使用此输入源"
+                                    : source.assignedDeviceCount > 0
+                                      ? `正由 ${source.assignedDeviceCount} 台设备使用`
+                                      : "尚未分配；请在控制台设备标签中选择"}
                             </div>
                         </article>
                     );
