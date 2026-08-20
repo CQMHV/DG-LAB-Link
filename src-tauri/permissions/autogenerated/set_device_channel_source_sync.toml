@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-device-channel-source-sync"
+description = "Enables the set_device_channel_source_sync command without any pre-configured scope."
+commands.allow = ["set_device_channel_source_sync"]
+
+[[permission]]
+identifier = "deny-set-device-channel-source-sync"
+description = "Denies the set_device_channel_source_sync command without any pre-configured scope."
+commands.deny = ["set_device_channel_source_sync"]

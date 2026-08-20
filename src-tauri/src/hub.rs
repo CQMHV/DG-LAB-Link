@@ -93,7 +93,9 @@ pub struct DeviceSnapshot {
     pub intensity_b: u16,
     pub intensity_limit_a: u16,
     pub intensity_limit_b: u16,
-    pub source_id: Option<String>,
+    pub source_id_a: Option<String>,
+    pub source_id_b: Option<String>,
+    pub source_sync: bool,
     pub output_active: bool,
     pub channel_a_status: ChannelStatus,
     pub channel_b_status: ChannelStatus,
@@ -106,7 +108,7 @@ pub struct SourceSnapshot {
     pub kind: String,
     pub name: String,
     pub enabled: bool,
-    pub assigned_device_count: usize,
+    pub assigned_channel_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -289,9 +291,15 @@ enum HubCommand {
         safety_epoch: u64,
         reply: oneshot::Sender<Result<(), HubError>>,
     },
-    SetDeviceSource {
+    SetDeviceChannelSource {
         device_id: String,
+        channel: Channel,
         source_id: String,
+        reply: oneshot::Sender<Result<(), HubError>>,
+    },
+    SetDeviceChannelSourceSync {
+        device_id: String,
+        enabled: bool,
         reply: oneshot::Sender<Result<(), HubError>>,
     },
     SetDefaultSource {
@@ -396,15 +404,17 @@ impl HubHandle {
         self.safety_request(HubSafetyCommand::EmergencyStop).await
     }
 
-    pub async fn set_device_source(
+    pub async fn set_device_channel_source(
         &self,
         device_id: String,
+        channel: Channel,
         source_id: String,
     ) -> Result<(), HubError> {
         let (reply, response) = oneshot::channel();
         self.commands
-            .send(HubCommand::SetDeviceSource {
+            .send(HubCommand::SetDeviceChannelSource {
                 device_id,
+                channel,
                 source_id,
                 reply,
             })
@@ -417,6 +427,23 @@ impl HubHandle {
         let (reply, response) = oneshot::channel();
         self.commands
             .send(HubCommand::SetDefaultSource { source_id, reply })
+            .await
+            .map_err(|_| HubError::Stopped)?;
+        response.await.map_err(|_| HubError::Stopped)?
+    }
+
+    pub async fn set_device_channel_source_sync(
+        &self,
+        device_id: String,
+        enabled: bool,
+    ) -> Result<(), HubError> {
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .send(HubCommand::SetDeviceChannelSourceSync {
+                device_id,
+                enabled,
+                reply,
+            })
             .await
             .map_err(|_| HubError::Stopped)?;
         response.await.map_err(|_| HubError::Stopped)?
@@ -536,9 +563,16 @@ struct IntensityKey {
     channel: Channel,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct SourceBindingKey {
+    device: DeviceKey,
+    channel: Channel,
+}
+
 #[derive(Debug, Clone)]
 struct PendingWaveOperation {
     device: DeviceKey,
+    channel: Channel,
     generation: u64,
     sent_at: Instant,
 }
@@ -565,7 +599,9 @@ pub struct HubRuntime {
     snapshot: HubSnapshot,
     sources: BTreeMap<String, SourceRuntime>,
     default_source_id: Option<String>,
-    device_source_bindings: BTreeMap<DeviceKey, String>,
+    device_source_bindings: BTreeMap<SourceBindingKey, String>,
+    initialized_source_devices: BTreeSet<DeviceKey>,
+    source_sync_devices: BTreeSet<DeviceKey>,
     relay: Option<RelayClientHandle>,
     apps: BTreeSet<String>,
     devices: BTreeMap<DeviceKey, Value>,
@@ -604,7 +640,7 @@ pub fn create_hub(endpoint: String) -> (HubHandle, HubRuntime) {
             kind: descriptor.kind.to_owned(),
             name: descriptor.display_name.to_owned(),
             enabled: true,
-            assigned_device_count: 0,
+            assigned_channel_count: 0,
         };
         source_snapshots.push(snapshot.clone());
         sources.insert(id, SourceRuntime { snapshot, source });
@@ -637,6 +673,8 @@ pub fn create_hub(endpoint: String) -> (HubHandle, HubRuntime) {
             sources,
             default_source_id,
             device_source_bindings: BTreeMap::new(),
+            initialized_source_devices: BTreeSet::new(),
+            source_sync_devices: BTreeSet::new(),
             relay: None,
             apps: BTreeSet::new(),
             devices: BTreeMap::new(),
@@ -834,16 +872,29 @@ impl HubRuntime {
                 };
                 let _ = reply.send(result);
             }
-            HubCommand::SetDeviceSource {
+            HubCommand::SetDeviceChannelSource {
                 device_id,
+                channel,
                 source_id,
                 reply,
             } => {
-                let result = self.set_device_source(device_id, source_id).await;
+                let result = self
+                    .set_device_channel_source(device_id, channel, source_id)
+                    .await;
                 let _ = reply.send(result);
             }
             HubCommand::SetDefaultSource { source_id, reply } => {
                 let result = self.set_default_source(source_id);
+                let _ = reply.send(result);
+            }
+            HubCommand::SetDeviceChannelSourceSync {
+                device_id,
+                enabled,
+                reply,
+            } => {
+                let result = self
+                    .set_device_channel_source_sync(device_id, enabled)
+                    .await;
                 let _ = reply.send(result);
             }
             HubCommand::SelectDevice { device_id, reply } => {
@@ -1149,8 +1200,6 @@ impl HubRuntime {
             .collect::<BTreeSet<_>>();
         self.devices
             .retain(|key, _| key.client_id.as_str() != client_id);
-        self.device_source_bindings
-            .retain(|key, _| key.client_id.as_str() != client_id);
         for device in devices {
             if let Some(slot_id) = device.get("slotId").and_then(Value::as_str) {
                 self.devices.insert(
@@ -1263,11 +1312,20 @@ impl HubRuntime {
         }
         self.intensity_lock_targets
             .retain(|device, _| self.devices.contains_key(device));
-        if let Some(default_source_id) = &self.default_source_id {
-            for device in self.devices.keys() {
-                self.device_source_bindings
-                    .entry(device.clone())
-                    .or_insert_with(|| default_source_id.clone());
+        let connected_devices = self.devices.keys().cloned().collect::<Vec<_>>();
+        for device in connected_devices {
+            if self.initialized_source_devices.insert(device.clone())
+                && let Some(default_source_id) = &self.default_source_id
+            {
+                for channel in Channel::ALL {
+                    self.device_source_bindings.insert(
+                        SourceBindingKey {
+                            device: device.clone(),
+                            channel,
+                        },
+                        default_source_id.clone(),
+                    );
+                }
             }
         }
         self.refresh_source_snapshots();
@@ -1276,7 +1334,14 @@ impl HubRuntime {
                 if self.output_devices.len() >= MAX_OUTPUT_DEVICES {
                     break;
                 }
-                self.output_devices.insert(device.clone());
+                if Channel::ALL.iter().all(|channel| {
+                    self.device_source_bindings.contains_key(&SourceBindingKey {
+                        device: device.clone(),
+                        channel: *channel,
+                    })
+                }) {
+                    self.output_devices.insert(device.clone());
+                }
             }
             if self.devices.len() > MAX_OUTPUT_DEVICES {
                 self.snapshot.output.last_error = Some(format!(
@@ -1310,7 +1375,21 @@ impl HubRuntime {
             .iter()
             .filter_map(|(key, value)| {
                 let mut snapshot = device_snapshot_from_value(key, value)?;
-                snapshot.source_id = self.device_source_bindings.get(key).cloned();
+                snapshot.source_id_a = self
+                    .device_source_bindings
+                    .get(&SourceBindingKey {
+                        device: key.clone(),
+                        channel: Channel::A,
+                    })
+                    .cloned();
+                snapshot.source_id_b = self
+                    .device_source_bindings
+                    .get(&SourceBindingKey {
+                        device: key.clone(),
+                        channel: Channel::B,
+                    })
+                    .cloned();
+                snapshot.source_sync = self.source_sync_devices.contains(key);
                 if !allow_app_control && let Some(lock) = self.intensity_lock_targets.get(key) {
                     snapshot.intensity_a = lock.a;
                     snapshot.intensity_b = lock.b;
@@ -1356,13 +1435,13 @@ impl HubRuntime {
 
     fn refresh_source_snapshots(&mut self) {
         let mut assigned_counts = HashMap::<&str, usize>::new();
-        for (device, source_id) in &self.device_source_bindings {
-            if self.devices.contains_key(device) {
+        for (binding, source_id) in &self.device_source_bindings {
+            if self.devices.contains_key(&binding.device) {
                 *assigned_counts.entry(source_id.as_str()).or_default() += 1;
             }
         }
         for source in self.sources.values_mut() {
-            source.snapshot.assigned_device_count = assigned_counts
+            source.snapshot.assigned_channel_count = assigned_counts
                 .get(source.snapshot.id.as_str())
                 .copied()
                 .unwrap_or(0);
@@ -1402,13 +1481,18 @@ impl HubRuntime {
             return Err(HubError::TooManyDevices);
         }
         for device in self.devices.keys() {
-            let source_id = self
-                .device_source_bindings
-                .get(device)
-                .ok_or(HubError::NoSource)?;
-            let source = self.sources.get(source_id).ok_or(HubError::NoSource)?;
-            if !source.snapshot.enabled {
-                return Err(HubError::SourceUnavailable(source_id.clone()));
+            for channel in Channel::ALL {
+                let source_id = self
+                    .device_source_bindings
+                    .get(&SourceBindingKey {
+                        device: device.clone(),
+                        channel,
+                    })
+                    .ok_or(HubError::NoSource)?;
+                let source = self.sources.get(source_id).ok_or(HubError::NoSource)?;
+                if !source.snapshot.enabled {
+                    return Err(HubError::SourceUnavailable(source_id.clone()));
+                }
             }
         }
         self.snapshot.output.state = OutputState::Running;
@@ -1468,17 +1552,30 @@ impl HubRuntime {
             self.fail_output("所有输出设备均已断开").await;
             return;
         }
-        let mut devices_by_source = BTreeMap::<String, Vec<DeviceKey>>::new();
+        let mut bindings_by_source = BTreeMap::<String, Vec<SourceBindingKey>>::new();
         for device in devices {
-            let Some(source_id) = self.device_source_bindings.get(&device).cloned() else {
-                self.fail_output(format!("设备 {} 尚未分配输入源", device.control_id()))
+            for channel in Channel::ALL {
+                let binding = SourceBindingKey {
+                    device: device.clone(),
+                    channel,
+                };
+                let Some(source_id) = self.device_source_bindings.get(&binding).cloned() else {
+                    self.fail_output(format!(
+                        "设备 {} 的 {} 通道尚未分配输入源",
+                        device.control_id(),
+                        channel_label(channel)
+                    ))
                     .await;
-                return;
-            };
-            devices_by_source.entry(source_id).or_default().push(device);
+                    return;
+                };
+                bindings_by_source
+                    .entry(source_id)
+                    .or_default()
+                    .push(binding);
+            }
         }
         let mut frames_by_source = BTreeMap::<String, String>::new();
-        for source_id in devices_by_source.keys() {
+        for source_id in bindings_by_source.keys() {
             let frame_result = match self.sources.get_mut(source_id) {
                 Some(source) if source.snapshot.enabled => source
                     .source
@@ -1496,29 +1593,32 @@ impl HubRuntime {
             frames_by_source.insert(source_id.clone(), encode_wave_frame(frame));
         }
         let mut sent = 0_u64;
-        for (source_id, devices) in devices_by_source {
+        for (source_id, bindings) in bindings_by_source {
             let frame_hex = &frames_by_source[&source_id];
-            for device in devices {
-                for channel in Channel::ALL {
-                    let request_id = Uuid::new_v4().to_string();
-                    let request =
-                        append_pulse_request(&request_id, &device.slot_id, channel, frame_hex);
-                    match self.send_operation(&device.client_id, request) {
-                        Ok(()) => {
-                            self.pending_wave_operations.insert(
-                                request_id,
-                                PendingWaveOperation {
-                                    device: device.clone(),
-                                    generation: self.operation_generation,
-                                    sent_at: Instant::now(),
-                                },
-                            );
-                            sent += 1;
-                        }
-                        Err(error) => {
-                            self.fail_output(error.to_string()).await;
-                            return;
-                        }
+            for binding in bindings {
+                let request_id = Uuid::new_v4().to_string();
+                let request = append_pulse_request(
+                    &request_id,
+                    &binding.device.slot_id,
+                    binding.channel,
+                    frame_hex,
+                );
+                match self.send_operation(&binding.device.client_id, request) {
+                    Ok(()) => {
+                        self.pending_wave_operations.insert(
+                            request_id,
+                            PendingWaveOperation {
+                                device: binding.device,
+                                channel: binding.channel,
+                                generation: self.operation_generation,
+                                sent_at: Instant::now(),
+                            },
+                        );
+                        sent += 1;
+                    }
+                    Err(error) => {
+                        self.fail_output(error.to_string()).await;
+                        return;
                     }
                 }
             }
@@ -1724,9 +1824,10 @@ impl HubRuntime {
         }
     }
 
-    async fn set_device_source(
+    async fn set_device_channel_source(
         &mut self,
         device_id: String,
+        channel: Channel,
         source_id: String,
     ) -> Result<(), HubError> {
         let device = self
@@ -1742,22 +1843,189 @@ impl HubRuntime {
         if !source.snapshot.enabled {
             return Err(HubError::SourceUnavailable(source_id));
         }
-        if self.device_source_bindings.get(&device) == Some(&source_id) {
+        let channels = if self.source_sync_devices.contains(&device) {
+            Channel::ALL.as_slice()
+        } else {
+            std::slice::from_ref(&channel)
+        };
+        let changed_channels = channels
+            .iter()
+            .copied()
+            .filter(|channel| {
+                self.device_source_bindings.get(&SourceBindingKey {
+                    device: device.clone(),
+                    channel: *channel,
+                }) != Some(&source_id)
+            })
+            .collect::<Vec<_>>();
+        if changed_channels.is_empty() {
             return Ok(());
         }
         if self.snapshot.output.state == OutputState::Running
             && self.output_devices.contains(&device)
         {
-            self.send_safety_requests(&device, vec![clear_request(&device.slot_id)])
-                .await?;
+            self.send_safety_requests(
+                &device,
+                changed_channels
+                    .iter()
+                    .map(|channel| clear_channel_request(&device.slot_id, *channel))
+                    .collect(),
+            )
+            .await?;
+            self.pending_wave_operations.retain(|_, pending| {
+                pending.device != device || !changed_channels.contains(&pending.channel)
+            });
         }
-        self.device_source_bindings
-            .insert(device.clone(), source_id.clone());
+        self.initialized_source_devices.insert(device.clone());
+        for channel in &changed_channels {
+            self.device_source_bindings.insert(
+                SourceBindingKey {
+                    device: device.clone(),
+                    channel: *channel,
+                },
+                source_id.clone(),
+            );
+        }
+        if self.snapshot.output.state == OutputState::Running
+            && self.output_devices.len() < MAX_OUTPUT_DEVICES
+            && Channel::ALL.iter().all(|channel| {
+                self.device_source_bindings.contains_key(&SourceBindingKey {
+                    device: device.clone(),
+                    channel: *channel,
+                })
+            })
+        {
+            self.output_devices.insert(device.clone());
+        }
         self.refresh_source_snapshots();
         self.refresh_selected_device_snapshot();
         self.log(
             LogLevel::Info,
-            format!("设备 {} 已切换输入源：{source_id}", device.control_id()),
+            format!(
+                "设备 {} 的 {} 通道已切换输入源：{source_id}",
+                device.control_id(),
+                if self.source_sync_devices.contains(&device) {
+                    "A/B"
+                } else {
+                    channel_label(channel)
+                }
+            ),
+        );
+        self.publish();
+        Ok(())
+    }
+
+    async fn set_device_channel_source_sync(
+        &mut self,
+        device_id: String,
+        enabled: bool,
+    ) -> Result<(), HubError> {
+        let device = self
+            .devices
+            .keys()
+            .find(|device| device.control_id() == device_id)
+            .cloned()
+            .ok_or(HubError::DeviceUnavailable)?;
+        if self.source_sync_devices.contains(&device) == enabled {
+            return Ok(());
+        }
+        if !enabled {
+            self.source_sync_devices.remove(&device);
+            self.refresh_selected_device_snapshot();
+            self.log(
+                LogLevel::Info,
+                format!("设备 {} 已关闭 A/B 输入源同步", device.control_id()),
+            );
+            self.publish();
+            return Ok(());
+        }
+
+        let target_source_id = self.default_source_id.clone();
+        let changed_channels = Channel::ALL
+            .iter()
+            .copied()
+            .filter(|channel| {
+                self.device_source_bindings
+                    .get(&SourceBindingKey {
+                        device: device.clone(),
+                        channel: *channel,
+                    })
+                    .map(String::as_str)
+                    != target_source_id.as_deref()
+            })
+            .collect::<Vec<_>>();
+        if self.snapshot.output.state == OutputState::Running
+            && self.output_devices.contains(&device)
+            && !changed_channels.is_empty()
+        {
+            self.send_safety_requests(
+                &device,
+                changed_channels
+                    .iter()
+                    .map(|channel| clear_channel_request(&device.slot_id, *channel))
+                    .collect(),
+            )
+            .await?;
+            self.pending_wave_operations.retain(|_, pending| {
+                pending.device != device || !changed_channels.contains(&pending.channel)
+            });
+        }
+
+        self.initialized_source_devices.insert(device.clone());
+        for channel in Channel::ALL {
+            let binding = SourceBindingKey {
+                device: device.clone(),
+                channel,
+            };
+            if let Some(source_id) = &target_source_id {
+                self.device_source_bindings
+                    .insert(binding, source_id.clone());
+            } else {
+                self.device_source_bindings.remove(&binding);
+            }
+        }
+        self.source_sync_devices.insert(device.clone());
+        let has_all_sources = Channel::ALL.iter().all(|channel| {
+            self.device_source_bindings.contains_key(&SourceBindingKey {
+                device: device.clone(),
+                channel: *channel,
+            })
+        });
+        if self.snapshot.output.state == OutputState::Running && has_all_sources {
+            if self.output_devices.len() < MAX_OUTPUT_DEVICES {
+                self.output_devices.insert(device.clone());
+            }
+        } else if !has_all_sources {
+            self.output_devices.remove(&device);
+            if self.snapshot.output.state == OutputState::Running && self.output_devices.is_empty()
+            {
+                self.snapshot.output.state = OutputState::Idle;
+                self.output_started_at = None;
+                self.snapshot.output.last_error = None;
+                self.log(
+                    LogLevel::Warning,
+                    "默认输入源为每次询问，A/B 同步后已停止波形输出",
+                );
+            }
+        }
+        self.refresh_source_snapshots();
+        self.refresh_selected_device_snapshot();
+        self.log(
+            LogLevel::Info,
+            target_source_id.map_or_else(
+                || {
+                    format!(
+                        "设备 {} 已开启 A/B 输入源同步，并重置为未分配",
+                        device.control_id()
+                    )
+                },
+                |source_id| {
+                    format!(
+                        "设备 {} 已开启 A/B 输入源同步，并重置为默认源：{source_id}",
+                        device.control_id()
+                    )
+                },
+            ),
         );
         self.publish();
         Ok(())
@@ -2257,6 +2525,8 @@ impl HubRuntime {
         self.apps.clear();
         self.devices.clear();
         self.device_source_bindings.clear();
+        self.initialized_source_devices.clear();
+        self.source_sync_devices.clear();
         self.selected_device = None;
         self.output_devices.clear();
         self.intensity_lock_targets.clear();
@@ -2350,6 +2620,22 @@ fn clear_request(slot_id: &str) -> Value {
         "m": "device.op.clear",
         "data": { "s": slot_id },
     })
+}
+
+fn clear_channel_request(slot_id: &str, channel: Channel) -> Value {
+    json!({
+        "t": "req",
+        "reqId": Uuid::new_v4().to_string(),
+        "m": "device.op.clear",
+        "data": { "s": slot_id, "c": channel.as_v4() },
+    })
+}
+
+const fn channel_label(channel: Channel) -> &'static str {
+    match channel {
+        Channel::A => "A",
+        Channel::B => "B",
+    }
 }
 
 fn zero_intensity_request(slot_id: &str, channel: Channel) -> Value {
@@ -2450,7 +2736,9 @@ fn device_snapshot_from_value(key: &DeviceKey, device: &Value) -> Option<DeviceS
             .and_then(Value::as_u64)
             .and_then(|value| u16::try_from(value).ok())
             .unwrap_or(200),
-        source_id: None,
+        source_id_a: None,
+        source_id_b: None,
+        source_sync: false,
         output_active: false,
         channel_a_status: protocol_channel_status(
             object_u16(props, "channelAStatus"),
@@ -2580,7 +2868,7 @@ mod tests {
         assert_eq!(value["output"]["state"], "idle");
         assert_eq!(value["channels"]["a"]["status"], "disconnected");
         assert_eq!(value["sources"][0]["kind"], "builtin.test_pattern");
-        assert!(value["sources"][0].get("assignedDeviceCount").is_some());
+        assert!(value["sources"][0].get("assignedChannelCount").is_some());
         assert_eq!(value["defaultSourceId"], "source-test-pattern");
         assert!(value.get("devices").is_some());
         assert!(value.get("selectedDeviceId").is_some());
@@ -2599,8 +2887,15 @@ mod tests {
         }
     }
 
+    fn source_binding(device: &DeviceKey, channel: Channel) -> SourceBindingKey {
+        SourceBindingKey {
+            device: device.clone(),
+            channel,
+        }
+    }
+
     #[tokio::test]
-    async fn each_device_can_bind_a_different_source() {
+    async fn each_device_channel_can_bind_a_different_source() {
         let (_hub, mut runtime) = create_hub("wss://example.test/v4".to_owned());
         install_test_device(&mut runtime, "app-1", "slot-a", 10);
         install_test_device(&mut runtime, "app-2", "slot-b", 20);
@@ -2614,19 +2909,19 @@ mod tests {
         assert_eq!(
             runtime
                 .device_source_bindings
-                .get(&second)
+                .get(&source_binding(&second, Channel::A))
                 .map(String::as_str),
             Some("source-test-pattern")
         );
         runtime
-            .set_device_source(second.control_id(), "source-manual".to_owned())
+            .set_device_channel_source(second.control_id(), Channel::A, "source-manual".to_owned())
             .await
             .unwrap();
 
         assert_eq!(
             runtime
                 .device_source_bindings
-                .get(&second)
+                .get(&source_binding(&second, Channel::A))
                 .map(String::as_str),
             Some("source-manual")
         );
@@ -2636,16 +2931,125 @@ mod tests {
                 .devices
                 .iter()
                 .find(|device| device.control_id == second.control_id())
-                .and_then(|device| device.source_id.as_deref()),
+                .and_then(|device| device.source_id_a.as_deref()),
             Some("source-manual")
         );
-        assert!(
+        assert_eq!(
+            runtime
+                .snapshot
+                .devices
+                .iter()
+                .find(|device| device.control_id == second.control_id())
+                .and_then(|device| device.source_id_b.as_deref()),
+            Some("source-test-pattern")
+        );
+        assert_eq!(
             runtime
                 .snapshot
                 .sources
                 .iter()
-                .all(|source| { source.assigned_device_count == 1 })
+                .find(|source| source.id == "source-test-pattern")
+                .map(|source| source.assigned_channel_count),
+            Some(3)
         );
+        assert_eq!(
+            runtime
+                .snapshot
+                .sources
+                .iter()
+                .find(|source| source.id == "source-manual")
+                .map(|source| source.assigned_channel_count),
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn device_channel_source_sync_resets_to_default_and_links_both_channels() {
+        let (_hub, mut runtime) = create_hub("wss://example.test/v4".to_owned());
+        install_test_device(&mut runtime, "app-1", "slot-a", 10);
+        let device = runtime.selected_device.clone().unwrap();
+        runtime
+            .set_device_channel_source(device.control_id(), Channel::A, "source-manual".to_owned())
+            .await
+            .unwrap();
+
+        runtime
+            .set_device_channel_source_sync(device.control_id(), true)
+            .await
+            .unwrap();
+        assert!(runtime.source_sync_devices.contains(&device));
+        assert!(Channel::ALL.iter().all(|channel| {
+            runtime
+                .device_source_bindings
+                .get(&source_binding(&device, *channel))
+                .is_some_and(|source| source == "source-test-pattern")
+        }));
+        assert!(
+            runtime
+                .snapshot
+                .devices
+                .iter()
+                .find(|snapshot| snapshot.control_id == device.control_id())
+                .is_some_and(|snapshot| snapshot.source_sync)
+        );
+
+        runtime
+            .set_device_channel_source(device.control_id(), Channel::B, "source-manual".to_owned())
+            .await
+            .unwrap();
+        assert!(Channel::ALL.iter().all(|channel| {
+            runtime
+                .device_source_bindings
+                .get(&source_binding(&device, *channel))
+                .is_some_and(|source| source == "source-manual")
+        }));
+
+        runtime
+            .set_device_channel_source_sync(device.control_id(), false)
+            .await
+            .unwrap();
+        runtime
+            .set_device_channel_source(
+                device.control_id(),
+                Channel::A,
+                "source-test-pattern".to_owned(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            runtime
+                .device_source_bindings
+                .get(&source_binding(&device, Channel::A))
+                .map(String::as_str),
+            Some("source-test-pattern")
+        );
+        assert_eq!(
+            runtime
+                .device_source_bindings
+                .get(&source_binding(&device, Channel::B))
+                .map(String::as_str),
+            Some("source-manual")
+        );
+    }
+
+    #[tokio::test]
+    async fn source_sync_with_ask_each_time_default_unassigns_both_channels() {
+        let (_hub, mut runtime) = create_hub("wss://example.test/v4".to_owned());
+        install_test_device(&mut runtime, "app-1", "slot-a", 10);
+        let device = runtime.selected_device.clone().unwrap();
+        runtime.set_default_source(None).unwrap();
+
+        runtime
+            .set_device_channel_source_sync(device.control_id(), true)
+            .await
+            .unwrap();
+
+        assert!(Channel::ALL.iter().all(|channel| {
+            !runtime
+                .device_source_bindings
+                .contains_key(&source_binding(&device, *channel))
+        }));
+        assert_eq!(runtime.start_output(), Err(HubError::NoSource));
     }
 
     #[test]
@@ -2673,14 +3077,14 @@ mod tests {
         assert_eq!(
             runtime
                 .device_source_bindings
-                .get(&first)
+                .get(&source_binding(&first, Channel::A))
                 .map(String::as_str),
             Some("source-test-pattern")
         );
         assert_eq!(
             runtime
                 .device_source_bindings
-                .get(&second)
+                .get(&source_binding(&second, Channel::B))
                 .map(String::as_str),
             Some("source-manual")
         );
@@ -2705,12 +3109,49 @@ mod tests {
         assert_eq!(
             runtime
                 .device_source_bindings
-                .get(&first)
+                .get(&source_binding(&first, Channel::A))
                 .map(String::as_str),
             Some("source-test-pattern")
         );
-        assert!(!runtime.device_source_bindings.contains_key(&second));
+        assert!(Channel::ALL.iter().all(|channel| {
+            !runtime
+                .device_source_bindings
+                .contains_key(&source_binding(&second, *channel))
+        }));
         assert_eq!(runtime.start_output(), Err(HubError::NoSource));
+    }
+
+    #[tokio::test]
+    async fn running_output_waits_for_both_sources_before_adding_a_new_device() {
+        let (_hub, mut runtime) = create_hub("wss://example.test/v4".to_owned());
+        install_test_device(&mut runtime, "app-1", "slot-a", 10);
+        runtime.start_output().unwrap();
+        runtime.set_default_source(None).unwrap();
+
+        install_test_device(&mut runtime, "app-2", "slot-b", 20);
+        let second = runtime
+            .devices
+            .keys()
+            .find(|device| device.client_id == "app-2")
+            .cloned()
+            .unwrap();
+        assert_eq!(runtime.output_devices.len(), 1);
+
+        runtime
+            .set_device_channel_source(
+                second.control_id(),
+                Channel::A,
+                "source-test-pattern".to_owned(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(runtime.output_devices.len(), 1);
+
+        runtime
+            .set_device_channel_source(second.control_id(), Channel::B, "source-manual".to_owned())
+            .await
+            .unwrap();
+        assert_eq!(runtime.output_devices.len(), 2);
     }
 
     #[tokio::test]
@@ -2745,7 +3186,7 @@ mod tests {
             .cloned()
             .unwrap();
         runtime
-            .set_device_source(second.control_id(), "source-manual".to_owned())
+            .set_device_channel_source(second.control_id(), Channel::B, "source-manual".to_owned())
             .await
             .unwrap();
         let test_calls = Arc::new(AtomicUsize::new(0));
@@ -2952,6 +3393,14 @@ mod tests {
         assert_eq!(request["data"]["d"], 100);
         assert_eq!(request["data"]["v"].as_array().unwrap().len(), 1);
         assert_eq!(request["data"]["ver"], 3);
+    }
+
+    #[test]
+    fn source_switch_clear_targets_only_one_channel() {
+        let request = clear_channel_request("slot-a", Channel::B);
+        assert_eq!(request["m"], "device.op.clear");
+        assert_eq!(request["data"]["s"], "slot-a");
+        assert_eq!(request["data"]["c"], 1);
     }
 
     #[test]
@@ -3256,6 +3705,7 @@ mod tests {
                         client_id: "app-1".to_owned(),
                         slot_id: "slot-a".to_owned(),
                     },
+                    channel: Channel::A,
                     generation: runtime.operation_generation,
                     sent_at: Instant::now(),
                 },
@@ -3284,6 +3734,7 @@ mod tests {
                     client_id: "app-1".to_owned(),
                     slot_id: "slot-a".to_owned(),
                 },
+                channel: Channel::A,
                 generation: runtime.operation_generation,
                 sent_at: Instant::now() - WAVE_OPERATION_RESPONSE_TIMEOUT,
             },
@@ -3311,6 +3762,7 @@ mod tests {
                     client_id: "app-1".to_owned(),
                     slot_id: "slot-a".to_owned(),
                 },
+                channel: Channel::A,
                 generation: runtime.operation_generation,
                 sent_at: Instant::now(),
             },
@@ -3533,6 +3985,7 @@ mod tests {
                     *clear_counts.entry(slot).or_default() += 1;
                     if clear_counts.get("slot-b").copied().unwrap_or(0) == 1
                         && clear_counts.get("slot-a").copied().unwrap_or(0) == 0
+                        && data["data"]["c"] == 0
                         && !sent_source_switch_signal
                     {
                         source_switch_sender.take().unwrap().send(()).unwrap();
@@ -3586,9 +4039,13 @@ mod tests {
             .unwrap()
             .control_id
             .clone();
-        hub.set_device_source(second_device.clone(), "source-manual".to_owned())
-            .await
-            .unwrap();
+        hub.set_device_channel_source(
+            second_device.clone(),
+            Channel::A,
+            "source-manual".to_owned(),
+        )
+        .await
+        .unwrap();
         tokio::time::timeout(Duration::from_secs(2), source_switch_received)
             .await
             .unwrap()
@@ -3599,7 +4056,7 @@ mod tests {
                 .devices
                 .iter()
                 .find(|device| device.control_id == second_device)
-                .and_then(|device| device.source_id.as_deref()),
+                .and_then(|device| device.source_id_a.as_deref()),
             Some("source-manual")
         );
         hub.select_device(second_device.clone()).await.unwrap();

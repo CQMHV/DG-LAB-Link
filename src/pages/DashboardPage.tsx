@@ -34,7 +34,15 @@ interface DashboardPageProps {
     onEmergencyStop: () => void;
     onOpenPairing: () => void;
     onSelectDevice: (deviceId: string) => void;
-    onSetDeviceSource: (deviceId: string, sourceId: string) => void;
+    onSetDeviceChannelSource: (
+        deviceId: string,
+        channel: HubChannel,
+        sourceId: string,
+    ) => void;
+    onSetDeviceChannelSourceSync: (
+        deviceId: string,
+        enabled: boolean,
+    ) => void;
     onStartOutput: () => void;
     onStopOutput: () => void;
 }
@@ -80,7 +88,8 @@ export const DashboardPage = ({
     onEmergencyStop,
     onOpenPairing,
     onSelectDevice,
-    onSetDeviceSource,
+    onSetDeviceChannelSource,
+    onSetDeviceChannelSourceSync,
     onStartOutput,
     onStopOutput,
 }: DashboardPageProps) => {
@@ -90,21 +99,24 @@ export const DashboardPage = ({
         ) ?? (detached ? null : snapshot.device);
     const isConnected = snapshot.connection.state === "connected";
     const isRunning = snapshot.output.state === "running";
-    const deviceSource = snapshot.sources.find(
-        (source) => source.id === device?.sourceId,
-    );
+    const deviceSources = {
+        a: snapshot.sources.find((source) => source.id === device?.sourceIdA),
+        b: snapshot.sources.find((source) => source.id === device?.sourceIdB),
+    };
     const assignedSourceIds = new Set(
         snapshot.devices
-            .map((candidate) => candidate.sourceId)
+            .flatMap((candidate) => [candidate.sourceIdA, candidate.sourceIdB])
             .filter((sourceId): sourceId is string => Boolean(sourceId)),
     );
-    const unassignedDeviceCount = snapshot.devices.filter(
-        (candidate) => !candidate.sourceId,
-    ).length;
+    const unassignedChannelCount = snapshot.devices.reduce(
+        (count, candidate) =>
+            count + Number(!candidate.sourceIdA) + Number(!candidate.sourceIdB),
+        0,
+    );
     const globalSourceLabel = snapshot.devices.length === 0
         ? "未分配"
-        : unassignedDeviceCount > 0
-          ? `部分未分配 · ${unassignedDeviceCount} 台`
+        : unassignedChannelCount > 0
+          ? `部分未分配 · ${unassignedChannelCount} 路`
           : assignedSourceIds.size === 1
           ? snapshot.sources.find(
                 (source) => source.id === [...assignedSourceIds][0],
@@ -139,13 +151,20 @@ export const DashboardPage = ({
             status: device?.channelBStatus ?? "disconnected",
         },
     } satisfies HubSnapshot["channels"];
-    const outputRoute = "A+B";
+    const outputRoute = "A / B 独立";
     const canOutput =
         isConnected &&
         Boolean(device) &&
         snapshot.devices.length > 0 &&
-        snapshot.devices.every((candidate) => Boolean(candidate.sourceId));
+        snapshot.devices.every(
+            (candidate) => Boolean(candidate.sourceIdA && candidate.sourceIdB),
+        );
     const busy = pendingAction !== null || emergencyPending;
+    const sourceBusy = Boolean(
+        device &&
+            (pendingAction?.startsWith(`source-${device.controlId}-`) ||
+                pendingAction === `source-sync-${device.controlId}`),
+    );
 
     return (
         <div className={`dashboard-page ${detached ? "dashboard-page-detached" : ""}`}>
@@ -271,35 +290,60 @@ export const DashboardPage = ({
                             <span>·</span>
                             <span>{device?.name ?? "等待设备"}</span>
                         </div>
-                        <label className="device-source-control">
+                        <div className="device-source-control">
                             <Waveform aria-hidden="true" size={17} weight="light" />
                             <span>输入源</span>
-                            <select
-                                aria-label={`选择 ${device?.name ?? "当前设备"} 的输入源`}
-                                disabled={
-                                    !device ||
-                                    pendingAction === `source-${device.controlId}`
-                                }
-                                onChange={(event) => {
-                                    if (device) {
-                                        onSetDeviceSource(
-                                            device.controlId,
-                                            event.currentTarget.value,
-                                        );
-                                    }
-                                }}
-                                value={deviceSource?.id ?? ""}
-                            >
-                                {!deviceSource && <option value="">未分配</option>}
-                                {snapshot.sources
-                                    .filter((source) => source.enabled)
-                                    .map((source) => (
-                                        <option key={source.id} value={source.id}>
-                                            {source.name}
-                                        </option>
-                                    ))}
-                            </select>
-                        </label>
+                            {(["a", "b"] as const).map((channel) => (
+                                <label key={channel}>
+                                    <b>{channel.toUpperCase()}</b>
+                                    <select
+                                        aria-label={`选择 ${device?.name ?? "当前设备"} ${channel.toUpperCase()} 通道的输入源`}
+                                        disabled={
+                                            !device ||
+                                            sourceBusy
+                                        }
+                                        onChange={(event) => {
+                                            if (device) {
+                                                onSetDeviceChannelSource(
+                                                    device.controlId,
+                                                    channel,
+                                                    event.currentTarget.value,
+                                                );
+                                            }
+                                        }}
+                                        value={deviceSources[channel]?.id ?? ""}
+                                    >
+                                        {!deviceSources[channel] && (
+                                            <option value="">未分配</option>
+                                        )}
+                                        {snapshot.sources
+                                            .filter((source) => source.enabled)
+                                            .map((source) => (
+                                                <option key={source.id} value={source.id}>
+                                                    {source.name}
+                                                </option>
+                                            ))}
+                                    </select>
+                                </label>
+                            ))}
+                            <label className="source-sync-toggle">
+                                <input
+                                    aria-label={`同步 ${device?.name ?? "当前设备"} 的 A/B 输入源`}
+                                    checked={device?.sourceSync ?? false}
+                                    disabled={!device || sourceBusy}
+                                    onChange={(event) => {
+                                        if (device) {
+                                            onSetDeviceChannelSourceSync(
+                                                device.controlId,
+                                                event.currentTarget.checked,
+                                            );
+                                        }
+                                    }}
+                                    type="checkbox"
+                                />
+                                <span>A/B 同步</span>
+                            </label>
+                        </div>
                         <div className="device-scope-meta">
                             {snapshot.syncAllDevices && (
                                 <span className="device-scope-effect">

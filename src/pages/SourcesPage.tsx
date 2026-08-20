@@ -27,15 +27,15 @@ export const SourcesPage = ({
     pendingAction,
     onSetDefaultSource,
 }: SourcesPageProps) => {
-    const assignedDeviceCount = snapshot.sources.reduce(
-        (total, source) => total + source.assignedDeviceCount,
+    const assignedChannelCount = snapshot.sources.reduce(
+        (total, source) => total + source.assignedChannelCount,
         0,
     );
 
     return (
         <div className="standard-page">
             <PageHeader
-                description="输入源通过 SourceFactory 注册表扩展；每台设备可在控制台标签中独立选择输入源，同一实例被多台设备使用时会保持同帧扇出。"
+                description="输入源通过 SourceFactory 注册表扩展；每台设备的 A、B 通道可在控制台标签中分别选择输入源，同一实例被多路使用时会保持同帧扇出。"
                 eyebrow="SOURCE REGISTRY"
                 title="输入源"
             />
@@ -48,9 +48,9 @@ export const SourcesPage = ({
                 </div>
                 <div>
                     <DeviceMobile aria-hidden="true" size={22} weight="light" />
-                    <span>设备绑定</span>
+                    <span>通道绑定</span>
                     <strong>
-                        {assignedDeviceCount} / {snapshot.devices.length}
+                        {assignedChannelCount} / {snapshot.devices.length * 2}
                     </strong>
                 </div>
                 <div className="source-default-control">
@@ -88,7 +88,7 @@ export const SourcesPage = ({
 
                     return (
                         <article
-                            className={`source-card ${source.assignedDeviceCount > 0 ? "source-card-active" : ""}`}
+                            className={`source-card ${source.assignedChannelCount > 0 ? "source-card-active" : ""}`}
                             key={source.id}
                         >
                             <div className="source-card-heading">
@@ -107,7 +107,7 @@ export const SourcesPage = ({
                                     className={`source-enabled ${source.enabled ? "enabled" : ""}`}
                                 >
                                     {snapshot.defaultSourceId === source.id
-                                        ? "默认"
+                                    ? "默认"
                                         : source.enabled
                                           ? "已启用"
                                           : "已停用"}
@@ -120,12 +120,12 @@ export const SourcesPage = ({
                                     <dd>{source.id}</dd>
                                 </div>
                                 <div>
-                                    <dt>分配设备</dt>
-                                    <dd>{source.assignedDeviceCount} 台</dd>
+                                    <dt>分配通道</dt>
+                                    <dd>{source.assignedChannelCount} 路</dd>
                                 </div>
                                 <div>
                                     <dt>目标</dt>
-                                    <dd>A+B 双通道</dd>
+                                    <dd>A 或 B 通道</dd>
                                 </div>
                             </dl>
                             <div className="source-assignment-note">
@@ -135,10 +135,10 @@ export const SourcesPage = ({
                                     <DeviceMobile aria-hidden="true" size={18} />
                                 )}
                                 {snapshot.defaultSourceId === source.id
-                                    ? "新接入设备将默认使用此输入源"
-                                    : source.assignedDeviceCount > 0
-                                      ? `正由 ${source.assignedDeviceCount} 台设备使用`
-                                      : "尚未分配；请在控制台设备标签中选择"}
+                                    ? "新接入设备的 A/B 将默认使用此输入源"
+                                    : source.assignedChannelCount > 0
+                                      ? `正由 ${source.assignedChannelCount} 路设备通道使用`
+                                      : "尚未分配；请在控制台设备标签中选择 A/B 来源"}
                             </div>
                         </article>
                     );

@@ -19,7 +19,8 @@ import {
     isBrowserDemo,
     selectDevice,
     setDefaultSource,
-    setDeviceSource,
+    setDeviceChannelSource,
+    setDeviceChannelSourceSync,
     setSyncAllDevices,
     startOutput,
     stopOutput,
@@ -223,9 +224,18 @@ export default function App() {
                                         selectDevice(deviceId),
                                     )
                                 }
-                                onSetDeviceSource={(deviceId, sourceId) =>
-                                    void runAction(`source-${deviceId}`, () =>
-                                        setDeviceSource(deviceId, sourceId),
+                                onSetDeviceChannelSource={(deviceId, channel, sourceId) =>
+                                    void runAction(`source-${deviceId}-${channel}`, () =>
+                                        setDeviceChannelSource(
+                                            deviceId,
+                                            channel,
+                                            sourceId,
+                                        ),
+                                    )
+                                }
+                                onSetDeviceChannelSourceSync={(deviceId, enabled) =>
+                                    void runAction(`source-sync-${deviceId}`, () =>
+                                        setDeviceChannelSourceSync(deviceId, enabled),
                                     )
                                 }
                                 onStartOutput={handleStartOutput}

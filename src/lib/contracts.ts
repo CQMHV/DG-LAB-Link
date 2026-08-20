@@ -37,7 +37,9 @@ export interface DeviceSnapshot {
     intensityB: number;
     intensityLimitA: number;
     intensityLimitB: number;
-    sourceId: string | null;
+    sourceIdA: string | null;
+    sourceIdB: string | null;
+    sourceSync: boolean;
     outputActive: boolean;
     channelAStatus: ChannelStatus;
     channelBStatus: ChannelStatus;
@@ -48,7 +50,7 @@ export interface SourceSnapshot {
     kind: string;
     name: string;
     enabled: boolean;
-    assignedDeviceCount: number;
+    assignedChannelCount: number;
 }
 
 export interface OutputSnapshot {

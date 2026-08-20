@@ -41,7 +41,9 @@ const createDefaultMockSnapshot = (): HubSnapshot => {
         intensityB: 11,
         intensityLimitA: 100,
         intensityLimitB: 100,
-        sourceId: "source-test-pattern",
+        sourceIdA: "source-test-pattern",
+        sourceIdB: "source-manual",
+        sourceSync: false,
         outputActive: false,
         channelAStatus: "ready" as const,
         channelBStatus: "ready" as const,
@@ -57,7 +59,9 @@ const createDefaultMockSnapshot = (): HubSnapshot => {
         intensityB: 7,
         intensityLimitA: 80,
         intensityLimitB: 80,
-        sourceId: "source-manual",
+        sourceIdA: "source-manual",
+        sourceIdB: "source-test-pattern",
+        sourceSync: false,
         outputActive: false,
         channelAStatus: "ready" as const,
         channelBStatus: "disabled" as const,
@@ -84,14 +88,14 @@ const createDefaultMockSnapshot = (): HubSnapshot => {
             kind: "builtin.test_pattern",
             name: "测试波形",
             enabled: true,
-            assignedDeviceCount: 1,
+            assignedChannelCount: 2,
         },
         {
             id: "source-manual",
             kind: "builtin.manual",
             name: "手动波形",
             enabled: true,
-            assignedDeviceCount: 1,
+            assignedChannelCount: 2,
         },
     ],
     defaultSourceId: "source-test-pattern",
@@ -168,6 +172,18 @@ const prependMockLog = (
     snapshot.logs = snapshot.logs.slice(0, 100);
 };
 
+const refreshMockSourceCounts = (snapshot: HubSnapshot): void => {
+    snapshot.sources.forEach((source) => {
+        source.assignedChannelCount = snapshot.devices.reduce(
+            (count, device) =>
+                count +
+                Number(device.sourceIdA === source.id) +
+                Number(device.sourceIdB === source.id),
+            0,
+        );
+    });
+};
+
 export const getHubSnapshot = async (): Promise<HubSnapshot> => {
     if (isTauriRuntime()) {
         return invoke<HubSnapshot>("get_hub_snapshot");
@@ -226,7 +242,7 @@ export const disconnectRelay = async (): Promise<void> => {
         snapshot.device = null;
         snapshot.devices = [];
         snapshot.sources.forEach((source) => {
-            source.assignedDeviceCount = 0;
+            source.assignedChannelCount = 0;
         });
         snapshot.selectedDeviceId = null;
         snapshot.outputDeviceCount = 0;
@@ -374,8 +390,12 @@ export const startOutput = async (): Promise<void> => {
         if (snapshot.connection.state !== "connected" || !snapshot.device) {
             throw new Error("设备尚未连接");
         }
-        if (snapshot.devices.some((device) => !device.sourceId)) {
-            throw new Error("请先为所有设备选择输入源");
+        if (
+            snapshot.devices.some(
+                (device) => !device.sourceIdA || !device.sourceIdB,
+            )
+        ) {
+            throw new Error("请先为所有设备的 A/B 通道选择输入源");
         }
         snapshot.output.state = "running";
         snapshot.outputDeviceCount = snapshot.devices.length;
@@ -444,12 +464,17 @@ export const emergencyStop = async (): Promise<void> => {
     });
 };
 
-export const setDeviceSource = async (
+export const setDeviceChannelSource = async (
     deviceId: string,
+    channel: HubChannel,
     sourceId: string,
 ): Promise<void> => {
     if (isTauriRuntime()) {
-        await invoke("set_device_source", { deviceId, sourceId });
+        await invoke("set_device_channel_source", {
+            deviceId,
+            channel,
+            sourceId,
+        });
         return;
     }
 
@@ -464,19 +489,69 @@ export const setDeviceSource = async (
         if (!target || !target.enabled) {
             throw new Error("输入源不可用");
         }
-        device.sourceId = sourceId;
-        if (snapshot.device?.controlId === deviceId) {
-            snapshot.device.sourceId = sourceId;
+        if (device.sourceSync) {
+            device.sourceIdA = sourceId;
+            device.sourceIdB = sourceId;
+        } else if (channel === "a") {
+            device.sourceIdA = sourceId;
+        } else {
+            device.sourceIdB = sourceId;
         }
-        snapshot.sources.forEach((source) => {
-            source.assignedDeviceCount = snapshot.devices.filter(
-                (candidate) => candidate.sourceId === source.id,
-            ).length;
-        });
+        if (snapshot.device?.controlId === deviceId) {
+            snapshot.device = { ...device };
+        }
+        refreshMockSourceCounts(snapshot);
         prependMockLog(
             snapshot,
             "info",
-            `${device.name} 已切换输入源：${target.name}`,
+            `${device.name} 的 ${device.sourceSync ? "A/B" : channel.toUpperCase()} 通道已切换输入源：${target.name}`,
+        );
+    });
+};
+
+export const setDeviceChannelSourceSync = async (
+    deviceId: string,
+    enabled: boolean,
+): Promise<void> => {
+    if (isTauriRuntime()) {
+        await invoke("set_device_channel_source_sync", { deviceId, enabled });
+        return;
+    }
+
+    updateMockSnapshot((snapshot) => {
+        const device = snapshot.devices.find(
+            (candidate) => candidate.controlId === deviceId,
+        );
+        if (!device) {
+            throw new Error("设备不存在或已断开");
+        }
+        if (device.sourceSync === enabled) {
+            return;
+        }
+        device.sourceSync = enabled;
+        if (enabled) {
+            device.sourceIdA = snapshot.defaultSourceId;
+            device.sourceIdB = snapshot.defaultSourceId;
+            if (!snapshot.defaultSourceId) {
+                device.outputActive = false;
+                snapshot.outputDeviceCount = snapshot.devices.filter(
+                    (candidate) => candidate.outputActive,
+                ).length;
+                if (snapshot.output.state === "running" && snapshot.outputDeviceCount === 0) {
+                    snapshot.output.state = "idle";
+                }
+            }
+        }
+        if (snapshot.device?.controlId === deviceId) {
+            snapshot.device = { ...device };
+        }
+        refreshMockSourceCounts(snapshot);
+        prependMockLog(
+            snapshot,
+            "info",
+            enabled
+                ? `${device.name} 已开启 A/B 输入源同步并重置为默认源`
+                : `${device.name} 已关闭 A/B 输入源同步`,
         );
     });
 };

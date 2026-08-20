@@ -447,42 +447,92 @@ describe("DG-LAB Link 前端", () => {
         });
     });
 
-    it("可以为每台设备独立选择输入源并显示全局混合状态", async () => {
+    it("可以为每台设备的 A/B 通道独立选择输入源", async () => {
         const user = userEvent.setup();
         render(<App />);
 
         expect(await screen.findByText("混合 · 2 种")).toBeTruthy();
-        const firstDeviceSource = screen.getByRole("combobox", {
-            name: "选择 郊狼 3.0 的输入源",
+        const firstDeviceSourceA = screen.getByRole("combobox", {
+            name: "选择 郊狼 3.0 A 通道的输入源",
         }) as HTMLSelectElement;
-        expect(firstDeviceSource.value).toBe("source-test-pattern");
-        await user.selectOptions(firstDeviceSource, "source-manual");
+        const firstDeviceSourceB = screen.getByRole("combobox", {
+            name: "选择 郊狼 3.0 B 通道的输入源",
+        }) as HTMLSelectElement;
+        expect(firstDeviceSourceA.value).toBe("source-test-pattern");
+        expect(firstDeviceSourceB.value).toBe("source-manual");
+        await user.selectOptions(firstDeviceSourceA, "source-manual");
 
         await waitFor(async () => {
             const snapshot = await getHubSnapshot();
-            expect(snapshot.devices[0].sourceId).toBe("source-manual");
-            expect(snapshot.devices[1].sourceId).toBe("source-manual");
+            expect(snapshot.devices[0].sourceIdA).toBe("source-manual");
+            expect(snapshot.devices[0].sourceIdB).toBe("source-manual");
+            expect(snapshot.devices[1].sourceIdA).toBe("source-manual");
+            expect(snapshot.devices[1].sourceIdB).toBe("source-test-pattern");
             expect(
                 snapshot.sources.find(
                     (source) => source.id === "source-manual",
-                )?.assignedDeviceCount,
-            ).toBe(2);
+                )?.assignedChannelCount,
+            ).toBe(3);
         });
-        expect(screen.queryByText("混合 · 2 种")).toBeNull();
+        expect(screen.getByText("混合 · 2 种")).toBeTruthy();
 
         await user.click(screen.getByRole("tab", { name: /郊狼 2\.0/ }));
-        const secondDeviceSource = screen.getByRole("combobox", {
-            name: "选择 郊狼 2.0 的输入源",
+        const secondDeviceSourceB = screen.getByRole("combobox", {
+            name: "选择 郊狼 2.0 B 通道的输入源",
         }) as HTMLSelectElement;
-        expect(secondDeviceSource.value).toBe("source-manual");
-        await user.selectOptions(secondDeviceSource, "source-test-pattern");
+        expect(secondDeviceSourceB.value).toBe("source-test-pattern");
+        await user.selectOptions(secondDeviceSourceB, "source-manual");
 
         await waitFor(async () => {
             const snapshot = await getHubSnapshot();
-            expect(snapshot.devices[0].sourceId).toBe("source-manual");
-            expect(snapshot.devices[1].sourceId).toBe("source-test-pattern");
+            expect(snapshot.devices[0].sourceIdA).toBe("source-manual");
+            expect(snapshot.devices[0].sourceIdB).toBe("source-manual");
+            expect(snapshot.devices[1].sourceIdA).toBe("source-manual");
+            expect(snapshot.devices[1].sourceIdB).toBe("source-manual");
         });
-        expect(screen.getByText("混合 · 2 种")).toBeTruthy();
+        expect(screen.queryByText("混合 · 2 种")).toBeNull();
+    });
+
+    it("可以按设备同步 A/B 输入源并在关闭后恢复独立选择", async () => {
+        const user = userEvent.setup();
+        render(<App />);
+
+        const sourceA = await screen.findByRole("combobox", {
+            name: "选择 郊狼 3.0 A 通道的输入源",
+        }) as HTMLSelectElement;
+        const sourceB = screen.getByRole("combobox", {
+            name: "选择 郊狼 3.0 B 通道的输入源",
+        }) as HTMLSelectElement;
+        const sync = screen.getByRole("checkbox", {
+            name: "同步 郊狼 3.0 的 A/B 输入源",
+        }) as HTMLInputElement;
+
+        expect(sync.checked).toBe(false);
+        expect(sourceA.value).toBe("source-test-pattern");
+        expect(sourceB.value).toBe("source-manual");
+        await user.click(sync);
+
+        await waitFor(async () => {
+            const snapshot = await getHubSnapshot();
+            expect(snapshot.devices[0].sourceSync).toBe(true);
+            expect(snapshot.devices[0].sourceIdA).toBe("source-test-pattern");
+            expect(snapshot.devices[0].sourceIdB).toBe("source-test-pattern");
+        });
+        await user.selectOptions(sourceB, "source-manual");
+        await waitFor(async () => {
+            const snapshot = await getHubSnapshot();
+            expect(snapshot.devices[0].sourceIdA).toBe("source-manual");
+            expect(snapshot.devices[0].sourceIdB).toBe("source-manual");
+        });
+
+        await user.click(sync);
+        await user.selectOptions(sourceA, "source-test-pattern");
+        await waitFor(async () => {
+            const snapshot = await getHubSnapshot();
+            expect(snapshot.devices[0].sourceSync).toBe(false);
+            expect(snapshot.devices[0].sourceIdA).toBe("source-test-pattern");
+            expect(snapshot.devices[0].sourceIdB).toBe("source-manual");
+        });
     });
 
     it("可以在输入源页面选择新设备的默认输入源", async () => {
@@ -499,17 +549,23 @@ describe("DG-LAB Link 前端", () => {
         await waitFor(async () => {
             const snapshot = await getHubSnapshot();
             expect(snapshot.defaultSourceId).toBe("source-manual");
-            expect(snapshot.devices[0].sourceId).toBe("source-test-pattern");
-            expect(snapshot.devices[1].sourceId).toBe("source-manual");
+            expect(snapshot.devices[0].sourceIdA).toBe("source-test-pattern");
+            expect(snapshot.devices[0].sourceIdB).toBe("source-manual");
+            expect(snapshot.devices[1].sourceIdA).toBe("source-manual");
+            expect(snapshot.devices[1].sourceIdB).toBe("source-test-pattern");
         });
-        expect(screen.getByText("新接入设备将默认使用此输入源")).toBeTruthy();
+        expect(
+            screen.getByText("新接入设备的 A/B 将默认使用此输入源"),
+        ).toBeTruthy();
 
         await user.selectOptions(defaultSource, "");
         await waitFor(async () => {
             const snapshot = await getHubSnapshot();
             expect(snapshot.defaultSourceId).toBeNull();
-            expect(snapshot.devices[0].sourceId).toBe("source-test-pattern");
-            expect(snapshot.devices[1].sourceId).toBe("source-manual");
+            expect(snapshot.devices[0].sourceIdA).toBe("source-test-pattern");
+            expect(snapshot.devices[0].sourceIdB).toBe("source-manual");
+            expect(snapshot.devices[1].sourceIdA).toBe("source-manual");
+            expect(snapshot.devices[1].sourceIdB).toBe("source-test-pattern");
         });
         expect(defaultSource.value).toBe("");
     });
