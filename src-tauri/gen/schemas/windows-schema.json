@@ -219,16 +219,16 @@
           "markdownDescription": "Enables the select_device command without any pre-configured scope."
         },
         {
-          "description": "Enables the set_active_source command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-set-active-source",
-          "markdownDescription": "Enables the set_active_source command without any pre-configured scope."
-        },
-        {
           "description": "Enables the set_channel_limit command without any pre-configured scope.",
           "type": "string",
           "const": "allow-set-channel-limit",
           "markdownDescription": "Enables the set_channel_limit command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_device_source command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-device-source",
+          "markdownDescription": "Enables the set_device_source command without any pre-configured scope."
         },
         {
           "description": "Enables the set_sync_all_devices command without any pre-configured scope.",
@@ -297,16 +297,16 @@
           "markdownDescription": "Denies the select_device command without any pre-configured scope."
         },
         {
-          "description": "Denies the set_active_source command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-set-active-source",
-          "markdownDescription": "Denies the set_active_source command without any pre-configured scope."
-        },
-        {
           "description": "Denies the set_channel_limit command without any pre-configured scope.",
           "type": "string",
           "const": "deny-set-channel-limit",
           "markdownDescription": "Denies the set_channel_limit command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_device_source command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-device-source",
+          "markdownDescription": "Denies the set_device_source command without any pre-configured scope."
         },
         {
           "description": "Denies the set_sync_all_devices command without any pre-configured scope.",

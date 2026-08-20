@@ -8,7 +8,7 @@ fn main() {
         "start_output",
         "stop_output",
         "emergency_stop",
-        "set_active_source",
+        "set_device_source",
         "select_device",
         "set_sync_all_devices",
         "set_channel_limit",

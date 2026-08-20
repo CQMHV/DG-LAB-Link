@@ -68,11 +68,14 @@ pub async fn emergency_stop(hub: State<'_, HubHandle>) -> Result<(), CommandErro
 }
 
 #[tauri::command]
-pub async fn set_active_source(
+pub async fn set_device_source(
     hub: State<'_, HubHandle>,
+    device_id: String,
     source_id: String,
 ) -> Result<(), CommandError> {
-    hub.set_active_source(source_id).await.map_err(Into::into)
+    hub.set_device_source(device_id, source_id)
+        .await
+        .map_err(Into::into)
 }
 
 #[tauri::command]

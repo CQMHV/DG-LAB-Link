@@ -41,6 +41,7 @@ const createDefaultMockSnapshot = (): HubSnapshot => {
         intensityB: 11,
         intensityLimitA: 100,
         intensityLimitB: 100,
+        sourceId: "source-test-pattern",
         outputActive: false,
         channelAStatus: "ready" as const,
         channelBStatus: "ready" as const,
@@ -56,6 +57,7 @@ const createDefaultMockSnapshot = (): HubSnapshot => {
         intensityB: 7,
         intensityLimitA: 80,
         intensityLimitB: 80,
+        sourceId: "source-manual",
         outputActive: false,
         channelAStatus: "ready" as const,
         channelBStatus: "disabled" as const,
@@ -82,17 +84,16 @@ const createDefaultMockSnapshot = (): HubSnapshot => {
             kind: "builtin.test_pattern",
             name: "测试波形",
             enabled: true,
-            active: true,
+            assignedDeviceCount: 1,
         },
         {
             id: "source-manual",
             kind: "builtin.manual",
             name: "手动波形",
             enabled: true,
-            active: false,
+            assignedDeviceCount: 1,
         },
     ],
-    activeSourceId: "source-test-pattern",
     output: {
         state: "idle",
         framesSent: 1284,
@@ -200,6 +201,7 @@ export const connectRelay = async (): Promise<void> => {
         snapshot.connection = defaults.connection;
         snapshot.device = defaults.device;
         snapshot.devices = defaults.devices;
+        snapshot.sources = defaults.sources;
         snapshot.selectedDeviceId = defaults.selectedDeviceId;
         snapshot.outputDeviceCount = 0;
         snapshot.channels.a.status = "ready";
@@ -222,6 +224,9 @@ export const disconnectRelay = async (): Promise<void> => {
         snapshot.connection.pairingUrl = null;
         snapshot.device = null;
         snapshot.devices = [];
+        snapshot.sources.forEach((source) => {
+            source.assignedDeviceCount = 0;
+        });
         snapshot.selectedDeviceId = null;
         snapshot.outputDeviceCount = 0;
         snapshot.output.state = "idle";
@@ -368,8 +373,8 @@ export const startOutput = async (): Promise<void> => {
         if (snapshot.connection.state !== "connected" || !snapshot.device) {
             throw new Error("设备尚未连接");
         }
-        if (!snapshot.activeSourceId) {
-            throw new Error("请先选择输入源");
+        if (snapshot.devices.some((device) => !device.sourceId)) {
+            throw new Error("请先为所有设备选择输入源");
         }
         snapshot.output.state = "running";
         snapshot.outputDeviceCount = snapshot.devices.length;
@@ -438,22 +443,40 @@ export const emergencyStop = async (): Promise<void> => {
     });
 };
 
-export const setActiveSource = async (sourceId: string): Promise<void> => {
+export const setDeviceSource = async (
+    deviceId: string,
+    sourceId: string,
+): Promise<void> => {
     if (isTauriRuntime()) {
-        await invoke("set_active_source", { sourceId });
+        await invoke("set_device_source", { deviceId, sourceId });
         return;
     }
 
     updateMockSnapshot((snapshot) => {
+        const device = snapshot.devices.find(
+            (candidate) => candidate.controlId === deviceId,
+        );
+        if (!device) {
+            throw new Error("设备不存在或已断开");
+        }
         const target = snapshot.sources.find((source) => source.id === sourceId);
         if (!target || !target.enabled) {
             throw new Error("输入源不可用");
         }
-        snapshot.activeSourceId = sourceId;
+        device.sourceId = sourceId;
+        if (snapshot.device?.controlId === deviceId) {
+            snapshot.device.sourceId = sourceId;
+        }
         snapshot.sources.forEach((source) => {
-            source.active = source.id === sourceId;
+            source.assignedDeviceCount = snapshot.devices.filter(
+                (candidate) => candidate.sourceId === source.id,
+            ).length;
         });
-        prependMockLog(snapshot, "info", `${target.name} 已设为当前输入源`);
+        prependMockLog(
+            snapshot,
+            "info",
+            `${device.name} 已切换输入源：${target.name}`,
+        );
     });
 };
 

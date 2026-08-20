@@ -1,4 +1,4 @@
-import { ArrowSquareOut, DeviceMobile } from "@phosphor-icons/react";
+import { ArrowSquareOut } from "@phosphor-icons/react";
 
 import type { DeviceSnapshot } from "../lib/contracts";
 
@@ -17,11 +17,7 @@ export const DeviceTabs = ({
     onSelect,
     pendingAction,
 }: DeviceTabsProps) => (
-    <section className="device-tabs-shell" aria-label="设备仪表盘">
-        <div className="device-tabs-heading">
-            <DeviceMobile aria-hidden="true" size={18} weight="light" />
-            <span>设备仪表盘</span>
-        </div>
+    <div className="device-tabs-shell">
         <div className="device-tabs" role="tablist" aria-label="已连接设备">
             {devices.length === 0 ? (
                 <span className="device-tabs-empty">连接设备后将在这里显示仪表盘</span>
@@ -40,6 +36,7 @@ export const DeviceTabs = ({
                                 disabled={pending}
                                 onClick={() => onSelect(device.controlId)}
                                 role="tab"
+                                aria-controls="active-device-workspace"
                                 type="button"
                             >
                                 <span
@@ -67,5 +64,5 @@ export const DeviceTabs = ({
                 })
             )}
         </div>
-    </section>
+    </div>
 );

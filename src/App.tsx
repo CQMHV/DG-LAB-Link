@@ -18,7 +18,7 @@ import {
     emergencyStop,
     isBrowserDemo,
     selectDevice,
-    setActiveSource,
+    setDeviceSource,
     setSyncAllDevices,
     startOutput,
     stopOutput,
@@ -216,11 +216,15 @@ export default function App() {
                                     )
                                 }
                                 onEmergencyStop={() => void runEmergencyStop()}
-                                onOpenDevices={() => setPage("devices")}
                                 onOpenPairing={() => setPairingOpen(true)}
                                 onSelectDevice={(deviceId) =>
                                     void runAction(`device-${deviceId}`, () =>
                                         selectDevice(deviceId),
+                                    )
+                                }
+                                onSetDeviceSource={(deviceId, sourceId) =>
+                                    void runAction(`source-${deviceId}`, () =>
+                                        setDeviceSource(deviceId, sourceId),
                                     )
                                 }
                                 onStartOutput={handleStartOutput}
@@ -232,15 +236,7 @@ export default function App() {
                             />
                         )}
                         {!windowContext.detached && page === "sources" && (
-                            <SourcesPage
-                                onSetActiveSource={(sourceId) =>
-                                    void runAction(`source-${sourceId}`, () =>
-                                        setActiveSource(sourceId),
-                                    )
-                                }
-                                pendingAction={pendingAction}
-                                snapshot={snapshot}
-                            />
+                            <SourcesPage snapshot={snapshot} />
                         )}
                         {!windowContext.detached && page === "devices" && (
                             <DevicesPage

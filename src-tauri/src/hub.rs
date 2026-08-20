@@ -93,6 +93,7 @@ pub struct DeviceSnapshot {
     pub intensity_b: u16,
     pub intensity_limit_a: u16,
     pub intensity_limit_b: u16,
+    pub source_id: Option<String>,
     pub output_active: bool,
     pub channel_a_status: ChannelStatus,
     pub channel_b_status: ChannelStatus,
@@ -105,7 +106,7 @@ pub struct SourceSnapshot {
     pub kind: String,
     pub name: String,
     pub enabled: bool,
-    pub active: bool,
+    pub assigned_device_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -158,7 +159,6 @@ pub struct HubSnapshot {
     pub sync_all_devices: bool,
     pub output_device_count: usize,
     pub sources: Vec<SourceSnapshot>,
-    pub active_source_id: Option<String>,
     pub output: OutputSnapshot,
     pub channels: ChannelsSnapshot,
     pub safety: SafetySnapshot,
@@ -167,7 +167,6 @@ pub struct HubSnapshot {
 
 impl HubSnapshot {
     fn initial(endpoint: String, sources: Vec<SourceSnapshot>) -> Self {
-        let active_source_id = sources.first().map(|source| source.id.clone());
         Self {
             revision: 0,
             connection: ConnectionSnapshot {
@@ -184,7 +183,6 @@ impl HubSnapshot {
             sync_all_devices: false,
             output_device_count: 0,
             sources,
-            active_source_id,
             output: OutputSnapshot {
                 state: OutputState::Idle,
                 frames_sent: 0,
@@ -285,7 +283,8 @@ enum HubCommand {
         safety_epoch: u64,
         reply: oneshot::Sender<Result<(), HubError>>,
     },
-    SetActiveSource {
+    SetDeviceSource {
+        device_id: String,
         source_id: String,
         reply: oneshot::Sender<Result<(), HubError>>,
     },
@@ -387,10 +386,18 @@ impl HubHandle {
         self.safety_request(HubSafetyCommand::EmergencyStop).await
     }
 
-    pub async fn set_active_source(&self, source_id: String) -> Result<(), HubError> {
+    pub async fn set_device_source(
+        &self,
+        device_id: String,
+        source_id: String,
+    ) -> Result<(), HubError> {
         let (reply, response) = oneshot::channel();
         self.commands
-            .send(HubCommand::SetActiveSource { source_id, reply })
+            .send(HubCommand::SetDeviceSource {
+                device_id,
+                source_id,
+                reply,
+            })
             .await
             .map_err(|_| HubError::Stopped)?;
         response.await.map_err(|_| HubError::Stopped)?
@@ -538,6 +545,8 @@ pub struct HubRuntime {
     shutdown: CancellationToken,
     snapshot: HubSnapshot,
     sources: BTreeMap<String, SourceRuntime>,
+    default_source_id: Option<String>,
+    device_source_bindings: BTreeMap<DeviceKey, String>,
     relay: Option<RelayClientHandle>,
     apps: BTreeSet<String>,
     devices: BTreeMap<DeviceKey, Value>,
@@ -576,12 +585,13 @@ pub fn create_hub(endpoint: String) -> (HubHandle, HubRuntime) {
             kind: descriptor.kind.to_owned(),
             name: descriptor.display_name.to_owned(),
             enabled: true,
-            active: sources.is_empty(),
+            assigned_device_count: 0,
         };
         source_snapshots.push(snapshot.clone());
         sources.insert(id, SourceRuntime { snapshot, source });
     }
 
+    let default_source_id = source_snapshots.first().map(|source| source.id.clone());
     let snapshot = HubSnapshot::initial(endpoint, source_snapshots);
     let (snapshot_sender, snapshot_receiver) = watch::channel(snapshot.clone());
     let (command_sender, command_receiver) = mpsc::channel(HUB_COMMAND_CAPACITY);
@@ -606,6 +616,8 @@ pub fn create_hub(endpoint: String) -> (HubHandle, HubRuntime) {
             shutdown,
             snapshot,
             sources,
+            default_source_id,
+            device_source_bindings: BTreeMap::new(),
             relay: None,
             apps: BTreeSet::new(),
             devices: BTreeMap::new(),
@@ -803,8 +815,12 @@ impl HubRuntime {
                 };
                 let _ = reply.send(result);
             }
-            HubCommand::SetActiveSource { source_id, reply } => {
-                let result = self.set_active_source(source_id).await;
+            HubCommand::SetDeviceSource {
+                device_id,
+                source_id,
+                reply,
+            } => {
+                let result = self.set_device_source(device_id, source_id).await;
                 let _ = reply.send(result);
             }
             HubCommand::SelectDevice { device_id, reply } => {
@@ -1110,6 +1126,8 @@ impl HubRuntime {
             .collect::<BTreeSet<_>>();
         self.devices
             .retain(|key, _| key.client_id.as_str() != client_id);
+        self.device_source_bindings
+            .retain(|key, _| key.client_id.as_str() != client_id);
         for device in devices {
             if let Some(slot_id) = device.get("slotId").and_then(Value::as_str) {
                 self.devices.insert(
@@ -1222,6 +1240,14 @@ impl HubRuntime {
         }
         self.intensity_lock_targets
             .retain(|device, _| self.devices.contains_key(device));
+        if let Some(default_source_id) = &self.default_source_id {
+            for device in self.devices.keys() {
+                self.device_source_bindings
+                    .entry(device.clone())
+                    .or_insert_with(|| default_source_id.clone());
+            }
+        }
+        self.refresh_source_snapshots();
         if self.snapshot.output.state == OutputState::Running {
             for device in self.devices.keys() {
                 if self.output_devices.len() >= MAX_OUTPUT_DEVICES {
@@ -1261,6 +1287,7 @@ impl HubRuntime {
             .iter()
             .filter_map(|(key, value)| {
                 let mut snapshot = device_snapshot_from_value(key, value)?;
+                snapshot.source_id = self.device_source_bindings.get(key).cloned();
                 if !allow_app_control && let Some(lock) = self.intensity_lock_targets.get(key) {
                     snapshot.intensity_a = lock.a;
                     snapshot.intensity_b = lock.b;
@@ -1304,6 +1331,26 @@ impl HubRuntime {
         self.refresh_channel_statuses();
     }
 
+    fn refresh_source_snapshots(&mut self) {
+        let mut assigned_counts = HashMap::<&str, usize>::new();
+        for (device, source_id) in &self.device_source_bindings {
+            if self.devices.contains_key(device) {
+                *assigned_counts.entry(source_id.as_str()).or_default() += 1;
+            }
+        }
+        for source in self.sources.values_mut() {
+            source.snapshot.assigned_device_count = assigned_counts
+                .get(source.snapshot.id.as_str())
+                .copied()
+                .unwrap_or(0);
+        }
+        self.snapshot.sources = self
+            .sources
+            .values()
+            .map(|source| source.snapshot.clone())
+            .collect();
+    }
+
     fn refresh_channel_statuses(&mut self) {
         if self.snapshot.device.is_none() {
             self.snapshot.channels.a.status = ChannelStatus::Disconnected;
@@ -1331,13 +1378,15 @@ impl HubRuntime {
         if self.devices.len() > MAX_OUTPUT_DEVICES {
             return Err(HubError::TooManyDevices);
         }
-        let source_id = self
-            .snapshot
-            .active_source_id
-            .as_ref()
-            .ok_or(HubError::NoSource)?;
-        if !self.sources.contains_key(source_id) {
-            return Err(HubError::NoSource);
+        for device in self.devices.keys() {
+            let source_id = self
+                .device_source_bindings
+                .get(device)
+                .ok_or(HubError::NoSource)?;
+            let source = self.sources.get(source_id).ok_or(HubError::NoSource)?;
+            if !source.snapshot.enabled {
+                return Err(HubError::SourceUnavailable(source_id.clone()));
+            }
         }
         self.snapshot.output.state = OutputState::Running;
         self.snapshot.output.last_error = None;
@@ -1391,50 +1440,62 @@ impl HubRuntime {
         {
             return;
         }
-        let Some(source_id) = self.snapshot.active_source_id.clone() else {
-            self.fail_output("活动输入源已丢失").await;
-            return;
-        };
-        let frame = match self.sources.get_mut(&source_id) {
-            Some(source) if source.snapshot.enabled => match source.source.next_frame() {
-                Ok(frame) => frame,
-                Err(error) => {
-                    self.fail_output(format!("输入源运行失败：{error}")).await;
-                    return;
-                }
-            },
-            _ => {
-                self.fail_output("活动输入源不可用").await;
-                return;
-            }
-        };
         let devices = self.output_devices.iter().cloned().collect::<Vec<_>>();
         if devices.is_empty() {
             self.fail_output("所有输出设备均已断开").await;
             return;
         }
-        let frame_hex = encode_wave_frame(frame);
-        let mut sent = 0_u64;
+        let mut devices_by_source = BTreeMap::<String, Vec<DeviceKey>>::new();
         for device in devices {
-            for channel in Channel::ALL {
-                let request_id = Uuid::new_v4().to_string();
-                let request =
-                    append_pulse_request(&request_id, &device.slot_id, channel, &frame_hex);
-                match self.send_operation(&device.client_id, request) {
-                    Ok(()) => {
-                        self.pending_wave_operations.insert(
-                            request_id,
-                            PendingWaveOperation {
-                                device: device.clone(),
-                                generation: self.operation_generation,
-                                sent_at: Instant::now(),
-                            },
-                        );
-                        sent += 1;
-                    }
-                    Err(error) => {
-                        self.fail_output(error.to_string()).await;
-                        return;
+            let Some(source_id) = self.device_source_bindings.get(&device).cloned() else {
+                self.fail_output(format!("设备 {} 尚未分配输入源", device.control_id()))
+                    .await;
+                return;
+            };
+            devices_by_source.entry(source_id).or_default().push(device);
+        }
+        let mut frames_by_source = BTreeMap::<String, String>::new();
+        for source_id in devices_by_source.keys() {
+            let frame_result = match self.sources.get_mut(source_id) {
+                Some(source) if source.snapshot.enabled => source
+                    .source
+                    .next_frame()
+                    .map_err(|error| format!("输入源 {} 运行失败：{error}", source.snapshot.name)),
+                _ => Err(format!("输入源 {source_id} 不可用")),
+            };
+            let frame = match frame_result {
+                Ok(frame) => frame,
+                Err(message) => {
+                    self.fail_output(message).await;
+                    return;
+                }
+            };
+            frames_by_source.insert(source_id.clone(), encode_wave_frame(frame));
+        }
+        let mut sent = 0_u64;
+        for (source_id, devices) in devices_by_source {
+            let frame_hex = &frames_by_source[&source_id];
+            for device in devices {
+                for channel in Channel::ALL {
+                    let request_id = Uuid::new_v4().to_string();
+                    let request =
+                        append_pulse_request(&request_id, &device.slot_id, channel, frame_hex);
+                    match self.send_operation(&device.client_id, request) {
+                        Ok(()) => {
+                            self.pending_wave_operations.insert(
+                                request_id,
+                                PendingWaveOperation {
+                                    device: device.clone(),
+                                    generation: self.operation_generation,
+                                    sent_at: Instant::now(),
+                                },
+                            );
+                            sent += 1;
+                        }
+                        Err(error) => {
+                            self.fail_output(error.to_string()).await;
+                            return;
+                        }
                     }
                 }
             }
@@ -1640,7 +1701,17 @@ impl HubRuntime {
         }
     }
 
-    async fn set_active_source(&mut self, source_id: String) -> Result<(), HubError> {
+    async fn set_device_source(
+        &mut self,
+        device_id: String,
+        source_id: String,
+    ) -> Result<(), HubError> {
+        let device = self
+            .devices
+            .keys()
+            .find(|device| device.control_id() == device_id)
+            .cloned()
+            .ok_or(HubError::DeviceUnavailable)?;
         let source = self
             .sources
             .get(&source_id)
@@ -1648,34 +1719,23 @@ impl HubRuntime {
         if !source.snapshot.enabled {
             return Err(HubError::SourceUnavailable(source_id));
         }
-        if self.snapshot.active_source_id.as_deref() == Some(source_id.as_str()) {
+        if self.device_source_bindings.get(&device) == Some(&source_id) {
             return Ok(());
         }
-        if self.snapshot.output.state == OutputState::Running {
-            self.snapshot.output.state = OutputState::Idle;
-            self.output_started_at = None;
-            if let Err(error) = self.send_stop_operations(false).await {
-                self.snapshot.output.state = OutputState::Error;
-                self.snapshot.output.last_error = Some(error.to_string());
-                self.refresh_channel_statuses();
-                self.log(
-                    LogLevel::Error,
-                    format!("切换输入源前清空设备任务失败：{error}"),
-                );
-                self.publish();
-                return Err(error);
-            }
+        if self.snapshot.output.state == OutputState::Running
+            && self.output_devices.contains(&device)
+        {
+            self.send_safety_requests(&device, vec![clear_request(&device.slot_id)])
+                .await?;
         }
-        self.snapshot.active_source_id = Some(source_id.clone());
-        for (id, source) in &mut self.sources {
-            source.snapshot.active = id == &source_id;
-        }
-        self.snapshot.sources = self
-            .sources
-            .values()
-            .map(|source| source.snapshot.clone())
-            .collect();
-        self.log(LogLevel::Info, format!("已切换活动输入源：{source_id}"));
+        self.device_source_bindings
+            .insert(device.clone(), source_id.clone());
+        self.refresh_source_snapshots();
+        self.refresh_selected_device_snapshot();
+        self.log(
+            LogLevel::Info,
+            format!("设备 {} 已切换输入源：{source_id}", device.control_id()),
+        );
         self.publish();
         Ok(())
     }
@@ -2149,6 +2209,7 @@ impl HubRuntime {
         self.safety_epoch.fetch_add(1, Ordering::AcqRel);
         self.apps.clear();
         self.devices.clear();
+        self.device_source_bindings.clear();
         self.selected_device = None;
         self.output_devices.clear();
         self.intensity_lock_targets.clear();
@@ -2160,6 +2221,7 @@ impl HubRuntime {
         self.snapshot.connection.app_count = 0;
         self.snapshot.device = None;
         self.snapshot.devices.clear();
+        self.refresh_source_snapshots();
         self.snapshot.selected_device_id = None;
         self.snapshot.output_device_count = 0;
         self.snapshot.channels.a.intensity = 0;
@@ -2341,6 +2403,7 @@ fn device_snapshot_from_value(key: &DeviceKey, device: &Value) -> Option<DeviceS
             .and_then(Value::as_u64)
             .and_then(|value| u16::try_from(value).ok())
             .unwrap_or(200),
+        source_id: None,
         output_active: false,
         channel_a_status: protocol_channel_status(
             object_u16(props, "channelAStatus"),
@@ -2456,6 +2519,7 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
 mod tests {
     use super::*;
     use futures_util::{SinkExt, StreamExt};
+    use std::sync::atomic::AtomicUsize;
     use tokio::net::TcpListener;
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 
@@ -2463,16 +2527,132 @@ mod tests {
     fn snapshot_contract_is_camel_case_and_matches_frontend_values() {
         let (hub, _runtime) = create_hub("wss://example.test/v4".to_owned());
         let value = serde_json::to_value(hub.snapshot()).unwrap();
-        assert!(value.get("activeSourceId").is_some());
+        assert!(value.get("activeSourceId").is_none());
         assert!(value["connection"].get("controllerId").is_some());
         assert_eq!(value["connection"]["state"], "disconnected");
         assert_eq!(value["output"]["state"], "idle");
         assert_eq!(value["channels"]["a"]["status"], "disconnected");
         assert_eq!(value["sources"][0]["kind"], "builtin.test_pattern");
+        assert!(value["sources"][0].get("assignedDeviceCount").is_some());
         assert!(value.get("devices").is_some());
         assert!(value.get("selectedDeviceId").is_some());
         assert_eq!(value["syncAllDevices"], false);
         assert_eq!(value["outputDeviceCount"], 0);
+    }
+
+    struct CountingSource {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl WaveSource for CountingSource {
+        fn next_frame(&mut self) -> Result<WaveFrame, crate::sources::SourceError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(WaveFrame::silent())
+        }
+    }
+
+    #[tokio::test]
+    async fn each_device_can_bind_a_different_source() {
+        let (_hub, mut runtime) = create_hub("wss://example.test/v4".to_owned());
+        install_test_device(&mut runtime, "app-1", "slot-a", 10);
+        install_test_device(&mut runtime, "app-2", "slot-b", 20);
+        let second = runtime
+            .devices
+            .keys()
+            .find(|device| device.client_id == "app-2")
+            .cloned()
+            .unwrap();
+
+        assert_eq!(
+            runtime
+                .device_source_bindings
+                .get(&second)
+                .map(String::as_str),
+            Some("source-test-pattern")
+        );
+        runtime
+            .set_device_source(second.control_id(), "source-manual".to_owned())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            runtime
+                .device_source_bindings
+                .get(&second)
+                .map(String::as_str),
+            Some("source-manual")
+        );
+        assert_eq!(
+            runtime
+                .snapshot
+                .devices
+                .iter()
+                .find(|device| device.control_id == second.control_id())
+                .and_then(|device| device.source_id.as_deref()),
+            Some("source-manual")
+        );
+        assert!(
+            runtime
+                .snapshot
+                .sources
+                .iter()
+                .all(|source| { source.assigned_device_count == 1 })
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_source_is_sampled_once_per_tick_and_fanned_out() {
+        let (_hub, mut runtime) = create_hub("wss://example.test/v4".to_owned());
+        install_test_device(&mut runtime, "app-1", "slot-a", 10);
+        install_test_device(&mut runtime, "app-2", "slot-b", 20);
+        let calls = Arc::new(AtomicUsize::new(0));
+        runtime
+            .sources
+            .get_mut("source-test-pattern")
+            .unwrap()
+            .source = Box::new(CountingSource {
+            calls: Arc::clone(&calls),
+        });
+
+        runtime.start_output().unwrap();
+        runtime.output_tick().await;
+
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn different_sources_are_each_sampled_once_per_tick() {
+        let (_hub, mut runtime) = create_hub("wss://example.test/v4".to_owned());
+        install_test_device(&mut runtime, "app-1", "slot-a", 10);
+        install_test_device(&mut runtime, "app-2", "slot-b", 20);
+        let second = runtime
+            .devices
+            .keys()
+            .find(|device| device.client_id == "app-2")
+            .cloned()
+            .unwrap();
+        runtime
+            .set_device_source(second.control_id(), "source-manual".to_owned())
+            .await
+            .unwrap();
+        let test_calls = Arc::new(AtomicUsize::new(0));
+        let manual_calls = Arc::new(AtomicUsize::new(0));
+        runtime
+            .sources
+            .get_mut("source-test-pattern")
+            .unwrap()
+            .source = Box::new(CountingSource {
+            calls: Arc::clone(&test_calls),
+        });
+        runtime.sources.get_mut("source-manual").unwrap().source = Box::new(CountingSource {
+            calls: Arc::clone(&manual_calls),
+        });
+
+        runtime.start_output().unwrap();
+        runtime.output_tick().await;
+
+        assert_eq!(test_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(manual_calls.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -3130,6 +3310,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("ws://{}/v4", listener.local_addr().unwrap());
         let (pulse_sender, pulse_received) = oneshot::channel();
+        let (source_switch_sender, source_switch_received) = oneshot::channel();
         let (clear_sender, clear_received) = oneshot::channel();
         let (emergency_sender, emergency_received) = oneshot::channel();
 
@@ -3203,8 +3384,10 @@ mod tests {
             let mut clear_counts = BTreeMap::<String, usize>::new();
             let mut zero_targets = BTreeSet::new();
             let mut sent_pulse_signal = false;
+            let mut sent_source_switch_signal = false;
             let mut sent_clear_signal = false;
             let mut pulse_sender = Some(pulse_sender);
+            let mut source_switch_sender = Some(source_switch_sender);
             let mut clear_sender = Some(clear_sender);
             let mut emergency_sender = Some(emergency_sender);
             while let Some(message) = socket.next().await {
@@ -3235,6 +3418,13 @@ mod tests {
                 if data["m"] == "device.op.clear" {
                     let slot = data["data"]["s"].as_str().unwrap().to_owned();
                     *clear_counts.entry(slot).or_default() += 1;
+                    if clear_counts.get("slot-b").copied().unwrap_or(0) == 1
+                        && clear_counts.get("slot-a").copied().unwrap_or(0) == 0
+                        && !sent_source_switch_signal
+                    {
+                        source_switch_sender.take().unwrap().send(()).unwrap();
+                        sent_source_switch_signal = true;
+                    }
                     if clear_counts.get("slot-a").copied().unwrap_or(0) >= 1
                         && clear_counts.get("slot-b").copied().unwrap_or(0) >= 1
                         && !sent_clear_signal
@@ -3283,6 +3473,22 @@ mod tests {
             .unwrap()
             .control_id
             .clone();
+        hub.set_device_source(second_device.clone(), "source-manual".to_owned())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), source_switch_received)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(hub.snapshot().output.state, OutputState::Running);
+        assert_eq!(
+            hub.snapshot()
+                .devices
+                .iter()
+                .find(|device| device.control_id == second_device)
+                .and_then(|device| device.source_id.as_deref()),
+            Some("source-manual")
+        );
         hub.select_device(second_device.clone()).await.unwrap();
         assert_eq!(
             hub.snapshot().selected_device_id.as_deref(),
@@ -3364,6 +3570,7 @@ mod tests {
         }
         runtime.snapshot.connection.state = ConnectionState::Connected;
         runtime.snapshot.connection.app_count = runtime.apps.len();
+        runtime.reconcile_connected_devices();
         runtime.refresh_selected_device_snapshot();
     }
 

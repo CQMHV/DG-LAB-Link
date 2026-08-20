@@ -62,7 +62,7 @@ describe("DG-LAB Link 前端", () => {
         const user = userEvent.setup();
         render(<App />);
 
-        await screen.findByText("当前会话");
+        await screen.findByRole("region", { name: "全局控制" });
         await user.click(screen.getByRole("button", { name: "输入源" }));
         expect(
             screen.getByRole("heading", { level: 1, name: "输入源" }),
@@ -84,7 +84,9 @@ describe("DG-LAB Link 前端", () => {
         ).toBeTruthy();
 
         await user.click(screen.getByRole("button", { name: "控制台" }));
-        expect(screen.getByText("当前会话")).toBeTruthy();
+        expect(
+            screen.getByRole("region", { name: "全局控制" }),
+        ).toBeTruthy();
     });
 
     it("可以开始并停止波形输出", async () => {
@@ -131,7 +133,7 @@ describe("DG-LAB Link 前端", () => {
         await user.click(emergencyButton);
 
         await waitFor(() => {
-            expect(screen.getByText("已停止")).toBeTruthy();
+            expect(screen.getAllByText("已停止").length).toBeGreaterThan(0);
         });
 
         await act(async () => {
@@ -146,7 +148,7 @@ describe("DG-LAB Link 前端", () => {
     it("展示后端快照中的输出错误", async () => {
         const initial = await getHubSnapshot();
         render(<App />);
-        await screen.findByText("当前会话");
+        await screen.findByRole("region", { name: "全局控制" });
 
         act(() => {
             __emitMockSnapshot({
@@ -165,7 +167,7 @@ describe("DG-LAB Link 前端", () => {
     it("展示后端快照中的连接错误", async () => {
         const initial = await getHubSnapshot();
         render(<App />);
-        await screen.findByText("当前会话");
+        await screen.findByRole("region", { name: "全局控制" });
 
         act(() => {
             __emitMockSnapshot({
@@ -184,7 +186,7 @@ describe("DG-LAB Link 前端", () => {
     it("被控端关闭通道时仍允许发送控制信息", async () => {
         const initial = await getHubSnapshot();
         render(<App />);
-        await screen.findByText("当前会话");
+        await screen.findByRole("region", { name: "全局控制" });
 
         act(() => {
             __emitMockSnapshot({
@@ -207,11 +209,9 @@ describe("DG-LAB Link 前端", () => {
 
         expect(await screen.findByText("被控端关闭")).toBeTruthy();
         expect(
-            await screen.findByText(
-                "被控端 A 通道已关闭；仍接收控制信息，但该通道不会实际输出",
-            ),
+            await screen.findByText("A 通道已关闭，仍接收控制"),
         ).toBeTruthy();
-        expect(screen.getByText("当前调节：郊狼 3.0")).toBeTruthy();
+        expect(screen.getByText("此标签控制")).toBeTruthy();
         expect(
             (
                 screen.getByRole("button", { name: "开始输出" }) as HTMLButtonElement
@@ -245,9 +245,7 @@ describe("DG-LAB Link 前端", () => {
             });
         });
         expect(
-            await screen.findByText(
-                "被控端 A、B 通道均已关闭；仍接收控制信息，但当前不会实际输出",
-            ),
+            await screen.findByText("A、B 通道已关闭，仍接收控制"),
         ).toBeTruthy();
         expect(
             (
@@ -301,14 +299,22 @@ describe("DG-LAB Link 前端", () => {
         expect(document.activeElement).toBe(openButton);
     });
 
-    it("已有 APP 或设备时通过切换设备进入设备页且不显示刷新按钮", async () => {
+    it("明确区分全局控制、当前设备和全部设备输出", async () => {
         const user = userEvent.setup();
         render(<App />);
 
-        await user.click(
-            await screen.findByRole("button", { name: "切换设备" }),
-        );
+        expect(
+            await screen.findByRole("region", { name: "全局控制" }),
+        ).toBeTruthy();
+        expect(
+            screen.getByRole("region", { name: "当前设备仪表盘" }),
+        ).toBeTruthy();
+        expect(screen.getByText("此标签控制")).toBeTruthy();
+        expect(screen.getByText("全部设备输出")).toBeTruthy();
+        expect(screen.getByText("应用到全部 2 台在线设备")).toBeTruthy();
+        expect(screen.queryByRole("button", { name: "切换设备" })).toBeNull();
 
+        await user.click(screen.getByRole("button", { name: "设备" }));
         expect(
             screen.getByRole("heading", { level: 1, name: "设备" }),
         ).toBeTruthy();
@@ -338,7 +344,10 @@ describe("DG-LAB Link 前端", () => {
         });
 
         await user.click(screen.getByRole("button", { name: "控制台" }));
-        expect(screen.getByText("同步调节：全部 2 台")).toBeTruthy();
+        expect(screen.getByText("此标签显示")).toBeTruthy();
+        expect(
+            screen.getByText("强度调节同步到全部设备"),
+        ).toBeTruthy();
         await user.click(
             screen.getByRole("button", { name: "提高 A 通道强度" }),
         );
@@ -421,7 +430,7 @@ describe("DG-LAB Link 前端", () => {
         await user.click(secondTab);
 
         await waitFor(() => {
-            expect(screen.getByText("当前调节：郊狼 2.0")).toBeTruthy();
+            expect(screen.getByText("此标签控制")).toBeTruthy();
             expect(
                 (screen.getByTestId("channel-a-intensity") as HTMLInputElement)
                     .value,
@@ -436,6 +445,44 @@ describe("DG-LAB Link 前端", () => {
             expect(snapshot.devices[0].intensityA).toBe(5);
             expect(snapshot.devices[1].intensityA).toBe(4);
         });
+    });
+
+    it("可以为每台设备独立选择输入源并显示全局混合状态", async () => {
+        const user = userEvent.setup();
+        render(<App />);
+
+        expect(await screen.findByText("混合 · 2 种")).toBeTruthy();
+        const firstDeviceSource = screen.getByRole("combobox", {
+            name: "选择 郊狼 3.0 的输入源",
+        }) as HTMLSelectElement;
+        expect(firstDeviceSource.value).toBe("source-test-pattern");
+        await user.selectOptions(firstDeviceSource, "source-manual");
+
+        await waitFor(async () => {
+            const snapshot = await getHubSnapshot();
+            expect(snapshot.devices[0].sourceId).toBe("source-manual");
+            expect(snapshot.devices[1].sourceId).toBe("source-manual");
+            expect(
+                snapshot.sources.find(
+                    (source) => source.id === "source-manual",
+                )?.assignedDeviceCount,
+            ).toBe(2);
+        });
+        expect(screen.queryByText("混合 · 2 种")).toBeNull();
+
+        await user.click(screen.getByRole("tab", { name: /郊狼 2\.0/ }));
+        const secondDeviceSource = screen.getByRole("combobox", {
+            name: "选择 郊狼 2.0 的输入源",
+        }) as HTMLSelectElement;
+        expect(secondDeviceSource.value).toBe("source-manual");
+        await user.selectOptions(secondDeviceSource, "source-test-pattern");
+
+        await waitFor(async () => {
+            const snapshot = await getHubSnapshot();
+            expect(snapshot.devices[0].sourceId).toBe("source-manual");
+            expect(snapshot.devices[1].sourceId).toBe("source-test-pattern");
+        });
+        expect(screen.getByText("混合 · 2 种")).toBeTruthy();
     });
 
     it("可以把设备仪表盘拉出为独立窗口", async () => {
