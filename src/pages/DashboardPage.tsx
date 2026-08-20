@@ -15,7 +15,6 @@ import {
 
 import { ChannelControl } from "../components/ChannelControl";
 import { DeviceTabs } from "../components/DeviceTabs";
-import { WaveformPreview } from "../components/WaveformPreview";
 import type {
     DeviceSnapshot,
     HubChannel,
@@ -391,7 +390,6 @@ export const DashboardPage = ({
                             }
                             snapshot={deviceChannels.a}
                         />
-                        <WaveformPreview outputState={snapshot.output.state} />
                         <ChannelControl
                             channel="b"
                             disabled={!isConnected || !device}

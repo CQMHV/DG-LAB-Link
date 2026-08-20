@@ -771,7 +771,7 @@ code {
     display: grid;
     min-width: 0;
     min-height: 0;
-    grid-template-columns: minmax(220px, 1fr) minmax(300px, 1.28fr) minmax(220px, 1fr);
+    grid-template-columns: repeat(2, minmax(220px, 1fr));
     align-items: stretch;
     overflow: hidden;
 }
@@ -943,48 +943,6 @@ code {
     background: #1c1e1c;
     border-color: var(--border-strong);
     transform: translateY(-1px);
-}
-
-.waveform-panel {
-    display: grid;
-    min-width: 0;
-    min-height: 0;
-    grid-template-rows: 42px minmax(130px, 1fr) 42px;
-    align-items: center;
-    padding: 14px 8px 18px;
-}
-
-.waveform-security,
-.preview-state {
-    display: inline-flex;
-    gap: 8px;
-    align-items: center;
-    justify-self: center;
-    color: #a9aaa5;
-    font-size: 13px;
-}
-
-.security-icon {
-    color: var(--green);
-}
-
-.waveform-chart {
-    width: 100%;
-    height: 78%;
-    min-height: 130px;
-    align-self: center;
-}
-
-.preview-state {
-    color: #8f918b;
-}
-
-.preview-state svg {
-    color: var(--green);
-}
-
-.preview-running {
-    color: var(--green);
 }
 
 .control-footer {
@@ -2449,16 +2407,6 @@ code {
     .step-button {
         width: 52px;
         height: 40px;
-    }
-
-    .waveform-panel {
-        grid-template-rows: 32px minmax(110px, 1fr) 32px;
-        padding-top: 6px;
-        padding-bottom: 8px;
-    }
-
-    .waveform-chart {
-        min-height: 105px;
     }
 
     .output-button,

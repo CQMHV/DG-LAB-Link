@@ -98,11 +98,11 @@ describe("DG-LAB Link 前端", () => {
         });
         await user.click(startButton);
 
-        await waitFor(() => {
+        await waitFor(async () => {
             expect(
                 screen.getByRole("button", { name: "停止输出" }),
             ).toBeTruthy();
-            expect(screen.getByText("实时输出中")).toBeTruthy();
+            expect((await getHubSnapshot()).output.state).toBe("running");
         });
 
         await user.click(screen.getByRole("button", { name: "停止输出" }));
