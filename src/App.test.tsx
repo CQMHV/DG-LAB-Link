@@ -1,0 +1,564 @@
+// @vitest-environment jsdom
+
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import App from "./App";
+import {
+    __emitMockSnapshot,
+    __resetMockBridge,
+    __setMockStartOutputCompletion,
+    getHubSnapshot,
+} from "./lib/bridge";
+
+class ResizeObserverMock {
+    observe() {}
+
+    unobserve() {}
+
+    disconnect() {}
+}
+
+beforeEach(() => {
+    __resetMockBridge();
+    vi.stubGlobal("ResizeObserver", ResizeObserverMock);
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+        bottom: 240,
+        height: 240,
+        left: 0,
+        right: 480,
+        top: 0,
+        width: 480,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+    });
+    Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: {
+            writeText: vi.fn().mockResolvedValue(undefined),
+        },
+    });
+});
+
+afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+});
+
+describe("DG-LAB Link 前端", () => {
+    it("在普通浏览器中明确标记演示模式", async () => {
+        render(<App />);
+
+        expect(
+            await screen.findByText(
+                "演示模式 · 当前为浏览器模拟数据，不会连接 Relay、APP 或设备",
+            ),
+        ).toBeTruthy();
+    });
+
+    it("可以在五个主页面之间切换", async () => {
+        const user = userEvent.setup();
+        render(<App />);
+
+        await screen.findByText("当前会话");
+        await user.click(screen.getByRole("button", { name: "输入源" }));
+        expect(
+            screen.getByRole("heading", { level: 1, name: "输入源" }),
+        ).toBeTruthy();
+
+        await user.click(screen.getByRole("button", { name: "设备" }));
+        expect(
+            screen.getByRole("heading", { level: 1, name: "设备" }),
+        ).toBeTruthy();
+
+        await user.click(screen.getByRole("button", { name: "运行记录" }));
+        expect(
+            screen.getByRole("heading", { level: 1, name: "运行记录" }),
+        ).toBeTruthy();
+
+        await user.click(screen.getByRole("button", { name: "设置" }));
+        expect(
+            screen.getByRole("heading", { level: 1, name: "设置" }),
+        ).toBeTruthy();
+
+        await user.click(screen.getByRole("button", { name: "控制台" }));
+        expect(screen.getByText("当前会话")).toBeTruthy();
+    });
+
+    it("可以开始并停止波形输出", async () => {
+        const user = userEvent.setup();
+        render(<App />);
+
+        const startButton = await screen.findByRole("button", {
+            name: "开始输出",
+        });
+        await user.click(startButton);
+
+        await waitFor(() => {
+            expect(
+                screen.getByRole("button", { name: "停止输出" }),
+            ).toBeTruthy();
+            expect(screen.getByText("实时输出中")).toBeTruthy();
+        });
+
+        await user.click(screen.getByRole("button", { name: "停止输出" }));
+        await waitFor(() => {
+            expect(
+                screen.getByRole("button", { name: "开始输出" }),
+            ).toBeTruthy();
+        });
+    });
+
+    it("普通操作等待时仍可立即执行紧急停止", async () => {
+        const user = userEvent.setup();
+        let completeStartOutput: (() => void) | undefined;
+        const startOutputCompletion = new Promise<void>((resolve) => {
+            completeStartOutput = resolve;
+        });
+        __setMockStartOutputCompletion(startOutputCompletion);
+        render(<App />);
+
+        await user.click(
+            await screen.findByRole("button", { name: "开始输出" }),
+        );
+
+        const emergencyButton = screen.getByRole("button", {
+            name: "紧急停止",
+        });
+        expect((emergencyButton as HTMLButtonElement).disabled).toBe(false);
+        await user.click(emergencyButton);
+
+        await waitFor(() => {
+            expect(screen.getByText("已停止")).toBeTruthy();
+        });
+
+        await act(async () => {
+            completeStartOutput?.();
+            await startOutputCompletion;
+        });
+        await waitFor(async () => {
+            expect((await getHubSnapshot()).output.state).toBe("stopped");
+        });
+    });
+
+    it("展示后端快照中的输出错误", async () => {
+        const initial = await getHubSnapshot();
+        render(<App />);
+        await screen.findByText("当前会话");
+
+        act(() => {
+            __emitMockSnapshot({
+                ...initial,
+                revision: initial.revision + 1,
+                output: {
+                    ...initial.output,
+                    lastError: "APP 拒绝了波形操作",
+                },
+            });
+        });
+
+        expect(await screen.findByText("APP 拒绝了波形操作")).toBeTruthy();
+    });
+
+    it("展示后端快照中的连接错误", async () => {
+        const initial = await getHubSnapshot();
+        render(<App />);
+        await screen.findByText("当前会话");
+
+        act(() => {
+            __emitMockSnapshot({
+                ...initial,
+                revision: initial.revision + 1,
+                connection: {
+                    ...initial.connection,
+                    lastError: "Relay 握手超时",
+                },
+            });
+        });
+
+        expect(await screen.findByText("Relay 握手超时")).toBeTruthy();
+    });
+
+    it("被控端关闭通道时仍允许发送控制信息", async () => {
+        const initial = await getHubSnapshot();
+        render(<App />);
+        await screen.findByText("当前会话");
+
+        act(() => {
+            __emitMockSnapshot({
+                ...initial,
+                revision: initial.revision + 1,
+                device: initial.device
+                    ? { ...initial.device, channelAStatus: "disabled" }
+                    : null,
+                devices: initial.devices.map((device, index) =>
+                    index === 0
+                        ? { ...device, channelAStatus: "disabled" }
+                        : device,
+                ),
+                channels: {
+                    ...initial.channels,
+                    a: { ...initial.channels.a, status: "disabled" },
+                },
+            });
+        });
+
+        expect(await screen.findByText("被控端关闭")).toBeTruthy();
+        expect(
+            await screen.findByText(
+                "被控端 A 通道已关闭；仍接收控制信息，但该通道不会实际输出",
+            ),
+        ).toBeTruthy();
+        expect(screen.getByText("当前调节：郊狼 3.0")).toBeTruthy();
+        expect(
+            (
+                screen.getByRole("button", { name: "开始输出" }) as HTMLButtonElement
+            ).disabled,
+        ).toBe(false);
+
+        act(() => {
+            __emitMockSnapshot({
+                ...initial,
+                revision: initial.revision + 2,
+                device: initial.device
+                    ? {
+                          ...initial.device,
+                          channelAStatus: "disabled",
+                          channelBStatus: "disabled",
+                      }
+                    : null,
+                devices: initial.devices.map((device, index) =>
+                    index === 0
+                        ? {
+                              ...device,
+                              channelAStatus: "disabled",
+                              channelBStatus: "disabled",
+                          }
+                        : device,
+                ),
+                channels: {
+                    a: { ...initial.channels.a, status: "disabled" },
+                    b: { ...initial.channels.b, status: "disabled" },
+                },
+            });
+        });
+        expect(
+            await screen.findByText(
+                "被控端 A、B 通道均已关闭；仍接收控制信息，但当前不会实际输出",
+            ),
+        ).toBeTruthy();
+        expect(
+            (
+                screen.getByRole("button", { name: "开始输出" }) as HTMLButtonElement
+            ).disabled,
+        ).toBe(false);
+    });
+
+    it("Relay 等待 APP 时可以通过连接设备打开并关闭二维码弹窗", async () => {
+        const user = userEvent.setup();
+        const initial = await getHubSnapshot();
+        __emitMockSnapshot({
+            ...initial,
+            revision: initial.revision + 1,
+            connection: {
+                ...initial.connection,
+                state: "waiting",
+                appCount: 0,
+            },
+            device: null,
+            devices: [],
+            selectedDeviceId: null,
+        });
+        render(<App />);
+
+        const openButton = await screen.findByRole("button", {
+            name: "连接设备",
+        });
+        await user.click(openButton);
+        expect(
+            screen.getByRole("dialog", { name: "配对 APP" }),
+        ).toBeTruthy();
+        expect(screen.getByText("控制端 ID")).toBeTruthy();
+        const closeButton = screen.getByRole("button", {
+            name: "关闭配对窗口",
+        });
+        const copyButton = screen.getByRole("button", {
+            name: "复制配对链接",
+        });
+
+        await waitFor(() => {
+            expect(document.activeElement).toBe(closeButton);
+        });
+        await user.tab({ shift: true });
+        expect(document.activeElement).toBe(copyButton);
+        await user.tab();
+        expect(document.activeElement).toBe(closeButton);
+
+        await user.click(closeButton);
+        expect(screen.queryByRole("dialog", { name: "配对 APP" })).toBeNull();
+        expect(document.activeElement).toBe(openButton);
+    });
+
+    it("已有 APP 或设备时通过切换设备进入设备页且不显示刷新按钮", async () => {
+        const user = userEvent.setup();
+        render(<App />);
+
+        await user.click(
+            await screen.findByRole("button", { name: "切换设备" }),
+        );
+
+        expect(
+            screen.getByRole("heading", { level: 1, name: "设备" }),
+        ).toBeTruthy();
+        expect(
+            screen.queryByRole("button", { name: "刷新连接状态" }),
+        ).toBeNull();
+        expect(screen.queryByRole("dialog", { name: "配对 APP" })).toBeNull();
+    });
+
+    it("可以开启所有设备同步并保持相同实际强度", async () => {
+        const user = userEvent.setup();
+        render(<App />);
+
+        await user.click(await screen.findByRole("button", { name: "设备" }));
+        const syncToggle = screen.getByRole("checkbox", {
+            name: "同步所有设备",
+        });
+        expect((syncToggle as HTMLInputElement).checked).toBe(false);
+        await user.click(syncToggle);
+        await waitFor(async () => {
+            const snapshot = await getHubSnapshot();
+            expect(snapshot.syncAllDevices).toBe(true);
+            expect(snapshot.devices[0].intensityA).toBe(5);
+            expect(snapshot.devices[1].intensityA).toBe(5);
+            expect(snapshot.devices[0].intensityB).toBe(11);
+            expect(snapshot.devices[1].intensityB).toBe(11);
+        });
+
+        await user.click(screen.getByRole("button", { name: "控制台" }));
+        expect(screen.getByText("同步调节：全部 2 台")).toBeTruthy();
+        await user.click(
+            screen.getByRole("button", { name: "提高 A 通道强度" }),
+        );
+
+        await waitFor(async () => {
+            const snapshot = await getHubSnapshot();
+            expect(snapshot.devices[0].intensityA).toBe(6);
+            expect(snapshot.devices[1].intensityA).toBe(6);
+        });
+    });
+
+    it("可以调整 A 通道强度", async () => {
+        const user = userEvent.setup();
+        render(<App />);
+
+        expect(
+            (await screen.findByTestId("channel-a-intensity") as HTMLInputElement)
+                .value,
+        ).toBe("5");
+        await user.click(
+            screen.getByRole("button", { name: "提高 A 通道强度" }),
+        );
+        await waitFor(() => {
+            expect(
+                (screen.getByTestId("channel-a-intensity") as HTMLInputElement)
+                    .value,
+            ).toBe("6");
+        });
+
+        await user.click(
+            screen.getByRole("button", { name: "降低 A 通道强度" }),
+        );
+        await waitFor(() => {
+            expect(
+                (screen.getByTestId("channel-a-intensity") as HTMLInputElement)
+                    .value,
+            ).toBe("5");
+        });
+
+        const gauge = screen.getByTestId("channel-a-gauge");
+        fireEvent.pointerDown(gauge, { clientX: 240, clientY: 120, pointerId: 1 });
+        fireEvent.pointerUp(gauge, { clientX: 240, clientY: 120, pointerId: 1 });
+        expect(
+            (screen.getByTestId("channel-a-intensity") as HTMLInputElement).value,
+        ).toBe("5");
+
+        fireEvent.pointerDown(gauge, { clientX: 356, clientY: 120, pointerId: 2 });
+        fireEvent.pointerUp(gauge, { clientX: 356, clientY: 120, pointerId: 2 });
+        await waitFor(() => {
+            expect(
+                (screen.getByTestId("channel-a-intensity") as HTMLInputElement)
+                    .value,
+            ).toBe("20");
+        });
+
+        const numberInput = screen.getByRole("spinbutton", {
+            name: "输入 A 通道强度",
+        }) as HTMLInputElement;
+        await waitFor(() => {
+            expect(numberInput.disabled).toBe(false);
+            expect(numberInput.value).toBe("20");
+        });
+        fireEvent.change(numberInput, { target: { value: "27" } });
+        fireEvent.keyDown(numberInput, { key: "Enter" });
+        await waitFor(() => {
+            expect(
+                (screen.getByTestId("channel-a-intensity") as HTMLInputElement)
+                    .value,
+            ).toBe("27");
+        });
+    });
+
+    it("可以通过设备标签切换并只调整该设备", async () => {
+        const user = userEvent.setup();
+        render(<App />);
+
+        const secondTab = await screen.findByRole("tab", {
+            name: /郊狼 2\.0/,
+        });
+        await user.click(secondTab);
+
+        await waitFor(() => {
+            expect(screen.getByText("当前调节：郊狼 2.0")).toBeTruthy();
+            expect(
+                (screen.getByTestId("channel-a-intensity") as HTMLInputElement)
+                    .value,
+            ).toBe("3");
+        });
+
+        await user.click(
+            screen.getByRole("button", { name: "提高 A 通道强度" }),
+        );
+        await waitFor(async () => {
+            const snapshot = await getHubSnapshot();
+            expect(snapshot.devices[0].intensityA).toBe(5);
+            expect(snapshot.devices[1].intensityA).toBe(4);
+        });
+    });
+
+    it("可以把设备仪表盘拉出为独立窗口", async () => {
+        const user = userEvent.setup();
+        const focus = vi.fn();
+        const open = vi
+            .spyOn(window, "open")
+            .mockReturnValue({ focus } as unknown as Window);
+        render(<App />);
+
+        await user.click(
+            await screen.findByRole("button", {
+                name: "在独立窗口打开 郊狼 3.0",
+            }),
+        );
+
+        expect(open).toHaveBeenCalledOnce();
+        expect(open.mock.calls[0][0]).toContain("detached=1");
+        expect(open.mock.calls[0][0]).toContain("deviceId=demo-app%3Aslot-a1");
+        expect(focus).toHaveBeenCalledOnce();
+    });
+
+    it("忽略 revision 更旧的乱序快照", async () => {
+        const initial = await getHubSnapshot();
+        render(<App />);
+        await screen.findByTestId("channel-a-intensity");
+
+        act(() => {
+            __emitMockSnapshot({
+                ...initial,
+                revision: 10,
+                device: initial.device
+                    ? { ...initial.device, intensityA: 42 }
+                    : null,
+                devices: initial.devices.map((device, index) =>
+                    index === 0 ? { ...device, intensityA: 42 } : device,
+                ),
+                channels: {
+                    ...initial.channels,
+                    a: { ...initial.channels.a, intensity: 42 },
+                },
+            });
+        });
+        await waitFor(() => {
+            expect(
+                (screen.getByTestId("channel-a-intensity") as HTMLInputElement)
+                    .value,
+            ).toBe("42");
+        });
+
+        act(() => {
+            __emitMockSnapshot({
+                ...initial,
+                revision: 9,
+                device: initial.device
+                    ? { ...initial.device, intensityA: 7 }
+                    : null,
+                devices: initial.devices.map((device, index) =>
+                    index === 0 ? { ...device, intensityA: 7 } : device,
+                ),
+                channels: {
+                    ...initial.channels,
+                    a: { ...initial.channels.a, intensity: 7 },
+                },
+            });
+        });
+        expect(
+            (screen.getByTestId("channel-a-intensity") as HTMLInputElement).value,
+        ).toBe("42");
+    });
+
+    it("手机端反向控制只在应用安全设置后生效", async () => {
+        const user = userEvent.setup();
+        render(<App />);
+
+        await user.click(await screen.findByRole("button", { name: "设置" }));
+        const toggle = screen.getByRole("checkbox", {
+            name: "允许手机端反向控制",
+        }) as HTMLInputElement;
+        expect(toggle.checked).toBe(false);
+
+        await user.click(toggle);
+        await waitFor(() => expect(toggle.checked).toBe(true));
+        expect((await getHubSnapshot()).safety.allowAppIntensityControl).toBe(
+            false,
+        );
+        expect(
+            screen.getByText(/开启后，手机调整会同步到电脑端/),
+        ).toBeTruthy();
+
+        await user.click(
+            screen.getByRole("button", { name: "应用安全设置" }),
+        );
+        await waitFor(async () => {
+            expect(
+                (await getHubSnapshot()).safety.allowAppIntensityControl,
+            ).toBe(true);
+        });
+    });
+
+    it("输出中切换控制焦点不会停止其他设备", async () => {
+        const user = userEvent.setup();
+        render(<App />);
+
+        await user.click(
+            await screen.findByRole("button", { name: "开始输出" }),
+        );
+        await waitFor(async () => {
+            expect((await getHubSnapshot()).output.state).toBe("running");
+        });
+
+        await user.click(screen.getByRole("button", { name: "设备" }));
+        expect(screen.getByText("郊狼 3.0")).toBeTruthy();
+        expect(screen.getByText("郊狼 2.0")).toBeTruthy();
+        await user.click(
+            screen.getByRole("button", { name: "设为控制设备" }),
+        );
+
+        await waitFor(async () => {
+            const snapshot = await getHubSnapshot();
+            expect(snapshot.device?.name).toBe("郊狼 2.0");
+            expect(snapshot.output.state).toBe("running");
+            expect(snapshot.devices).toHaveLength(2);
+        });
+    });
+});

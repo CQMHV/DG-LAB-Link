@@ -13,6 +13,25 @@ target
 # Contains mutation testing data
 **/mutants.out*/
 
+# Frontend dependencies and generated output
+node_modules/
+dist/
+.vite/
+coverage/
+
+# Local browser and visual QA artifacts
+.playwright-cli/
+output/
+design-qa.md
+
+# Local Product Design seed (temporary)
+tmp/
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore

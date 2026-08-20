@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-disconnect-relay"
+description = "Enables the disconnect_relay command without any pre-configured scope."
+commands.allow = ["disconnect_relay"]
+
+[[permission]]
+identifier = "deny-disconnect-relay"
+description = "Denies the disconnect_relay command without any pre-configured scope."
+commands.deny = ["disconnect_relay"]

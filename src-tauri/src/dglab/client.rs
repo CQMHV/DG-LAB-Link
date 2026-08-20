@@ -1,0 +1,866 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+use futures_util::{SinkExt, StreamExt};
+use serde_json::{Value, json};
+use thiserror::Error;
+use tokio::net::TcpStream;
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
+use tokio::time::timeout;
+use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
+use tokio_util::sync::CancellationToken;
+use url::Url;
+
+pub const DEFAULT_RELAY_ENDPOINT: &str = "wss://trex.dungeon-lab.cn/v4";
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+const SAFETY_COMMAND_CAPACITY: usize = 16;
+const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
+const SOCKET_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
+const SAFETY_ACK_TIMEOUT: Duration = Duration::from_secs(5);
+const EVENT_SEND_TIMEOUT: Duration = Duration::from_secs(1);
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RelayEvent {
+    Connecting {
+        endpoint: String,
+    },
+    Connected {
+        endpoint: String,
+    },
+    Hello {
+        controller_id: String,
+    },
+    ClientAttached {
+        client_id: String,
+    },
+    ClientDisconnected {
+        client_id: String,
+    },
+    Message {
+        client_id: String,
+        data: Value,
+    },
+    Heartbeat,
+    Pong {
+        timestamp: Option<i64>,
+    },
+    IdleTimeout,
+    RelayError {
+        code: String,
+        message: Option<String>,
+    },
+    Unknown(Value),
+    Disconnected {
+        reason: String,
+        retryable: bool,
+    },
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum RelayClientError {
+    #[error("Relay 客户端已停止")]
+    Stopped,
+    #[error("Relay 命令队列已满")]
+    QueueFull,
+    #[error("Relay 地址无效：{0}")]
+    InvalidEndpoint(String),
+    #[error("尚未连接 Relay")]
+    NotConnected,
+    #[error("连接 Relay 超时")]
+    ConnectTimeout,
+    #[error("Relay 连接失败：{0}")]
+    Transport(String),
+}
+
+#[derive(Debug)]
+enum RelayCommand {
+    Connect {
+        endpoint: String,
+        reply: oneshot::Sender<Result<(), RelayClientError>>,
+    },
+    Disconnect {
+        reply: oneshot::Sender<Result<(), RelayClientError>>,
+    },
+    SendMessage {
+        client_id: String,
+        data: Value,
+        operation_generation: Option<u64>,
+        reply: Option<oneshot::Sender<Result<(), RelayClientError>>>,
+    },
+    SafetyStop {
+        client_id: String,
+        requests: Vec<Value>,
+        operation_generation: u64,
+        reply: oneshot::Sender<Result<(), RelayClientError>>,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct RelayClientHandle {
+    commands: mpsc::Sender<RelayCommand>,
+    safety_commands: mpsc::Sender<RelayCommand>,
+    shutdown: CancellationToken,
+    operation_floor: Arc<AtomicU64>,
+}
+
+impl RelayClientHandle {
+    pub async fn connect(&self, endpoint: impl Into<String>) -> Result<(), RelayClientError> {
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .send(RelayCommand::Connect {
+                endpoint: endpoint.into(),
+                reply,
+            })
+            .await
+            .map_err(|_| RelayClientError::Stopped)?;
+        response.await.map_err(|_| RelayClientError::Stopped)?
+    }
+
+    pub async fn disconnect(&self) -> Result<(), RelayClientError> {
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .send(RelayCommand::Disconnect { reply })
+            .await
+            .map_err(|_| RelayClientError::Stopped)?;
+        response.await.map_err(|_| RelayClientError::Stopped)?
+    }
+
+    pub async fn send_message(
+        &self,
+        client_id: impl Into<String>,
+        data: Value,
+    ) -> Result<(), RelayClientError> {
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .send(RelayCommand::SendMessage {
+                client_id: client_id.into(),
+                data,
+                operation_generation: None,
+                reply: Some(reply),
+            })
+            .await
+            .map_err(|_| RelayClientError::Stopped)?;
+        response.await.map_err(|_| RelayClientError::Stopped)?
+    }
+
+    pub fn try_send_message(
+        &self,
+        client_id: impl Into<String>,
+        data: Value,
+    ) -> Result<(), RelayClientError> {
+        self.commands
+            .try_send(RelayCommand::SendMessage {
+                client_id: client_id.into(),
+                data,
+                operation_generation: None,
+                reply: None,
+            })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => RelayClientError::QueueFull,
+                mpsc::error::TrySendError::Closed(_) => RelayClientError::Stopped,
+            })
+    }
+
+    /// 设备操作携带单调递增的代次。安全停止确认后，socket actor 会丢弃所有旧代次操作，
+    /// 防止已经排队的波形或强度调整在 clear / 归零之后重新生效。
+    pub fn try_send_operation(
+        &self,
+        client_id: impl Into<String>,
+        data: Value,
+        operation_generation: u64,
+    ) -> Result<(), RelayClientError> {
+        if operation_generation < self.operation_floor.load(Ordering::Acquire) {
+            return Err(RelayClientError::Transport(
+                "设备操作已被安全停止取代".to_owned(),
+            ));
+        }
+        self.commands
+            .try_send(RelayCommand::SendMessage {
+                client_id: client_id.into(),
+                data,
+                operation_generation: Some(operation_generation),
+                reply: None,
+            })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => RelayClientError::QueueFull,
+                mpsc::error::TrySendError::Closed(_) => RelayClientError::Stopped,
+            })
+    }
+
+    /// 安全停止使用独立有界队列，并等待所有 clear / 归零帧实际写入 WebSocket。
+    pub async fn safety_stop(
+        &self,
+        client_id: impl Into<String>,
+        requests: Vec<Value>,
+        operation_generation: u64,
+    ) -> Result<(), RelayClientError> {
+        self.invalidate_operations(operation_generation);
+        let (reply, response) = oneshot::channel();
+        self.safety_commands
+            .try_send(RelayCommand::SafetyStop {
+                client_id: client_id.into(),
+                requests,
+                operation_generation,
+                reply,
+            })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => RelayClientError::QueueFull,
+                mpsc::error::TrySendError::Closed(_) => RelayClientError::Stopped,
+            })?;
+
+        timeout(SAFETY_ACK_TIMEOUT, response)
+            .await
+            .map_err(|_| RelayClientError::Transport("等待安全停止写入确认超时".to_owned()))?
+            .map_err(|_| RelayClientError::Stopped)?
+    }
+
+    pub fn shutdown_now(&self) {
+        self.shutdown.cancel();
+    }
+
+    pub fn invalidate_operations(&self, operation_generation: u64) {
+        self.operation_floor
+            .fetch_max(operation_generation, Ordering::AcqRel);
+    }
+}
+
+pub fn spawn_relay_client(
+    event_sender: mpsc::Sender<RelayEvent>,
+    command_capacity: usize,
+) -> (RelayClientHandle, JoinHandle<()>) {
+    let (command_sender, command_receiver) = mpsc::channel(command_capacity.max(1));
+    let (safety_sender, safety_receiver) = mpsc::channel(SAFETY_COMMAND_CAPACITY);
+    let shutdown = CancellationToken::new();
+    let operation_floor = Arc::new(AtomicU64::new(0));
+    let handle = RelayClientHandle {
+        commands: command_sender,
+        safety_commands: safety_sender,
+        shutdown: shutdown.clone(),
+        operation_floor: Arc::clone(&operation_floor),
+    };
+    let task = tokio::spawn(run_relay_client(
+        command_receiver,
+        safety_receiver,
+        event_sender,
+        shutdown,
+        operation_floor,
+    ));
+    (handle, task)
+}
+
+enum SessionExit {
+    Disconnected,
+    Reconnect {
+        endpoint: String,
+        reply: oneshot::Sender<Result<(), RelayClientError>>,
+    },
+    Shutdown,
+}
+
+async fn run_relay_client(
+    mut commands: mpsc::Receiver<RelayCommand>,
+    mut safety_commands: mpsc::Receiver<RelayCommand>,
+    events: mpsc::Sender<RelayEvent>,
+    shutdown: CancellationToken,
+    operation_floor: Arc<AtomicU64>,
+) {
+    let mut pending_connect: Option<(String, oneshot::Sender<Result<(), RelayClientError>>)> = None;
+    let mut minimum_operation_generation = 0_u64;
+
+    loop {
+        let (endpoint, reply) = match pending_connect.take() {
+            Some(pending) => pending,
+            None => match tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => break,
+                command = receive_command(&mut safety_commands, &mut commands) => command,
+            } {
+                Some(RelayCommand::Connect { endpoint, reply }) => (endpoint, reply),
+                Some(RelayCommand::Disconnect { reply }) => {
+                    let _ = reply.send(Ok(()));
+                    continue;
+                }
+                Some(RelayCommand::SendMessage { reply, .. }) => {
+                    if let Some(reply) = reply {
+                        let _ = reply.send(Err(RelayClientError::NotConnected));
+                    }
+                    continue;
+                }
+                Some(RelayCommand::SafetyStop {
+                    requests,
+                    operation_generation,
+                    reply,
+                    ..
+                }) => {
+                    minimum_operation_generation =
+                        minimum_operation_generation.max(operation_generation);
+                    let result = if requests.is_empty() {
+                        Ok(())
+                    } else {
+                        Err(RelayClientError::NotConnected)
+                    };
+                    let _ = reply.send(result);
+                    continue;
+                }
+                None => break,
+            },
+        };
+
+        let endpoint = match validate_endpoint(&endpoint) {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                let _ = reply.send(Err(error.clone()));
+                emit(
+                    &events,
+                    RelayEvent::Disconnected {
+                        reason: error.to_string(),
+                        retryable: false,
+                    },
+                )
+                .await;
+                continue;
+            }
+        };
+        emit(
+            &events,
+            RelayEvent::Connecting {
+                endpoint: endpoint.clone(),
+            },
+        )
+        .await;
+
+        let connection = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => {
+                let _ = reply.send(Err(RelayClientError::Stopped));
+                break;
+            }
+            connection = timeout(CONNECT_TIMEOUT, connect_async(&endpoint)) => connection,
+        };
+        let socket = match connection {
+            Ok(Ok((socket, _))) => socket,
+            Ok(Err(error)) => {
+                let error = RelayClientError::Transport(describe_websocket_error(&error));
+                let _ = reply.send(Err(error.clone()));
+                emit(
+                    &events,
+                    RelayEvent::Disconnected {
+                        reason: error.to_string(),
+                        retryable: true,
+                    },
+                )
+                .await;
+                continue;
+            }
+            Err(_) => {
+                let error = RelayClientError::ConnectTimeout;
+                let _ = reply.send(Err(error.clone()));
+                emit(
+                    &events,
+                    RelayEvent::Disconnected {
+                        reason: error.to_string(),
+                        retryable: true,
+                    },
+                )
+                .await;
+                continue;
+            }
+        };
+
+        let _ = reply.send(Ok(()));
+        emit(
+            &events,
+            RelayEvent::Connected {
+                endpoint: endpoint.clone(),
+            },
+        )
+        .await;
+
+        match run_session(
+            socket,
+            &mut safety_commands,
+            &mut commands,
+            &events,
+            &shutdown,
+            &mut minimum_operation_generation,
+            &operation_floor,
+        )
+        .await
+        {
+            SessionExit::Reconnect { endpoint, reply } => {
+                pending_connect = Some((endpoint, reply));
+            }
+            SessionExit::Disconnected => {}
+            SessionExit::Shutdown => break,
+        }
+    }
+}
+
+async fn run_session(
+    mut socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    safety_commands: &mut mpsc::Receiver<RelayCommand>,
+    commands: &mut mpsc::Receiver<RelayCommand>,
+    events: &mpsc::Sender<RelayEvent>,
+    shutdown: &CancellationToken,
+    minimum_operation_generation: &mut u64,
+    operation_floor: &AtomicU64,
+) -> SessionExit {
+    let mut disconnect_reason = "Relay 连接已关闭".to_owned();
+    let mut retryable = true;
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => {
+                let _ = close_socket(&mut socket).await;
+                return SessionExit::Shutdown;
+            }
+            command = receive_command(safety_commands, commands) => {
+                match command {
+                    Some(RelayCommand::SendMessage {
+                        client_id,
+                        data,
+                        operation_generation,
+                        reply,
+                    }) => {
+                        let current_floor = (*minimum_operation_generation)
+                            .max(operation_floor.load(Ordering::Acquire));
+                        if operation_generation
+                            .is_some_and(|generation| generation < current_floor)
+                        {
+                            if let Some(reply) = reply {
+                                let _ = reply.send(Err(RelayClientError::Transport(
+                                    "设备操作已被安全停止取代".to_owned(),
+                                )));
+                            }
+                            continue;
+                        }
+
+                        let result = send_application_message(&mut socket, &client_id, data).await;
+                        if let Some(reply) = reply {
+                            let _ = reply.send(result.clone());
+                        }
+                        if let Err(error) = result {
+                            disconnect_reason = error.to_string();
+                            break;
+                        }
+                    }
+                    Some(RelayCommand::SafetyStop {
+                        client_id,
+                        requests,
+                        operation_generation,
+                        reply,
+                    }) => {
+                        *minimum_operation_generation = (*minimum_operation_generation)
+                            .max(operation_generation);
+                        let mut result = Ok(());
+                        for request in requests {
+                            if let Err(error) = send_application_message(
+                                &mut socket,
+                                &client_id,
+                                request,
+                            )
+                            .await
+                            {
+                                result = Err(error);
+                                break;
+                            }
+                        }
+                        let failed = result.as_ref().err().cloned();
+                        let _ = reply.send(result);
+                        if let Some(error) = failed {
+                            disconnect_reason = error.to_string();
+                            break;
+                        }
+                    }
+                    Some(RelayCommand::Disconnect { reply }) => {
+                        let result = close_socket(&mut socket).await;
+                        let _ = reply.send(result);
+                        disconnect_reason = "用户已断开 Relay".to_owned();
+                        retryable = false;
+                        break;
+                    }
+                    Some(RelayCommand::Connect { endpoint, reply }) => {
+                        let _ = close_socket(&mut socket).await;
+                        emit(
+                            events,
+                            RelayEvent::Disconnected {
+                                reason: "正在切换 Relay".to_owned(),
+                                retryable: false,
+                            },
+                        )
+                        .await;
+                        return SessionExit::Reconnect { endpoint, reply };
+                    }
+                    None => {
+                        let _ = close_socket(&mut socket).await;
+                        return SessionExit::Shutdown;
+                    }
+                }
+            }
+            incoming = socket.next() => {
+                match incoming {
+                    Some(Ok(Message::Text(text))) => {
+                        handle_text(text.as_ref(), events).await;
+                    }
+                    Some(Ok(Message::Ping(payload))) => {
+                        if let Err(error) = send_socket_message(&mut socket, Message::Pong(payload)).await {
+                            disconnect_reason = error.to_string();
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Pong(_))) => {}
+                    Some(Ok(Message::Close(frame))) => {
+                        if let Some(frame) = frame {
+                            let code = u16::from(frame.code);
+                            disconnect_reason = if code == 4002 {
+                                "Relay 配对等待已超时".to_owned()
+                            } else {
+                                format!("Relay 已关闭（{code}：{}）", frame.reason)
+                            };
+                        }
+                        break;
+                    }
+                    Some(Ok(Message::Binary(_))) | Some(Ok(Message::Frame(_))) => {}
+                    Some(Err(error)) => {
+                        disconnect_reason = format!(
+                            "Relay 连接中断：{}",
+                            describe_websocket_error(&error)
+                        );
+                        break;
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+
+    emit(
+        events,
+        RelayEvent::Disconnected {
+            reason: disconnect_reason,
+            retryable,
+        },
+    )
+    .await;
+    SessionExit::Disconnected
+}
+
+fn describe_websocket_error(error: &WebSocketError) -> String {
+    let message = error.to_string();
+    if message.contains("close_notify")
+        || message.contains("Connection reset without closing handshake")
+    {
+        "远端未完成 WebSocket/TLS 关闭握手便断开了连接".to_owned()
+    } else {
+        message
+    }
+}
+
+async fn send_application_message(
+    socket: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
+    client_id: &str,
+    data: Value,
+) -> Result<(), RelayClientError> {
+    let frame = json!({
+        "type": "message",
+        "clientId": client_id,
+        "data": data,
+    });
+    send_socket_message(socket, Message::Text(frame.to_string().into())).await
+}
+
+async fn send_socket_message(
+    socket: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
+    message: Message,
+) -> Result<(), RelayClientError> {
+    timeout(SOCKET_WRITE_TIMEOUT, socket.send(message))
+        .await
+        .map_err(|_| RelayClientError::Transport("写入 Relay 超时".to_owned()))?
+        .map_err(|error| RelayClientError::Transport(error.to_string()))
+}
+
+async fn close_socket(
+    socket: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
+) -> Result<(), RelayClientError> {
+    timeout(SOCKET_CLOSE_TIMEOUT, socket.close(None))
+        .await
+        .map_err(|_| RelayClientError::Transport("关闭 Relay 连接超时".to_owned()))?
+        .map_err(|error| RelayClientError::Transport(error.to_string()))
+}
+
+async fn receive_command(
+    safety_commands: &mut mpsc::Receiver<RelayCommand>,
+    commands: &mut mpsc::Receiver<RelayCommand>,
+) -> Option<RelayCommand> {
+    tokio::select! {
+        biased;
+        command = safety_commands.recv() => command,
+        command = commands.recv() => command,
+    }
+}
+
+async fn handle_text(text: &str, events: &mpsc::Sender<RelayEvent>) {
+    let value: Value = match serde_json::from_str(text) {
+        Ok(value) => value,
+        Err(_) => return,
+    };
+    let frame_type = value.get("type").and_then(Value::as_str);
+    let event = match frame_type {
+        Some("hello") => value
+            .get("clientId")
+            .and_then(Value::as_str)
+            .map(|client_id| RelayEvent::Hello {
+                controller_id: client_id.to_owned(),
+            }),
+        Some("client_attached") => value
+            .get("clientId")
+            .and_then(Value::as_str)
+            .map(|client_id| RelayEvent::ClientAttached {
+                client_id: client_id.to_owned(),
+            }),
+        Some("client_disconnected") => {
+            value
+                .get("clientId")
+                .and_then(Value::as_str)
+                .map(|client_id| RelayEvent::ClientDisconnected {
+                    client_id: client_id.to_owned(),
+                })
+        }
+        Some("message") => match (
+            value.get("clientId").and_then(Value::as_str),
+            value.get("data"),
+        ) {
+            (Some(client_id), Some(data)) => Some(RelayEvent::Message {
+                client_id: client_id.to_owned(),
+                data: data.clone(),
+            }),
+            _ => None,
+        },
+        Some("heartbeat") => Some(RelayEvent::Heartbeat),
+        Some("pong") => Some(RelayEvent::Pong {
+            timestamp: value.get("ts").and_then(Value::as_i64),
+        }),
+        Some("idle_timeout") => Some(RelayEvent::IdleTimeout),
+        Some("error") => Some(RelayEvent::RelayError {
+            code: value
+                .get("code")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_owned(),
+            message: value
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        }),
+        _ => Some(RelayEvent::Unknown(value)),
+    };
+    if let Some(event) = event {
+        emit(events, event).await;
+    }
+}
+
+fn validate_endpoint(endpoint: &str) -> Result<String, RelayClientError> {
+    let url = Url::parse(endpoint)
+        .map_err(|error| RelayClientError::InvalidEndpoint(error.to_string()))?;
+    if !matches!(url.scheme(), "ws" | "wss") || url.host_str().is_none() {
+        return Err(RelayClientError::InvalidEndpoint(
+            "仅支持包含主机名的 ws:// 或 wss:// 地址".to_owned(),
+        ));
+    }
+    Ok(url.to_string())
+}
+
+async fn emit(events: &mpsc::Sender<RelayEvent>, event: RelayEvent) {
+    let _ = timeout(EVENT_SEND_TIMEOUT, events.send(event)).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::accept_async;
+
+    #[test]
+    fn endpoint_requires_websocket_scheme() {
+        assert_eq!(DEFAULT_RELAY_ENDPOINT, "wss://trex.dungeon-lab.cn/v4");
+        assert!(validate_endpoint("https://example.test/v4").is_err());
+        assert_eq!(
+            validate_endpoint("wss://example.test/v4").unwrap(),
+            "wss://example.test/v4"
+        );
+    }
+
+    #[test]
+    fn unexpected_tls_eof_has_a_user_facing_reason() {
+        let error = WebSocketError::Io(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "peer closed connection without sending TLS close_notify",
+        ));
+        assert_eq!(
+            describe_websocket_error(&error),
+            "远端未完成 WebSocket/TLS 关闭握手便断开了连接"
+        );
+    }
+
+    #[tokio::test]
+    async fn fake_relay_handles_hello_pairing_message_and_close() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (pong_seen, wait_for_pong) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            socket
+                .send(Message::Text(
+                    r#"{"type":"hello","clientId":"controller-1"}"#.to_owned().into(),
+                ))
+                .await
+                .unwrap();
+            socket
+                .send(Message::Text(
+                    r#"{"type":"client_attached","clientId":"app-1"}"#.to_owned().into(),
+                ))
+                .await
+                .unwrap();
+
+            let outbound = socket.next().await.unwrap().unwrap();
+            let Message::Text(outbound) = outbound else {
+                panic!("expected a text message");
+            };
+            let outbound: Value = serde_json::from_str(outbound.as_ref()).unwrap();
+            assert_eq!(outbound["type"], "message");
+            assert_eq!(outbound["clientId"], "app-1");
+            assert_eq!(outbound["data"]["m"], "devices.get");
+
+            socket
+                .send(Message::Ping(vec![1, 2, 3].into()))
+                .await
+                .unwrap();
+            assert!(matches!(
+                socket.next().await.unwrap().unwrap(),
+                Message::Pong(_)
+            ));
+            let _ = pong_seen.send(());
+            assert!(matches!(
+                socket.next().await.unwrap().unwrap(),
+                Message::Close(_)
+            ));
+        });
+
+        let (event_sender, mut events) = mpsc::channel(16);
+        let (client, task) = spawn_relay_client(event_sender, 8);
+        client.connect(format!("ws://{address}/v4")).await.unwrap();
+
+        assert!(matches!(
+            events.recv().await,
+            Some(RelayEvent::Connecting { .. })
+        ));
+        assert!(matches!(
+            events.recv().await,
+            Some(RelayEvent::Connected { .. })
+        ));
+        assert_eq!(
+            events.recv().await,
+            Some(RelayEvent::Hello {
+                controller_id: "controller-1".to_owned()
+            })
+        );
+        assert_eq!(
+            events.recv().await,
+            Some(RelayEvent::ClientAttached {
+                client_id: "app-1".to_owned()
+            })
+        );
+
+        client
+            .send_message(
+                "app-1",
+                json!({"t":"req","reqId":"request-1","m":"devices.get"}),
+            )
+            .await
+            .unwrap();
+        wait_for_pong.await.unwrap();
+        client.disconnect().await.unwrap();
+        server.await.unwrap();
+        client.shutdown_now();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn safety_stop_preempts_and_invalidates_older_operations() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (verified, verification) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            let mut clear_seen = false;
+            while let Some(Ok(message)) = socket.next().await {
+                let Message::Text(text) = message else {
+                    continue;
+                };
+                let frame: Value = serde_json::from_str(text.as_ref()).unwrap();
+                let request_id = frame["data"]["reqId"].as_str();
+                match request_id {
+                    Some("clear-1") => clear_seen = true,
+                    Some("old-1") if clear_seen => {
+                        panic!("旧代次操作不得在安全清空后写入 socket")
+                    }
+                    Some("new-1") => {
+                        assert!(clear_seen, "新代次操作应排在安全清空之后");
+                        verified.send(()).unwrap();
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let (event_sender, _events) = mpsc::channel(16);
+        let (client, task) = spawn_relay_client(event_sender, 8);
+        client.connect(format!("ws://{address}/v4")).await.unwrap();
+        client
+            .try_send_operation(
+                "app-1",
+                json!({"t":"req","reqId":"old-1","m":"device.op"}),
+                0,
+            )
+            .unwrap();
+        client
+            .safety_stop(
+                "app-1",
+                vec![json!({"t":"req","reqId":"clear-1","m":"device.op.clear"})],
+                1,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            client.try_send_operation(
+                "app-1",
+                json!({"t":"req","reqId":"stale-1","m":"device.op"}),
+                0,
+            ),
+            Err(RelayClientError::Transport(_))
+        ));
+        client
+            .try_send_operation(
+                "app-1",
+                json!({"t":"req","reqId":"new-1","m":"device.op"}),
+                1,
+            )
+            .unwrap();
+
+        timeout(Duration::from_secs(2), verification)
+            .await
+            .unwrap()
+            .unwrap();
+        server.await.unwrap();
+        client.shutdown_now();
+        task.await.unwrap();
+    }
+}

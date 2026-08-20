@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-refresh-pairing"
+description = "Enables the refresh_pairing command without any pre-configured scope."
+commands.allow = ["refresh_pairing"]
+
+[[permission]]
+identifier = "deny-refresh-pairing"
+description = "Denies the refresh_pairing command without any pre-configured scope."
+commands.deny = ["refresh_pairing"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-sync-all-devices"
+description = "Enables the set_sync_all_devices command without any pre-configured scope."
+commands.allow = ["set_sync_all_devices"]
+
+[[permission]]
+identifier = "deny-set-sync-all-devices"
+description = "Denies the set_sync_all_devices command without any pre-configured scope."
+commands.deny = ["set_sync_all_devices"]

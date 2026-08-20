@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-stop-output"
+description = "Enables the stop_output command without any pre-configured scope."
+commands.allow = ["stop_output"]
+
+[[permission]]
+identifier = "deny-stop-output"
+description = "Denies the stop_output command without any pre-configured scope."
+commands.deny = ["stop_output"]

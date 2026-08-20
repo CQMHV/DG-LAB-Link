@@ -1,0 +1,30 @@
+[package]
+name = "dg-lab-link"
+version = "0.1.0"
+description = "可扩展的 DG-LAB 波形连接中枢"
+authors = ["DG-LAB Link Contributors"]
+edition = "2024"
+license = "AGPL-3.0-only"
+
+[lib]
+name = "dg_lab_link_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+futures-util = "0.3.34"
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "std"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tauri = { version = "2.11.5", features = [] }
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-native-roots"] }
+tokio-util = { version = "0.7.19", features = ["rt"] }
+url = "2.5.8"
+uuid = { version = "1.24.0", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "sync", "test-util", "time"] }

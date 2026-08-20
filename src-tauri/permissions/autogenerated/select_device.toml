@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-select-device"
+description = "Enables the select_device command without any pre-configured scope."
+commands.allow = ["select_device"]
+
+[[permission]]
+identifier = "deny-select-device"
+description = "Denies the select_device command without any pre-configured scope."
+commands.deny = ["select_device"]
