@@ -1,5 +1,4 @@
 import {
-    ArrowsLeftRight,
     BatteryHigh,
     Broadcast,
     Clock,
@@ -11,7 +10,6 @@ import {
     Stop,
     WarningOctagon,
     Waveform,
-    WifiHigh,
 } from "@phosphor-icons/react";
 
 import { ChannelControl } from "../components/ChannelControl";
@@ -52,22 +50,6 @@ interface DashboardPageProps {
     onStartOutput: () => void;
     onStopOutput: () => void;
 }
-
-const connectionCopy = (snapshot: HubSnapshot): string => {
-    if (snapshot.connection.state === "connecting") {
-        return "Relay 连接中";
-    }
-    if (snapshot.connection.state === "waiting") {
-        return "Relay 已连接，等待 APP";
-    }
-    if (snapshot.connection.state === "connected") {
-        return "WebSocket 服务运行中";
-    }
-    if (snapshot.connection.state === "error") {
-        return "Relay 连接异常";
-    }
-    return "Relay 未连接";
-};
 
 const outputLabel = (state: HubSnapshot["output"]["state"]): string => {
     if (state === "running") {
@@ -115,30 +97,9 @@ export const DashboardPage = ({
         a: snapshot.sources.find((source) => source.id === device?.sourceIdA),
         b: snapshot.sources.find((source) => source.id === device?.sourceIdB),
     };
-    const assignedSourceIds = new Set(
-        snapshot.devices
-            .flatMap((candidate) => [candidate.sourceIdA, candidate.sourceIdB])
-            .filter((sourceId): sourceId is string => Boolean(sourceId)),
-    );
-    const unassignedChannelCount = snapshot.devices.reduce(
-        (count, candidate) =>
-            count + Number(!candidate.sourceIdA) + Number(!candidate.sourceIdB),
-        0,
-    );
-    const globalSourceLabel = snapshot.devices.length === 0
-        ? "未分配"
-        : unassignedChannelCount > 0
-          ? `部分未分配 · ${unassignedChannelCount} 路`
-          : assignedSourceIds.size === 1
-          ? snapshot.sources.find(
-                (source) => source.id === [...assignedSourceIds][0],
-            )?.name ?? "未知输入源"
-          : `混合 · ${assignedSourceIds.size} 种`;
     const canPair =
         (snapshot.connection.state === "waiting" || isConnected) &&
         Boolean(snapshot.connection.pairingUrl);
-    const hasAppOrDevice =
-        snapshot.connection.appCount > 0 || snapshot.devices.length > 0;
     const disabledChannels = (["a", "b"] as const).filter(
         (channel) =>
             (channel === "a"
@@ -163,7 +124,6 @@ export const DashboardPage = ({
             status: device?.channelBStatus ?? "disconnected",
         },
     } satisfies HubSnapshot["channels"];
-    const outputRoute = "A / B 独立";
     const canOutput =
         isConnected &&
         Boolean(device) &&
@@ -180,101 +140,6 @@ export const DashboardPage = ({
 
     return (
         <div className={`dashboard-page ${detached ? "dashboard-page-detached" : ""}`}>
-            {!detached && (
-                <section className="global-control-frame" aria-label="全局控制">
-                <header className="global-control-heading">
-                    <strong>全局控制</strong>
-                    <span>·</span>
-                    <span>全部设备</span>
-                </header>
-                <div className="global-control-items">
-                    <div className="global-control-item global-connection-item">
-                        <span
-                            className={`status-dot status-${snapshot.connection.state}`}
-                        />
-                        <div>
-                            <strong>{connectionCopy(snapshot)}</strong>
-                            <small>{snapshot.connection.endpoint}</small>
-                        </div>
-                    </div>
-                    <div className="global-control-item">
-                        <WifiHigh aria-hidden="true" size={19} weight="light" />
-                        <div>
-                            <strong>
-                                DG-LAB 4 APP · {snapshot.connection.appCount} 台
-                            </strong>
-                            <small>
-                                {snapshot.connection.controllerId
-                                    ? `控制端 ${snapshot.connection.controllerId}`
-                                    : "连接后生成控制端 ID"}
-                            </small>
-                        </div>
-                    </div>
-                    <div className="global-control-item">
-                        <Waveform aria-hidden="true" size={19} weight="light" />
-                        <div>
-                            <span>输入源</span>
-                            <strong>{globalSourceLabel}</strong>
-                        </div>
-                    </div>
-                    <div className="global-control-item">
-                        <ArrowsLeftRight
-                            aria-hidden="true"
-                            size={19}
-                            weight="light"
-                        />
-                        <div>
-                            <span>输出路由</span>
-                            <strong>
-                                {outputRoute} × {snapshot.output.state === "running"
-                                    ? `${snapshot.outputDeviceCount} 台`
-                                    : `全部 ${snapshot.devices.length} 台`}
-                            </strong>
-                        </div>
-                    </div>
-                    <div className="global-control-item global-output-state">
-                        <ShieldCheck aria-hidden="true" size={19} weight="light" />
-                        <div>
-                            <span>输出状态</span>
-                            <strong className={`output-${snapshot.output.state}`}>
-                                {outputLabel(snapshot.output.state)}
-                            </strong>
-                        </div>
-                    </div>
-                    <div className="connection-actions">
-                        {canPair && !hasAppOrDevice ? (
-                            <button
-                                className="primary-compact-button"
-                                onClick={onOpenPairing}
-                                type="button"
-                            >
-                                <LinkSimple aria-hidden="true" size={18} />
-                                连接设备
-                            </button>
-                        ) : !isConnected ? (
-                            <button
-                                className="primary-compact-button"
-                                disabled={busy}
-                                onClick={onConnect}
-                                type="button"
-                            >
-                                {pendingAction === "connect" ? (
-                                    <SpinnerGap
-                                        aria-hidden="true"
-                                        className="spin"
-                                        size={18}
-                                    />
-                                ) : (
-                                    <Broadcast aria-hidden="true" size={18} />
-                                )}
-                                连接服务
-                            </button>
-                        ) : null}
-                    </div>
-                </div>
-                </section>
-            )}
-
             <section className="device-workspace-shell" aria-label="当前设备仪表盘">
                 {!detached && (
                     <DeviceTabs

@@ -71,7 +71,7 @@ describe("DG-LAB Link 前端", () => {
         const user = userEvent.setup();
         render(<App />);
 
-        await screen.findByRole("region", { name: "全局控制" });
+        await screen.findByRole("region", { name: "当前设备仪表盘" });
         await user.click(screen.getByRole("button", { name: "输入源" }));
         expect(
             screen.getByRole("heading", { level: 1, name: "输入源" }),
@@ -94,7 +94,7 @@ describe("DG-LAB Link 前端", () => {
 
         await user.click(screen.getByRole("button", { name: "控制台" }));
         expect(
-            screen.getByRole("region", { name: "全局控制" }),
+            screen.getByRole("region", { name: "当前设备仪表盘" }),
         ).toBeTruthy();
     });
 
@@ -157,7 +157,7 @@ describe("DG-LAB Link 前端", () => {
     it("展示后端快照中的输出错误", async () => {
         const initial = await getHubSnapshot();
         render(<App />);
-        await screen.findByRole("region", { name: "全局控制" });
+        await screen.findByRole("region", { name: "当前设备仪表盘" });
 
         act(() => {
             __emitMockSnapshot({
@@ -176,7 +176,7 @@ describe("DG-LAB Link 前端", () => {
     it("展示后端快照中的连接错误", async () => {
         const initial = await getHubSnapshot();
         render(<App />);
-        await screen.findByRole("region", { name: "全局控制" });
+        await screen.findByRole("region", { name: "当前设备仪表盘" });
 
         act(() => {
             __emitMockSnapshot({
@@ -195,7 +195,7 @@ describe("DG-LAB Link 前端", () => {
     it("被控端关闭通道时仍允许发送控制信息", async () => {
         const initial = await getHubSnapshot();
         render(<App />);
-        await screen.findByRole("region", { name: "全局控制" });
+        await screen.findByRole("region", { name: "当前设备仪表盘" });
 
         act(() => {
             __emitMockSnapshot({
@@ -293,7 +293,7 @@ describe("DG-LAB Link 前端", () => {
         ).toBeNull();
 
         const openButton = await screen.findByRole("button", {
-            name: "连接设备",
+            name: "连接新设备",
         });
         await user.click(openButton);
         expect(
@@ -327,16 +327,14 @@ describe("DG-LAB Link 前端", () => {
         expect(document.activeElement).toBe(openButton);
     });
 
-    it("明确区分全局控制、当前设备和全部设备输出", async () => {
+    it("明确区分当前设备和全部设备输出", async () => {
         const user = userEvent.setup();
         render(<App />);
 
         expect(
-            await screen.findByRole("region", { name: "全局控制" }),
+            await screen.findByRole("region", { name: "当前设备仪表盘" }),
         ).toBeTruthy();
-        expect(
-            screen.getByRole("region", { name: "当前设备仪表盘" }),
-        ).toBeTruthy();
+        expect(screen.queryByRole("region", { name: "全局控制" })).toBeNull();
         expect(
             screen.getByText("郊狼 3.0", {
                 selector: ".device-scope-title strong",
@@ -490,8 +488,7 @@ describe("DG-LAB Link 前端", () => {
         const user = userEvent.setup();
         render(<App />);
 
-        expect(await screen.findByText("混合 · 2 种")).toBeTruthy();
-        const firstDeviceSourceA = screen.getByRole("combobox", {
+        const firstDeviceSourceA = await screen.findByRole("combobox", {
             name: "选择 郊狼 3.0 A 通道的输入源",
         }) as HTMLSelectElement;
         const firstDeviceSourceB = screen.getByRole("combobox", {
@@ -513,8 +510,6 @@ describe("DG-LAB Link 前端", () => {
                 )?.assignedChannelCount,
             ).toBe(3);
         });
-        expect(screen.getByText("混合 · 2 种")).toBeTruthy();
-
         await user.click(screen.getByRole("button", { name: "新建标签页" }));
         await user.click(
             screen.getByRole("button", {
@@ -534,7 +529,6 @@ describe("DG-LAB Link 前端", () => {
             expect(snapshot.devices[1].sourceIdA).toBe("source-manual");
             expect(snapshot.devices[1].sourceIdB).toBe("source-manual");
         });
-        expect(screen.queryByText("混合 · 2 种")).toBeNull();
     });
 
     it("新标签页可以重复打开同一设备并共享实时状态", async () => {
