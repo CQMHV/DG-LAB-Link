@@ -21,10 +21,50 @@
     --red: #df5b53;
     --warning: #d8a751;
     --radius: 10px;
+    --scrollbar-thumb: rgba(151, 153, 145, 0.32);
+    --scrollbar-thumb-hover: rgba(240, 207, 106, 0.52);
+    --scrollbar-thumb-active: rgba(240, 207, 106, 0.72);
 }
 
 * {
     box-sizing: border-box;
+    scrollbar-color: var(--scrollbar-thumb) transparent;
+    scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-corner {
+    background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thumb);
+    background-clip: padding-box;
+    border: 2px solid transparent;
+    border-radius: 999px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+    *::-webkit-scrollbar-thumb:hover {
+        background: var(--scrollbar-thumb-hover);
+        background-clip: padding-box;
+    }
+}
+
+*::-webkit-scrollbar-thumb:active {
+    background: var(--scrollbar-thumb-active);
+    background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-button {
+    display: none;
+    width: 0;
+    height: 0;
 }
 
 html,
@@ -276,8 +316,6 @@ code {
     align-items: flex-end;
     overflow-x: auto;
     overflow-y: hidden;
-    scrollbar-color: #3a3c38 transparent;
-    scrollbar-width: thin;
 }
 
 .device-tab-item {
