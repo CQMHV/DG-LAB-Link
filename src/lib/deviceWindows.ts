@@ -5,53 +5,74 @@ import type { DeviceSnapshot } from "./contracts";
 export interface DeviceWindowContext {
     detached: boolean;
     deviceId: string | null;
+    tabId: string | null;
 }
 
-const hashDeviceId = (deviceId: string): string => {
+interface DeviceWindowOptions {
+    device?: DeviceSnapshot;
+    tabId: string;
+}
+
+const hashTabId = (tabId: string): string => {
     let hash = 0x811c9dc5;
-    for (let index = 0; index < deviceId.length; index += 1) {
-        hash ^= deviceId.charCodeAt(index);
+    for (let index = 0; index < tabId.length; index += 1) {
+        hash ^= tabId.charCodeAt(index);
         hash = Math.imul(hash, 0x01000193);
     }
     return (hash >>> 0).toString(16).padStart(8, "0");
 };
 
-export const deviceWindowLabel = (deviceId: string): string =>
-    `device-${deviceId.length}-${hashDeviceId(deviceId)}`;
+export const deviceWindowLabel = (tabId: string): string =>
+    `device-view-${tabId.length}-${hashTabId(tabId)}`;
 
 export const getDeviceWindowContext = (): DeviceWindowContext => {
     const query = new URLSearchParams(window.location.search);
-    const deviceId = query.get("deviceId");
     return {
-        detached: query.get("detached") === "1" && Boolean(deviceId),
-        deviceId,
+        detached: query.get("detached") === "1",
+        deviceId: query.get("deviceId"),
+        tabId: query.get("tabId"),
     };
 };
 
-const deviceWindowQuery = (deviceId: string): URLSearchParams => {
+export const updateDetachedWindowDevice = (deviceId: string | null): void => {
+    const query = new URLSearchParams(window.location.search);
+    if (deviceId) {
+        query.set("deviceId", deviceId);
+    } else {
+        query.delete("deviceId");
+    }
+    window.history.replaceState(null, "", `${window.location.pathname}?${query}`);
+};
+
+const deviceWindowQuery = ({
+    device,
+    tabId,
+}: DeviceWindowOptions): URLSearchParams => {
     const query = new URLSearchParams();
     query.set("detached", "1");
-    query.set("deviceId", deviceId);
+    query.set("tabId", tabId);
+    if (device) {
+        query.set("deviceId", device.controlId);
+    }
     return query;
 };
 
-const browserDeviceWindowUrl = (deviceId: string): string => {
+const browserDeviceWindowUrl = (options: DeviceWindowOptions): string => {
     const url = new URL(window.location.href);
-    url.search = "";
+    url.search = deviceWindowQuery(options).toString();
     url.hash = "";
-    url.search = deviceWindowQuery(deviceId).toString();
     return url.toString();
 };
 
 export const openDeviceWindow = async (
-    device: DeviceSnapshot,
+    options: DeviceWindowOptions,
 ): Promise<void> => {
-    const label = deviceWindowLabel(device.controlId);
+    const label = deviceWindowLabel(options.tabId);
+    const title = options.device?.name ?? "新标签页";
 
     if (!("__TAURI_INTERNALS__" in window)) {
-        const url = browserDeviceWindowUrl(device.controlId);
         const popup = window.open(
-            url,
+            browserDeviceWindowUrl(options),
             label,
             "popup,width=1080,height=760,left=120,top=90",
         );
@@ -70,9 +91,9 @@ export const openDeviceWindow = async (
     }
 
     await new Promise<void>((resolve, reject) => {
-        const window = new WebviewWindow(label, {
-            url: `index.html?${deviceWindowQuery(device.controlId).toString()}`,
-            title: `DG-LAB Link · ${device.name}`,
+        const detachedWindow = new WebviewWindow(label, {
+            url: `index.html?${deviceWindowQuery(options).toString()}`,
+            title: `DG-LAB Link · ${title}`,
             width: 1080,
             height: 760,
             minWidth: 1080,
@@ -84,8 +105,8 @@ export const openDeviceWindow = async (
             focus: true,
         });
 
-        void window.once("tauri://created", () => resolve());
-        void window.once("tauri://error", (event) => {
+        void detachedWindow.once("tauri://created", () => resolve());
+        void detachedWindow.once("tauri://error", (event) => {
             reject(new Error(`无法创建设备窗口：${String(event.payload)}`));
         });
     });

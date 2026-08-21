@@ -10,6 +10,7 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { PairingModal } from "./components/PairingModal";
+import type { DeviceViewTab } from "./components/DeviceTabs";
 import { WindowChrome } from "./components/WindowChrome";
 import { useHubSnapshot } from "./hooks/useHubSnapshot";
 import {
@@ -30,6 +31,7 @@ import type { HubChannel, SafetyUpdate } from "./lib/contracts";
 import {
     getDeviceWindowContext,
     openDeviceWindow,
+    updateDetachedWindowDevice,
 } from "./lib/deviceWindows";
 import { getErrorMessage } from "./lib/errors";
 import { DashboardPage } from "./pages/DashboardPage";
@@ -54,10 +56,32 @@ const navigation = [
 
 const windowContext = getDeviceWindowContext();
 
+interface DashboardTabsState {
+    activeTabId: string;
+    tabs: DeviceViewTab[];
+}
+
+let nextDeviceViewTabId = 0;
+
+const createDeviceViewTab = (deviceId: string | null = null): DeviceViewTab => ({
+    id: `device-view-${Date.now()}-${++nextDeviceViewTabId}`,
+    deviceId,
+});
+
 export default function App() {
     const { snapshot, loading, error: snapshotError, refresh } =
         useHubSnapshot();
     const [page, setPage] = useState<PageId>("dashboard");
+    const [dashboardTabs, setDashboardTabs] = useState<DashboardTabsState>(() => {
+        const initialTab = createDeviceViewTab();
+        return {
+            activeTabId: initialTab.id,
+            tabs: [initialTab],
+        };
+    });
+    const [detachedDeviceId, setDetachedDeviceId] = useState(
+        windowContext.deviceId,
+    );
     const [pendingAction, setPendingAction] = useState<string | null>(null);
     const [actionError, setActionError] = useState<string | null>(null);
     const [emergencyPending, setEmergencyPending] = useState(false);
@@ -67,6 +91,7 @@ export default function App() {
     >(null);
     const [pairingOpen, setPairingOpen] = useState(false);
     const emergencyGeneration = useRef(0);
+    const dashboardTabsInitialized = useRef(false);
     const demoMode = isBrowserDemo();
 
     const runAction = useCallback(
@@ -121,6 +146,74 @@ export default function App() {
         void runAction("safety", () => updateSafety(update));
     };
 
+    const handleSelectTab = (tabId: string) => {
+        const tab = dashboardTabs.tabs.find((candidate) => candidate.id === tabId);
+        setDashboardTabs((current) => ({
+            ...current,
+            activeTabId: tabId,
+        }));
+        const deviceId = tab?.deviceId;
+        if (deviceId) {
+            void runAction(`device-${deviceId}`, () => selectDevice(deviceId));
+        }
+    };
+
+    const handleSelectDevice = (deviceId: string) => {
+        if (windowContext.detached) {
+            setDetachedDeviceId(deviceId);
+            updateDetachedWindowDevice(deviceId);
+        } else {
+            setDashboardTabs((current) => ({
+                ...current,
+                tabs: current.tabs.map((tab) =>
+                    tab.id === current.activeTabId ? { ...tab, deviceId } : tab,
+                ),
+            }));
+        }
+        void runAction(`device-${deviceId}`, () => selectDevice(deviceId));
+    };
+
+    const handleNewDeviceTab = () => {
+        const tab = createDeviceViewTab();
+        setDashboardTabs((current) => ({
+            activeTabId: tab.id,
+            tabs: [...current.tabs, tab],
+        }));
+    };
+
+    const handleDetachTab = (tab: DeviceViewTab) => {
+        const device = snapshot?.devices.find(
+            (candidate) => candidate.controlId === tab.deviceId,
+        );
+        void runAction(`window-${tab.id}`, async () => {
+            await openDeviceWindow({ device, tabId: tab.id });
+            setDashboardTabs((current) => {
+                const detachedIndex = current.tabs.findIndex(
+                    (candidate) => candidate.id === tab.id,
+                );
+                const remainingTabs = current.tabs.filter(
+                    (candidate) => candidate.id !== tab.id,
+                );
+                if (remainingTabs.length === 0) {
+                    const replacement = createDeviceViewTab();
+                    return {
+                        activeTabId: replacement.id,
+                        tabs: [replacement],
+                    };
+                }
+                return {
+                    activeTabId:
+                        current.activeTabId === tab.id
+                            ? remainingTabs[
+                                  Math.min(detachedIndex, remainingTabs.length - 1)
+                              ].id
+                            : current.activeTabId,
+                    tabs: remainingTabs,
+                };
+            });
+        });
+    };
+
     const handleStartOutput = () => {
         const startGeneration = emergencyGeneration.current;
         void runAction("output", async () => {
@@ -138,13 +231,47 @@ export default function App() {
         externalError === dismissedExternalError ? null : externalError;
     const appError =
         emergencyError ?? actionError ?? visibleExternalError;
-    const detachedDevice = snapshot?.devices.find(
-        (device) => device.controlId === windowContext.deviceId,
+    const activeDashboardTab = dashboardTabs.tabs.find(
+        (tab) => tab.id === dashboardTabs.activeTabId,
     );
+    const detachedDevice = snapshot?.devices.find(
+        (device) => device.controlId === detachedDeviceId,
+    );
+    const detachedWindowTitle = detachedDevice?.name ??
+        (detachedDeviceId ? "设备已离线" : "新标签页");
+    const activeDashboardDeviceId = windowContext.detached
+        ? detachedDeviceId
+        : dashboardTabsInitialized.current
+          ? activeDashboardTab?.deviceId ?? null
+          : snapshot?.selectedDeviceId ?? snapshot?.devices[0]?.controlId ?? null;
 
     useEffect(() => {
         setDismissedExternalError(null);
     }, [externalError]);
+
+    useEffect(() => {
+        if (
+            windowContext.detached ||
+            !snapshot ||
+            dashboardTabsInitialized.current
+        ) {
+            return;
+        }
+        dashboardTabsInitialized.current = true;
+        const initialDeviceId =
+            snapshot.selectedDeviceId ?? snapshot.devices[0]?.controlId ?? null;
+        if (!initialDeviceId) {
+            return;
+        }
+        setDashboardTabs((current) => ({
+            ...current,
+            tabs: current.tabs.map((tab) =>
+                tab.id === current.activeTabId
+                    ? { ...tab, deviceId: initialDeviceId }
+                    : tab,
+            ),
+        }));
+    }, [snapshot]);
 
     return (
         <div
@@ -153,7 +280,7 @@ export default function App() {
             <WindowChrome
                 title={
                     windowContext.detached
-                        ? `DG-LAB Link · ${detachedDevice?.name ?? "设备窗口"}`
+                        ? `DG-LAB Link · ${detachedWindowTitle}`
                         : undefined
                 }
             />
@@ -200,10 +327,11 @@ export default function App() {
                     <>
                         {(windowContext.detached || page === "dashboard") && (
                             <DashboardPage
+                                activeTabId={
+                                    dashboardTabs.activeTabId
+                                }
                                 activeDeviceId={
-                                    windowContext.detached
-                                        ? windowContext.deviceId
-                                        : snapshot.selectedDeviceId
+                                    activeDashboardDeviceId
                                 }
                                 detached={windowContext.detached}
                                 onAdjust={handleAdjust}
@@ -211,19 +339,12 @@ export default function App() {
                                     void runAction("connect", connectRelay)
                                 }
                                 emergencyPending={emergencyPending}
-                                onDetachDevice={(device) =>
-                                    void runAction(
-                                        `window-${device.controlId}`,
-                                        () => openDeviceWindow(device),
-                                    )
-                                }
+                                onDetachTab={handleDetachTab}
                                 onEmergencyStop={() => void runEmergencyStop()}
+                                onNewDeviceTab={handleNewDeviceTab}
                                 onOpenPairing={() => setPairingOpen(true)}
-                                onSelectDevice={(deviceId) =>
-                                    void runAction(`device-${deviceId}`, () =>
-                                        selectDevice(deviceId),
-                                    )
-                                }
+                                onSelectDevice={handleSelectDevice}
+                                onSelectTab={handleSelectTab}
                                 onSetDeviceChannelSource={(deviceId, channel, sourceId) =>
                                     void runAction(`source-${deviceId}-${channel}`, () =>
                                         setDeviceChannelSource(
@@ -244,6 +365,7 @@ export default function App() {
                                 }
                                 pendingAction={pendingAction}
                                 snapshot={snapshot}
+                                tabs={dashboardTabs.tabs}
                             />
                         )}
                         {!windowContext.detached && page === "sources" && (
@@ -260,9 +382,7 @@ export default function App() {
                         {!windowContext.detached && page === "devices" && (
                             <DevicesPage
                                 onSelectDevice={(deviceId) =>
-                                    void runAction(`device-${deviceId}`, () =>
-                                        selectDevice(deviceId),
-                                    )
+                                    handleSelectDevice(deviceId)
                                 }
                                 onSetSyncAllDevices={(enabled) =>
                                     void runAction("sync-devices", () =>

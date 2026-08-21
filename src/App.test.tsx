@@ -1,6 +1,14 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+    act,
+    cleanup,
+    createEvent,
+    fireEvent,
+    render,
+    screen,
+    waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -11,6 +19,7 @@ import {
     __setMockStartOutputCompletion,
     getHubSnapshot,
 } from "./lib/bridge";
+import { DashboardPage } from "./pages/DashboardPage";
 
 class ResizeObserverMock {
     observe() {}
@@ -211,7 +220,6 @@ describe("DG-LAB Link 前端", () => {
         expect(
             await screen.findByText("A 通道已关闭，仍接收控制"),
         ).toBeTruthy();
-        expect(screen.getByText("此标签控制")).toBeTruthy();
         expect(
             (
                 screen.getByRole("button", { name: "开始输出" }) as HTMLButtonElement
@@ -271,6 +279,19 @@ describe("DG-LAB Link 前端", () => {
         });
         render(<App />);
 
+        expect(
+            await screen.findByRole("tab", { name: /新标签页/ }),
+        ).toBeTruthy();
+        expect(
+            screen.getByRole("region", { name: "新设备标签页" }),
+        ).toBeTruthy();
+        expect(screen.getByRole("heading", { name: "连接设备" })).toBeTruthy();
+        expect(screen.queryByTestId("channel-a-gauge")).toBeNull();
+        expect(screen.queryByTestId("channel-b-gauge")).toBeNull();
+        expect(
+            screen.queryByRole("group", { name: "选择已连接设备" }),
+        ).toBeNull();
+
         const openButton = await screen.findByRole("button", {
             name: "连接设备",
         });
@@ -309,7 +330,11 @@ describe("DG-LAB Link 前端", () => {
         expect(
             screen.getByRole("region", { name: "当前设备仪表盘" }),
         ).toBeTruthy();
-        expect(screen.getByText("此标签控制")).toBeTruthy();
+        expect(
+            screen.getByText("郊狼 3.0", {
+                selector: ".device-scope-title strong",
+            }),
+        ).toBeTruthy();
         expect(screen.getByText("全部设备输出")).toBeTruthy();
         expect(screen.getByText("应用到全部 2 台在线设备")).toBeTruthy();
         expect(screen.queryByRole("button", { name: "切换设备" })).toBeNull();
@@ -344,7 +369,6 @@ describe("DG-LAB Link 前端", () => {
         });
 
         await user.click(screen.getByRole("button", { name: "控制台" }));
-        expect(screen.getByText("此标签显示")).toBeTruthy();
         expect(
             screen.getByText("强度调节同步到全部设备"),
         ).toBeTruthy();
@@ -420,17 +444,25 @@ describe("DG-LAB Link 前端", () => {
         });
     });
 
-    it("可以通过设备标签切换并只调整该设备", async () => {
+    it("可以在新标签页选择另一台设备并只调整该设备", async () => {
         const user = userEvent.setup();
         render(<App />);
 
-        const secondTab = await screen.findByRole("tab", {
-            name: /郊狼 2\.0/,
-        });
-        await user.click(secondTab);
+        await screen.findByTestId("channel-a-gauge");
+        await user.click(screen.getByRole("button", { name: "新建标签页" }));
+        await user.click(
+            screen.getByRole("button", {
+                name: "在当前标签页打开 郊狼 2.0",
+            }),
+        );
 
         await waitFor(() => {
-            expect(screen.getByText("此标签控制")).toBeTruthy();
+            expect(screen.getByRole("tab", { name: /郊狼 2\.0/ })).toBeTruthy();
+            expect(
+                screen.getByText("郊狼 2.0", {
+                    selector: ".device-scope-title strong",
+                }),
+            ).toBeTruthy();
             expect(
                 (screen.getByTestId("channel-a-intensity") as HTMLInputElement)
                     .value,
@@ -476,7 +508,12 @@ describe("DG-LAB Link 前端", () => {
         });
         expect(screen.getByText("混合 · 2 种")).toBeTruthy();
 
-        await user.click(screen.getByRole("tab", { name: /郊狼 2\.0/ }));
+        await user.click(screen.getByRole("button", { name: "新建标签页" }));
+        await user.click(
+            screen.getByRole("button", {
+                name: "在当前标签页打开 郊狼 2.0",
+            }),
+        );
         const secondDeviceSourceB = screen.getByRole("combobox", {
             name: "选择 郊狼 2.0 B 通道的输入源",
         }) as HTMLSelectElement;
@@ -491,6 +528,53 @@ describe("DG-LAB Link 前端", () => {
             expect(snapshot.devices[1].sourceIdB).toBe("source-manual");
         });
         expect(screen.queryByText("混合 · 2 种")).toBeNull();
+    });
+
+    it("新标签页可以重复打开同一设备并共享实时状态", async () => {
+        const user = userEvent.setup();
+        render(<App />);
+        const initialIntensity = (await getHubSnapshot()).devices[0].intensityA;
+
+        await user.click(
+            await screen.findByRole("button", { name: "开始输出" }),
+        );
+        await waitFor(async () => {
+            expect((await getHubSnapshot()).output.state).toBe("running");
+        });
+        await user.click(screen.getByRole("button", { name: "新建标签页" }));
+
+        expect(
+            await screen.findByRole("region", { name: "新设备标签页" }),
+        ).toBeTruthy();
+        expect(screen.getByRole("tab", { name: /新标签页/ })).toBeTruthy();
+        expect(screen.queryByTestId("channel-a-gauge")).toBeNull();
+        expect((await getHubSnapshot()).output.state).toBe("running");
+        expect(screen.getByRole("button", { name: "停止输出" })).toBeTruthy();
+
+        await user.click(
+            screen.getByRole("button", {
+                name: "在当前标签页打开 郊狼 3.0",
+            }),
+        );
+        expect(await screen.findByTestId("channel-a-gauge")).toBeTruthy();
+        expect(screen.queryByRole("tab", { name: /新标签页/ })).toBeNull();
+        expect(screen.getAllByRole("tab", { name: /郊狼 3\.0/ })).toHaveLength(2);
+
+        await user.click(
+            screen.getByRole("button", { name: "提高 A 通道强度" }),
+        );
+        await waitFor(() => {
+            expect(
+                (screen.getByTestId("channel-a-intensity") as HTMLInputElement)
+                    .value,
+            ).toBe(String(initialIntensity + 1));
+        });
+        await user.click(screen.getAllByRole("tab", { name: /郊狼 3\.0/ })[0]);
+        expect(
+            (await screen.findByTestId("channel-a-intensity") as HTMLInputElement)
+                .value,
+        ).toBe(String(initialIntensity + 1));
+        expect((await getHubSnapshot()).output.state).toBe("running");
     });
 
     it("可以按设备同步 A/B 输入源并在关闭后恢复独立选择", async () => {
@@ -570,24 +654,91 @@ describe("DG-LAB Link 前端", () => {
         expect(defaultSource.value).toBe("");
     });
 
-    it("可以把设备仪表盘拉出为独立窗口", async () => {
-        const user = userEvent.setup();
+    it("可以把视图标签拖出为独立窗口并从主窗口移除", async () => {
         const focus = vi.fn();
         const open = vi
             .spyOn(window, "open")
             .mockReturnValue({ focus } as unknown as Window);
         render(<App />);
 
-        await user.click(
-            await screen.findByRole("button", {
-                name: "在独立窗口打开 郊狼 3.0",
-            }),
-        );
+        const tab = await screen.findByRole("tab", { name: /郊狼 3\.0/ });
+        const tabItem = tab.closest(".device-tab-item");
+        expect(tabItem).toBeTruthy();
+        const dragStart = createEvent.dragStart(tabItem as HTMLElement, {
+            dataTransfer: {
+                effectAllowed: "none",
+                setData: vi.fn(),
+            },
+        });
+        Object.defineProperty(dragStart, "screenY", { value: 100 });
+        fireEvent(tabItem as HTMLElement, dragStart);
+        const dragEnd = createEvent.dragEnd(tabItem as HTMLElement);
+        Object.defineProperty(dragEnd, "screenY", { value: 190 });
+        fireEvent(tabItem as HTMLElement, dragEnd);
 
-        expect(open).toHaveBeenCalledOnce();
+        await waitFor(() => expect(open).toHaveBeenCalledOnce());
         expect(open.mock.calls[0][0]).toContain("detached=1");
         expect(open.mock.calls[0][0]).toContain("deviceId=demo-app%3Aslot-a1");
+        expect(open.mock.calls[0][0]).toContain("tabId=device-view-");
         expect(focus).toHaveBeenCalledOnce();
+        await waitFor(() => {
+            expect(screen.queryByRole("tab", { name: /郊狼 3\.0/ })).toBeNull();
+        });
+        expect(screen.getByRole("region", { name: "新设备标签页" })).toBeTruthy();
+        expect(
+            screen.getByRole("button", {
+                name: "在当前标签页打开 郊狼 3.0",
+            }),
+        ).toBeTruthy();
+        expect(
+            screen.queryByRole("button", { name: /独立窗口打开/ }),
+        ).toBeNull();
+    });
+
+    it("独立设备窗口只显示自身配置", async () => {
+        const snapshot = await getHubSnapshot();
+        render(
+            <DashboardPage
+                activeTabId="detached-test-tab"
+                activeDeviceId={snapshot.devices[0].controlId}
+                detached
+                emergencyPending={false}
+                onAdjust={vi.fn()}
+                onConnect={vi.fn()}
+                onDetachTab={vi.fn()}
+                onEmergencyStop={vi.fn()}
+                onNewDeviceTab={vi.fn()}
+                onOpenPairing={vi.fn()}
+                onSelectDevice={vi.fn()}
+                onSelectTab={vi.fn()}
+                onSetDeviceChannelSource={vi.fn()}
+                onSetDeviceChannelSourceSync={vi.fn()}
+                onStartOutput={vi.fn()}
+                onStopOutput={vi.fn()}
+                pendingAction={null}
+                snapshot={snapshot}
+                tabs={[
+                    {
+                        id: "detached-test-tab",
+                        deviceId: snapshot.devices[0].controlId,
+                    },
+                ]}
+            />,
+        );
+
+        expect(
+            screen.getByText("郊狼 3.0", {
+                selector: ".device-scope-title strong",
+            }),
+        ).toBeTruthy();
+        expect(screen.getByTestId("channel-a-gauge")).toBeTruthy();
+        expect(screen.getByTestId("channel-b-gauge")).toBeTruthy();
+        expect(screen.queryByRole("region", { name: "全局控制" })).toBeNull();
+        expect(
+            screen.queryByRole("region", { name: "安全限制与输出控制" }),
+        ).toBeNull();
+        expect(screen.queryByRole("tablist", { name: "设备视图" })).toBeNull();
+        expect(screen.queryByRole("button", { name: "新建标签页" })).toBeNull();
     });
 
     it("忽略 revision 更旧的乱序快照", async () => {
