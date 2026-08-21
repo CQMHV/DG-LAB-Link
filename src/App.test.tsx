@@ -303,9 +303,16 @@ describe("DG-LAB Link 前端", () => {
         const closeButton = screen.getByRole("button", {
             name: "关闭配对窗口",
         });
+        expect(
+            screen.getByRole("button", { name: "复制控制端 ID" }),
+        ).toBeTruthy();
         const copyButton = screen.getByRole("button", {
             name: "复制配对链接",
         });
+        expect(initial.connection.pairingUrl).toBeTruthy();
+        expect(
+            screen.queryByText(initial.connection.pairingUrl as string),
+        ).toBeNull();
 
         await waitFor(() => {
             expect(document.activeElement).toBe(closeButton);
@@ -680,6 +687,7 @@ describe("DG-LAB Link 前端", () => {
         expect(open.mock.calls[0][0]).toContain("detached=1");
         expect(open.mock.calls[0][0]).toContain("deviceId=demo-app%3Aslot-a1");
         expect(open.mock.calls[0][0]).toContain("tabId=device-view-");
+        expect(open.mock.calls[0][2]).toContain("width=640,height=520");
         expect(focus).toHaveBeenCalledOnce();
         await waitFor(() => {
             expect(screen.queryByRole("tab", { name: /郊狼 3\.0/ })).toBeNull();

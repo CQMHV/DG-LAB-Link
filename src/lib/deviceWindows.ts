@@ -74,7 +74,7 @@ export const openDeviceWindow = async (
         const popup = window.open(
             browserDeviceWindowUrl(options),
             label,
-            "popup,width=1080,height=760,left=120,top=90",
+            "popup,width=640,height=520,left=120,top=90",
         );
         if (!popup) {
             throw new Error("浏览器阻止了设备窗口，请允许此站点打开弹出窗口");
@@ -94,10 +94,10 @@ export const openDeviceWindow = async (
         const detachedWindow = new WebviewWindow(label, {
             url: `index.html?${deviceWindowQuery(options).toString()}`,
             title: `DG-LAB Link · ${title}`,
-            width: 1080,
-            height: 760,
-            minWidth: 1080,
-            minHeight: 620,
+            width: 640,
+            height: 520,
+            minWidth: 640,
+            minHeight: 520,
             center: true,
             decorations: false,
             resizable: true,

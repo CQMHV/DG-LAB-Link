@@ -23,7 +23,9 @@ export const PairingModal = ({
     const closeButtonRef = useRef<HTMLButtonElement>(null);
     const [qrCode, setQrCode] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
-    const [copied, setCopied] = useState(false);
+    const [copiedTarget, setCopiedTarget] = useState<
+        "controllerId" | "pairingUrl" | null
+    >(null);
 
     useEffect(() => {
         let active = true;
@@ -112,13 +114,24 @@ export const PairingModal = ({
         };
     }, [onClose]);
 
-    const copyPairingUrl = async () => {
+    const copyValue = async (
+        value: string,
+        target: "controllerId" | "pairingUrl",
+    ) => {
         try {
-            await navigator.clipboard.writeText(pairingUrl);
-            setCopied(true);
-            window.setTimeout(() => setCopied(false), 1600);
+            await navigator.clipboard.writeText(value);
+            setCopiedTarget(target);
+            window.setTimeout(() => {
+                setCopiedTarget((current) =>
+                    current === target ? null : current,
+                );
+            }, 1600);
         } catch {
-            setError("无法访问剪贴板，请手动复制配对链接");
+            setError(
+                target === "controllerId"
+                    ? "无法访问剪贴板，请手动记录控制端 ID"
+                    : "无法访问剪贴板，请手动复制配对链接",
+            );
         }
     };
 
@@ -151,10 +164,6 @@ export const PairingModal = ({
                     </button>
                 </div>
 
-                <p className="modal-description">
-                    使用 DG-LAB APP 扫描二维码，中枢会自动接收 APP 与设备状态。
-                </p>
-
                 <div className="qr-frame">
                     {qrCode ? (
                         <img alt="DG-LAB APP 配对二维码" src={qrCode} />
@@ -170,28 +179,43 @@ export const PairingModal = ({
                     )}
                 </div>
 
-                {controllerId && (
-                    <div className="pairing-id">
-                        <span>控制端 ID</span>
-                        <code>{controllerId}</code>
+                <div className="pairing-meta-row">
+                    <span>控制端 ID</span>
+                    <code>{controllerId ?? "等待分配"}</code>
+                    <div className="pairing-copy-actions">
+                        <button
+                            aria-label="复制控制端 ID"
+                            className="copy-button"
+                            disabled={!controllerId}
+                            onClick={() =>
+                                controllerId &&
+                                void copyValue(controllerId, "controllerId")
+                            }
+                            title="复制控制端 ID"
+                            type="button"
+                        >
+                            {copiedTarget === "controllerId" ? (
+                                <Check aria-hidden="true" size={18} />
+                            ) : (
+                                <Copy aria-hidden="true" size={18} />
+                            )}
+                        </button>
+                        <button
+                            aria-label="复制配对链接"
+                            className="copy-button"
+                            onClick={() =>
+                                void copyValue(pairingUrl, "pairingUrl")
+                            }
+                            title="复制配对链接"
+                            type="button"
+                        >
+                            {copiedTarget === "pairingUrl" ? (
+                                <Check aria-hidden="true" size={18} />
+                            ) : (
+                                <LinkSimple aria-hidden="true" size={18} />
+                            )}
+                        </button>
                     </div>
-                )}
-
-                <div className="pairing-link-row">
-                    <LinkSimple aria-hidden="true" size={18} />
-                    <span title={pairingUrl}>{pairingUrl}</span>
-                    <button
-                        aria-label="复制配对链接"
-                        className="copy-button"
-                        onClick={() => void copyPairingUrl()}
-                        type="button"
-                    >
-                        {copied ? (
-                            <Check aria-hidden="true" size={18} />
-                        ) : (
-                            <Copy aria-hidden="true" size={18} />
-                        )}
-                    </button>
                 </div>
 
                 {error && <p className="inline-error">{error}</p>}

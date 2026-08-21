@@ -38,8 +38,8 @@ body,
 }
 
 body {
-    min-width: 1080px;
-    min-height: 720px;
+    min-width: 0;
+    min-height: 0;
     background: var(--bg);
 }
 
@@ -725,15 +725,18 @@ code {
 
 .device-scope-title {
     display: flex;
+    min-width: 0;
     gap: 8px;
     align-items: center;
     white-space: nowrap;
 }
 
 .device-scope-title strong {
+    overflow: hidden;
     color: var(--gold);
     font-size: 15px;
     font-weight: 650;
+    text-overflow: ellipsis;
 }
 
 .device-source-control {
@@ -952,7 +955,7 @@ code {
     display: grid;
     min-width: 0;
     min-height: 0;
-    grid-template-columns: repeat(2, minmax(220px, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     align-items: stretch;
     overflow: hidden;
 }
@@ -2199,7 +2202,7 @@ code {
     display: grid;
     width: 232px;
     height: 232px;
-    margin: 0 auto 20px;
+    margin: 24px auto 20px;
     padding: 12px;
     place-items: center;
     background: var(--gold);
@@ -2221,43 +2224,34 @@ code {
     font-size: 12px;
 }
 
-.pairing-id {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 10px;
-    padding: 10px 12px;
-    background: #121412;
-    border-radius: 7px;
-}
-
-.pairing-id span {
-    color: #777973;
-    font-size: 11px;
-}
-
-.pairing-id code {
-    color: var(--gold);
-    font-size: 12px;
-}
-
-.pairing-link-row {
+.pairing-meta-row {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr) auto;
-    gap: 9px;
+    gap: 10px;
     align-items: center;
-    padding: 10px 10px 10px 12px;
-    color: #848680;
+    padding: 10px 12px;
     background: #121412;
     border: 1px solid var(--border);
     border-radius: 7px;
 }
 
-.pairing-link-row > span {
+.pairing-meta-row span {
+    color: #777973;
+    font-size: 11px;
+}
+
+.pairing-meta-row code {
     overflow: hidden;
-    font-size: 10px;
+    color: var(--gold);
+    font-size: 12px;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+.pairing-copy-actions {
+    display: flex;
+    gap: 6px;
+    align-items: center;
 }
 
 .copy-button {
@@ -2383,6 +2377,70 @@ code {
     }
 }
 
+@container device-panel (max-width: 720px) {
+    .device-workspace-heading {
+        gap: 8px;
+        padding: 0 10px;
+    }
+
+    .device-scope-title {
+        max-width: 92px;
+        flex: 0 1 auto;
+    }
+
+    .device-scope-meta {
+        display: none;
+    }
+
+    .device-source-control {
+        flex: 1 1 auto;
+        justify-content: flex-end;
+        margin-left: 0;
+        padding-left: 8px;
+    }
+
+    .device-source-control > svg,
+    .device-source-control > span,
+    .source-sync-toggle > span {
+        display: none;
+    }
+
+    .device-source-control select {
+        width: 76px;
+    }
+
+    .channel-control {
+        padding-top: 18px;
+    }
+
+    .channel-title {
+        width: min(90%, 220px);
+        margin-bottom: 12px;
+    }
+
+    .gauge-shell {
+        width: clamp(142px, 38cqw, 190px);
+        padding: 9px;
+    }
+
+    .gauge-intensity-input {
+        width: 82px;
+        font-size: clamp(30px, 8cqw, 40px);
+    }
+
+    .channel-adjuster {
+        width: min(96%, 220px);
+        grid-template-columns: repeat(2, 46px);
+        gap: 6px;
+        margin-top: 7px;
+    }
+
+    .step-button {
+        width: 46px;
+        height: 38px;
+    }
+}
+
 @container device-panel (max-height: 520px) {
     .device-workspace-heading {
         padding: 0 14px;
@@ -2451,6 +2509,126 @@ code {
     .step-button {
         width: 52px;
         height: 40px;
+    }
+}
+
+@container device-panel (max-width: 720px) and (max-height: 520px) {
+    .device-workspace-heading {
+        padding: 0 10px;
+    }
+
+    .device-source-control {
+        margin-left: 0;
+        padding-left: 8px;
+    }
+
+    .device-source-control select {
+        width: 76px;
+    }
+
+    .gauge-shell {
+        width: clamp(142px, 38cqw, 180px);
+        padding: 9px;
+    }
+
+    .channel-adjuster {
+        grid-template-columns: repeat(2, 46px);
+    }
+
+    .step-button {
+        width: 46px;
+        height: 38px;
+    }
+}
+
+@container device-panel (max-height: 360px) {
+    .device-new-tab-page {
+        justify-content: flex-start;
+        padding: 14px 12px;
+        overflow-y: auto;
+    }
+
+    .device-new-tab-icon {
+        width: 42px;
+        height: 42px;
+        margin-bottom: 8px;
+        border-radius: 12px;
+    }
+
+    .device-new-tab-page h2 {
+        font-size: 20px;
+    }
+
+    .device-new-tab-page p {
+        margin: 6px 0 10px;
+        font-size: 12px;
+        line-height: 1.45;
+    }
+
+    .device-picker-options {
+        gap: 6px;
+        margin-bottom: 10px;
+    }
+
+    .device-picker-option {
+        gap: 9px;
+        padding: 8px 10px;
+    }
+
+    .device-picker-option-icon {
+        width: 34px;
+        height: 34px;
+    }
+
+    .device-new-tab-page .primary-compact-button {
+        min-width: 126px;
+        min-height: 36px;
+    }
+
+    .channel-control {
+        padding-top: 10px;
+    }
+
+    .channel-title {
+        margin-bottom: 2px;
+    }
+
+    .channel-title > strong {
+        font-size: 18px;
+    }
+
+    .channel-title > span:not(.channel-state) {
+        font-size: 12px;
+    }
+
+    .gauge-shell {
+        width: clamp(118px, 16cqw, 145px);
+        padding: 7px;
+        box-shadow:
+            inset 0 0 0 6px #111312,
+            inset 0 0 0 7px rgba(240, 207, 106, 0.12);
+    }
+
+    .gauge-intensity-input {
+        width: 72px;
+        font-size: 28px;
+    }
+
+    .gauge-inner span,
+    .gauge-inner small {
+        margin-top: 3px;
+        font-size: 11px;
+    }
+
+    .channel-adjuster {
+        grid-template-columns: repeat(2, 42px);
+        gap: 5px;
+        margin-top: 5px;
+    }
+
+    .step-button {
+        width: 42px;
+        height: 32px;
     }
 }
 
@@ -2538,6 +2716,93 @@ code {
     }
 }
 
+@media (max-width: 900px) {
+    .app-shell {
+        grid-template-columns: 88px minmax(0, 1fr);
+    }
+
+    .window-chrome {
+        grid-template-columns: 88px minmax(0, 1fr) auto;
+    }
+
+    .window-brand {
+        padding-left: 12px;
+        font-size: 15px;
+    }
+
+    .sidebar button {
+        height: 76px;
+        gap: 5px;
+        font-size: 11px;
+    }
+
+    .sidebar button svg {
+        width: 23px;
+        height: 23px;
+    }
+
+    .dashboard-page {
+        padding-right: 8px;
+        padding-left: 8px;
+    }
+
+    .global-control-items {
+        grid-template-columns: minmax(145px, 1fr) minmax(130px, 0.9fr) minmax(105px, 0.65fr) auto;
+    }
+
+    .global-control-item:nth-child(3),
+    .global-control-item:nth-child(4) {
+        display: none;
+    }
+
+    .global-control-item {
+        padding: 0 9px;
+    }
+
+    .device-tab-item {
+        min-width: 168px;
+    }
+
+    .control-footer {
+        grid-template-columns: minmax(90px, 1fr) auto;
+        padding: 0 10px;
+    }
+
+    .footer-context {
+        display: none;
+    }
+
+    .output-summary {
+        padding: 0 12px;
+        border-left: 0;
+    }
+
+    .output-actions {
+        gap: 6px;
+        padding-left: 10px;
+    }
+
+    .output-button {
+        min-width: 122px;
+        padding: 0 12px;
+    }
+
+    .emergency-button {
+        min-width: 110px;
+        padding: 0 10px;
+    }
+
+    .standard-page {
+        padding-right: 24px;
+        padding-left: 24px;
+    }
+
+    .source-overview,
+    .source-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
 @media (max-height: 800px) {
     .window-chrome {
         height: 58px;
@@ -2607,6 +2872,59 @@ code {
 
     .page-header h1 {
         font-size: 27px;
+    }
+}
+
+@media (max-height: 640px) {
+    .window-chrome {
+        height: 52px;
+    }
+
+    .app-shell {
+        grid-template-rows: 52px minmax(0, 1fr);
+    }
+
+    .sidebar button {
+        height: 68px;
+    }
+
+    .dashboard-page {
+        grid-template-rows: 76px minmax(0, 1fr) 68px;
+        gap: 6px;
+        padding: 8px 8px 0;
+    }
+
+    .dashboard-page-detached {
+        grid-template-rows: minmax(0, 1fr);
+        gap: 0;
+        padding-bottom: 8px;
+    }
+
+    .global-control-frame {
+        grid-template-rows: 28px minmax(0, 1fr);
+    }
+
+    .global-control-heading {
+        padding: 0 10px;
+        font-size: 12px;
+    }
+
+    .device-tabs-shell {
+        height: 44px;
+    }
+
+    .device-tab-item {
+        height: 40px;
+    }
+
+    .device-tab-active {
+        height: 44px;
+    }
+
+    .output-button,
+    .emergency-button {
+        height: 42px;
+        font-size: 13px;
     }
 }
 
