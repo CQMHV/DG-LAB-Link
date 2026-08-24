@@ -104,7 +104,7 @@ const createDefaultMockSnapshot = (): HubSnapshot => {
             assignedChannelCount: 2,
         },
     ],
-    defaultSourceId: "source-test-pattern",
+    defaultSourceId: null,
     output: {
         state: "idle",
         framesSent: 1284,

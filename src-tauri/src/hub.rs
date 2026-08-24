@@ -620,7 +620,15 @@ pub struct HubRuntime {
     auto_reconnect_enabled: bool,
 }
 
-pub fn create_hub(endpoint: String) -> (HubHandle, HubRuntime) {
+#[cfg(test)]
+fn create_hub(endpoint: String) -> (HubHandle, HubRuntime) {
+    create_hub_with_default_source(endpoint, None)
+}
+
+pub fn create_hub_with_default_source(
+    endpoint: String,
+    requested_default_source_id: Option<String>,
+) -> (HubHandle, HubRuntime) {
     let registry = builtin_registry();
     let mut sources = BTreeMap::new();
     let mut source_snapshots = Vec::new();
@@ -646,7 +654,7 @@ pub fn create_hub(endpoint: String) -> (HubHandle, HubRuntime) {
         sources.insert(id, SourceRuntime { snapshot, source });
     }
 
-    let default_source_id = source_snapshots.first().map(|source| source.id.clone());
+    let default_source_id = requested_default_source_id.filter(|id| sources.contains_key(id));
     let snapshot = HubSnapshot::initial(endpoint, source_snapshots, default_source_id.clone());
     let (snapshot_sender, snapshot_receiver) = watch::channel(snapshot.clone());
     let (command_sender, command_receiver) = mpsc::channel(HUB_COMMAND_CAPACITY);
@@ -2869,11 +2877,29 @@ mod tests {
         assert_eq!(value["channels"]["a"]["status"], "disconnected");
         assert_eq!(value["sources"][0]["kind"], "builtin.test_pattern");
         assert!(value["sources"][0].get("assignedChannelCount").is_some());
-        assert_eq!(value["defaultSourceId"], "source-test-pattern");
+        assert!(value["defaultSourceId"].is_null());
         assert!(value.get("devices").is_some());
         assert!(value.get("selectedDeviceId").is_some());
         assert_eq!(value["syncAllDevices"], false);
         assert_eq!(value["outputDeviceCount"], 0);
+    }
+
+    #[test]
+    fn configured_default_source_is_restored_when_the_hub_starts() {
+        let (hub, _runtime) = create_hub_with_default_source(
+            "wss://example.test/v4".to_owned(),
+            Some("source-manual".to_owned()),
+        );
+        assert_eq!(
+            hub.snapshot().default_source_id.as_deref(),
+            Some("source-manual")
+        );
+
+        let (hub, _runtime) = create_hub_with_default_source(
+            "wss://example.test/v4".to_owned(),
+            Some("source-removed".to_owned()),
+        );
+        assert_eq!(hub.snapshot().default_source_id, None);
     }
 
     struct CountingSource {
@@ -4020,7 +4046,8 @@ mod tests {
             }
         });
 
-        let (hub, runtime) = create_hub(endpoint);
+        let (hub, runtime) =
+            create_hub_with_default_source(endpoint, Some("source-test-pattern".to_owned()));
         let runtime_task = tokio::spawn(runtime.run());
         wait_for_snapshot(&hub, |snapshot| snapshot.devices.len() == 2).await;
         assert_eq!(hub.snapshot().connection.state, ConnectionState::Connected);
@@ -4110,6 +4137,11 @@ mod tests {
         slot_id: &str,
         intensity_a: u16,
     ) {
+        if runtime.devices.is_empty() && runtime.default_source_id.is_none() {
+            runtime
+                .set_default_source(Some("source-test-pattern".to_owned()))
+                .unwrap();
+        }
         runtime.apps.insert(client_id.to_owned());
         let key = DeviceKey {
             client_id: client_id.to_owned(),

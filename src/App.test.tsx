@@ -601,8 +601,8 @@ describe("DG-LAB Link 前端", () => {
         await waitFor(async () => {
             const snapshot = await getHubSnapshot();
             expect(snapshot.devices[0].sourceSync).toBe(true);
-            expect(snapshot.devices[0].sourceIdA).toBe("source-test-pattern");
-            expect(snapshot.devices[0].sourceIdB).toBe("source-test-pattern");
+            expect(snapshot.devices[0].sourceIdA).toBeNull();
+            expect(snapshot.devices[0].sourceIdB).toBeNull();
         });
         await user.selectOptions(sourceB, "source-manual");
         await waitFor(async () => {
@@ -629,7 +629,7 @@ describe("DG-LAB Link 前端", () => {
         const defaultSource = screen.getByRole("combobox", {
             name: "选择默认输入源",
         }) as HTMLSelectElement;
-        expect(defaultSource.value).toBe("source-test-pattern");
+        expect(defaultSource.value).toBe("");
         await user.selectOptions(defaultSource, "source-manual");
 
         await waitFor(async () => {

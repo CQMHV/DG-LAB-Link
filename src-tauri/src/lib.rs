@@ -16,7 +16,7 @@ use tauri::{
 };
 
 use crate::dglab::client::DEFAULT_RELAY_ENDPOINT;
-use crate::hub::{HubHandle, create_hub};
+use crate::hub::{HubHandle, create_hub_with_default_source};
 use crate::preferences::PreferencesState;
 
 const AUTOSTART_ARG: &str = "--autostart";
@@ -39,13 +39,17 @@ pub fn run() {
                     PreferencesState::with_defaults(preferences_dir)
                 });
             let start_hidden = launched_from_autostart() && preferences.start_minimized();
+            let default_source_id = preferences.default_source_id();
             app.manage(preferences);
             create_tray(app)?;
             if start_hidden && let Some(window) = app.get_webview_window("main") {
                 window.hide()?;
             }
 
-            let (hub, runtime) = create_hub(DEFAULT_RELAY_ENDPOINT.to_owned());
+            let (hub, runtime) = create_hub_with_default_source(
+                DEFAULT_RELAY_ENDPOINT.to_owned(),
+                default_source_id,
+            );
             let mut snapshots = hub.subscribe();
             let app_handle = app.handle().clone();
 

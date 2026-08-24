@@ -163,9 +163,16 @@ pub async fn set_device_channel_source_sync(
 #[tauri::command]
 pub async fn set_default_source(
     hub: State<'_, HubHandle>,
+    preferences: State<'_, PreferencesState>,
     source_id: Option<String>,
 ) -> Result<(), CommandError> {
-    hub.set_default_source(source_id).await.map_err(Into::into)
+    let previous_source_id = hub.snapshot().default_source_id;
+    hub.set_default_source(source_id.clone()).await?;
+    if let Err(error) = preferences.set_default_source_id(source_id) {
+        let _ = hub.set_default_source(previous_source_id).await;
+        return Err(error.into());
+    }
+    Ok(())
 }
 
 #[tauri::command]
