@@ -233,6 +233,30 @@ export default function App() {
         }));
     };
 
+    const handleOpenDeviceInNewTab = (deviceId: string) => {
+        const tab = createDeviceViewTab(deviceId);
+        setDashboardTabs((current) => ({
+            activeTabId: tab.id,
+            tabs: [...current.tabs, tab],
+        }));
+        setPage("dashboard");
+        void runAction(`device-${deviceId}`, () => selectDevice(deviceId));
+    };
+
+    const handleOpenDeviceInNewWindow = (deviceId: string) => {
+        const device = snapshot?.devices.find(
+            (candidate) => candidate.controlId === deviceId,
+        );
+        if (!device) {
+            setActionError("设备不存在或已断开");
+            return;
+        }
+        const tab = createDeviceViewTab(deviceId);
+        void runAction(`window-${tab.id}`, () =>
+            openDeviceWindow({ device, tabId: tab.id }),
+        );
+    };
+
     const handleDetachTab = (tab: DeviceViewTab) => {
         const device = snapshot?.devices.find(
             (candidate) => candidate.controlId === tab.deviceId,
@@ -453,6 +477,8 @@ export default function App() {
                         )}
                         {!windowContext.detached && page === "devices" && (
                             <DevicesPage
+                                onOpenInNewTab={handleOpenDeviceInNewTab}
+                                onOpenInNewWindow={handleOpenDeviceInNewWindow}
                                 onSetSyncAllDevices={(enabled) =>
                                     void runAction("sync-devices", () =>
                                         setSyncAllDevices(enabled),

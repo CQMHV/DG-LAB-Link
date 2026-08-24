@@ -8,6 +8,7 @@ import {
     render,
     screen,
     waitFor,
+    within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -54,6 +55,7 @@ beforeEach(() => {
 
 afterEach(() => {
     cleanup();
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
 });
 
@@ -885,5 +887,61 @@ describe("DG-LAB Link 前端", () => {
             screen.queryByRole("button", { name: "当前控制设备" }),
         ).toBeNull();
         expect((await getHubSnapshot()).selectedDeviceId).toBe(selectedDeviceId);
+    });
+
+    it("可以从设备页面在新标签页中打开设备", async () => {
+        const user = userEvent.setup();
+        render(<App />);
+
+        await user.click(await screen.findByRole("button", { name: "设备" }));
+        const deviceCard = screen
+            .getByRole("heading", { name: "郊狼 2.0" })
+            .closest(".device-card");
+        expect(deviceCard).toBeTruthy();
+        await user.click(
+            within(deviceCard as HTMLElement).getByRole("button", {
+                name: "在新标签页中打开",
+            }),
+        );
+
+        expect(
+            await screen.findByRole("tab", { name: /郊狼 2\.0/ }),
+        ).toBeTruthy();
+        expect(
+            screen.getByText("郊狼 2.0", {
+                selector: ".device-scope-title strong",
+            }),
+        ).toBeTruthy();
+    });
+
+    it("可以从设备页面在新窗口中打开设备", async () => {
+        const user = userEvent.setup();
+        const focus = vi.fn();
+        const open = vi
+            .spyOn(window, "open")
+            .mockReturnValue({ focus } as unknown as Window);
+        render(<App />);
+
+        await user.click(await screen.findByRole("button", { name: "设备" }));
+        const deviceCard = screen
+            .getByRole("heading", { name: "郊狼 3.0" })
+            .closest(".device-card");
+        expect(deviceCard).toBeTruthy();
+        await user.click(
+            within(deviceCard as HTMLElement).getByRole("button", {
+                name: "在新窗口中打开",
+            }),
+        );
+
+        await waitFor(() => expect(open).toHaveBeenCalledOnce());
+        expect(open.mock.calls[0][0]).toContain("detached=1");
+        expect(open.mock.calls[0][0]).toContain(
+            "deviceId=demo-app%3Aslot-a1",
+        );
+        expect(open.mock.calls[0][2]).toContain("width=640,height=520");
+        expect(focus).toHaveBeenCalledOnce();
+        expect(
+            screen.getByRole("heading", { level: 1, name: "设备" }),
+        ).toBeTruthy();
     });
 });

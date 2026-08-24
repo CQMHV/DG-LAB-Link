@@ -1,10 +1,12 @@
 import {
+    ArrowSquareOut,
     BatteryCharging,
     Broadcast,
     DeviceMobile,
     LinkSimple,
     PlugsConnected,
     Pulse,
+    Tabs,
 } from "@phosphor-icons/react";
 
 import { PageHeader } from "../components/PageHeader";
@@ -13,6 +15,8 @@ import type { HubSnapshot } from "../lib/contracts";
 interface DevicesPageProps {
     snapshot: HubSnapshot;
     pendingAction: string | null;
+    onOpenInNewTab: (deviceId: string) => void;
+    onOpenInNewWindow: (deviceId: string) => void;
     onOpenPairing: () => void;
     onSetSyncAllDevices: (enabled: boolean) => void;
 }
@@ -36,6 +40,8 @@ const statusCopy = (status: string): string => {
 export const DevicesPage = ({
     snapshot,
     pendingAction,
+    onOpenInNewTab,
+    onOpenInNewWindow,
     onOpenPairing,
     onSetSyncAllDevices,
 }: DevicesPageProps) => (
@@ -198,6 +204,33 @@ export const DevicesPage = ({
                                         </article>
                                     );
                                 })}
+                            </div>
+                            <div className="device-card-actions">
+                                <button
+                                    className="secondary-button device-card-action device-card-action-primary"
+                                    disabled={pendingAction !== null}
+                                    onClick={() =>
+                                        onOpenInNewTab(device.controlId)
+                                    }
+                                    type="button"
+                                >
+                                    <Tabs aria-hidden="true" size={18} />
+                                    在新标签页中打开
+                                </button>
+                                <button
+                                    className="secondary-button device-card-action"
+                                    disabled={pendingAction !== null}
+                                    onClick={() =>
+                                        onOpenInNewWindow(device.controlId)
+                                    }
+                                    type="button"
+                                >
+                                    <ArrowSquareOut
+                                        aria-hidden="true"
+                                        size={18}
+                                    />
+                                    在新窗口中打开
+                                </button>
                             </div>
                         </section>
                     );
