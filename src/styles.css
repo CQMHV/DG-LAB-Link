@@ -394,7 +394,6 @@ code {
 
 .device-tab-active {
     z-index: 3;
-    height: 64px;
     background: var(--surface-raised);
     border-color: rgba(240, 207, 106, 0.62);
     border-bottom-color: var(--surface-raised);
@@ -444,10 +443,6 @@ body.device-tab-drag-active * {
     align-items: center;
     padding: 0 4px 0 15px;
     text-align: left;
-}
-
-.device-tab-select:active {
-    transform: scale(0.97);
 }
 
 .device-tab-close {
