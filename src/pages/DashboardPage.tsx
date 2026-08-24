@@ -5,6 +5,7 @@ import {
     DeviceMobile,
     LinkSimple,
     Play,
+    Plus,
     ShieldCheck,
     SpinnerGap,
     Stop,
@@ -94,6 +95,7 @@ export const DashboardPage = ({
               (candidate) => candidate.controlId === activeDeviceId,
           ) ?? null
         : null;
+    const hasOpenTab = detached || tabs.length > 0;
     const deviceUnavailable = Boolean(activeDeviceId) && !device;
     const isConnected = snapshot.connection.state === "connected";
     const isRunning = snapshot.output.state === "running";
@@ -163,7 +165,31 @@ export const DashboardPage = ({
                     id="active-device-workspace"
                     role="tabpanel"
                 >
-                    {device ? (
+                    {!hasOpenTab ? (
+                        <section
+                            aria-label="未打开标签页"
+                            className="device-new-tab-page"
+                        >
+                            <div
+                                aria-label="DG-LAB Link"
+                                className="device-empty-tabs-wordmark"
+                                role="img"
+                            >
+                                DG-LAB Link
+                            </div>
+                            <button
+                                aria-label="创建新标签页"
+                                className="device-new-tab-icon device-empty-tabs-add"
+                                onClick={onNewDeviceTab}
+                                title="新建标签页"
+                                type="button"
+                            >
+                                <Plus aria-hidden="true" size={42} weight="light" />
+                            </button>
+                            <h2>未打开标签页</h2>
+                            <p>点击“＋”新建标签页。</p>
+                        </section>
+                    ) : device ? (
                         <>
                             <header className="device-workspace-heading">
                                 <div className="device-scope-title">

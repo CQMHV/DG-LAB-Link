@@ -697,18 +697,15 @@ describe("DG-LAB Link 前端", () => {
         await waitFor(() => {
             expect(screen.queryByRole("tab", { name: /郊狼 3\.0/ })).toBeNull();
         });
-        expect(screen.getByRole("region", { name: "新设备标签页" })).toBeTruthy();
-        expect(
-            screen.getByRole("button", {
-                name: "在当前标签页打开 郊狼 3.0",
-            }),
-        ).toBeTruthy();
+        expect(screen.queryAllByRole("tab")).toHaveLength(0);
+        expect(screen.getByRole("region", { name: "未打开标签页" })).toBeTruthy();
+        expect(screen.getByRole("button", { name: "新建标签页" })).toBeTruthy();
         expect(
             screen.queryByRole("button", { name: /独立窗口打开/ }),
         ).toBeNull();
     });
 
-    it("可以关闭已有标签并在关闭最后一个标签后保留空白标签页", async () => {
+    it("可以关闭所有标签并通过加号重新创建标签页", async () => {
         const user = userEvent.setup();
         render(<App />);
 
@@ -727,10 +724,13 @@ describe("DG-LAB Link 前端", () => {
         await user.click(
             screen.getByRole("button", { name: "关闭标签页：郊狼 3.0" }),
         );
-        const replacementTab = screen.getByRole("tab", {
-            name: /新标签页/,
-        });
-        expect(screen.getAllByRole("tab")).toHaveLength(1);
+        expect(screen.queryAllByRole("tab")).toHaveLength(0);
+        expect(screen.getByRole("region", { name: "未打开标签页" })).toBeTruthy();
+        expect(screen.getByRole("img", { name: "DG-LAB Link" })).toBeTruthy();
+
+        await user.click(screen.getByRole("button", { name: "创建新标签页" }));
+
+        const replacementTab = screen.getByRole("tab", { name: /新标签页/ });
         expect(replacementTab.getAttribute("aria-selected")).toBe("true");
         expect(screen.getByRole("region", { name: "新设备标签页" })).toBeTruthy();
     });

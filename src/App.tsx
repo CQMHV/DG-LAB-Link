@@ -249,10 +249,9 @@ export default function App() {
             (tab) => tab.id !== tabId,
         );
         if (remainingTabs.length === 0) {
-            const replacement = createDeviceViewTab();
             setDashboardTabs({
-                activeTabId: replacement.id,
-                tabs: [replacement],
+                activeTabId: "",
+                tabs: [],
             });
             return;
         }
@@ -334,10 +333,9 @@ export default function App() {
                     (candidate) => candidate.id !== tab.id,
                 );
                 if (remainingTabs.length === 0) {
-                    const replacement = createDeviceViewTab();
                     return {
-                        activeTabId: replacement.id,
-                        tabs: [replacement],
+                        activeTabId: "",
+                        tabs: [],
                     };
                 }
                 return {

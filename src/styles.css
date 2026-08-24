@@ -561,6 +561,15 @@ body.device-tab-drag-active * {
     flex: 0 0 auto;
 }
 
+.device-empty-tabs-wordmark {
+    margin-bottom: 30px;
+    color: var(--gold-strong);
+    font-size: 32px;
+    font-weight: 650;
+    letter-spacing: 0.01em;
+    line-height: 1;
+}
+
 .device-new-tab-icon {
     display: grid;
     width: 82px;
@@ -571,6 +580,29 @@ body.device-tab-drag-active * {
     background: rgba(240, 207, 106, 0.07);
     border: 1px solid rgba(240, 207, 106, 0.24);
     border-radius: 22px;
+}
+
+.device-empty-tabs-add {
+    padding: 0;
+    font: inherit;
+    cursor: pointer;
+    transition:
+        color 140ms ease,
+        background-color 140ms ease,
+        border-color 140ms ease,
+        transform 140ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .device-empty-tabs-add:hover {
+        color: var(--gold-strong);
+        background: rgba(240, 207, 106, 0.12);
+        border-color: rgba(240, 207, 106, 0.5);
+    }
+}
+
+.device-empty-tabs-add:active {
+    transform: scale(0.97);
 }
 
 .device-offline-icon {
