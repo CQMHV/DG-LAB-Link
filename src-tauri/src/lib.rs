@@ -88,10 +88,10 @@ pub fn run() {
                 .unwrap_or(true);
             api.prevent_close();
             if close_to_tray {
-                if let Some(window) = app_handle.get_webview_window("main") {
-                    if let Err(error) = window.hide() {
-                        eprintln!("无法隐藏主窗口：{error}");
-                    }
+                if let Some(window) = app_handle.get_webview_window("main")
+                    && let Err(error) = window.hide()
+                {
+                    eprintln!("无法隐藏主窗口：{error}");
                 }
             } else {
                 begin_graceful_shutdown(app_handle, &shutdown_started, &shutdown_complete, 0);
