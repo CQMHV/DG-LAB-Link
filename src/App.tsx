@@ -453,9 +453,6 @@ export default function App() {
                         )}
                         {!windowContext.detached && page === "devices" && (
                             <DevicesPage
-                                onSelectDevice={(deviceId) =>
-                                    handleSelectDevice(deviceId)
-                                }
                                 onSetSyncAllDevices={(enabled) =>
                                     void runAction("sync-devices", () =>
                                         setSyncAllDevices(enabled),

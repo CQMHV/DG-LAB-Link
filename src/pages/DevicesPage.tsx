@@ -1,7 +1,6 @@
 import {
     BatteryCharging,
     Broadcast,
-    CheckCircle,
     DeviceMobile,
     LinkSimple,
     PlugsConnected,
@@ -15,7 +14,6 @@ interface DevicesPageProps {
     snapshot: HubSnapshot;
     pendingAction: string | null;
     onOpenPairing: () => void;
-    onSelectDevice: (deviceId: string) => void;
     onSetSyncAllDevices: (enabled: boolean) => void;
 }
 
@@ -39,7 +37,6 @@ export const DevicesPage = ({
     snapshot,
     pendingAction,
     onOpenPairing,
-    onSelectDevice,
     onSetSyncAllDevices,
 }: DevicesPageProps) => (
     <div className="standard-page">
@@ -88,7 +85,7 @@ export const DevicesPage = ({
             <div>
                 <strong>同步所有设备</strong>
                 <p>
-                    开启时立即以当前控制设备为基准对齐 A/B 强度；之后所有设备保持相同目标值，
+                    开启时立即以当前仪表盘标签中的设备为基准对齐 A/B 强度；之后所有设备保持相同目标值，
                     并分别遵守自己的通道上限。
                 </p>
             </div>
@@ -115,8 +112,6 @@ export const DevicesPage = ({
         {snapshot.devices.length > 0 ? (
             <div className="device-list">
                 {snapshot.devices.map((device) => {
-                    const selected =
-                        device.controlId === snapshot.selectedDeviceId;
                     const channels = {
                         a: {
                             intensity: device.intensityA,
@@ -135,25 +130,14 @@ export const DevicesPage = ({
                             status: device.channelBStatus,
                         },
                     };
-                    if (selected) {
-                        channels.a = snapshot.channels.a;
-                        channels.b = snapshot.channels.b;
-                    }
                     return (
-                        <section
-                            className={`device-card${selected ? " is-selected" : ""}`}
-                            key={device.controlId}
-                        >
+                        <section className="device-card" key={device.controlId}>
                             <div className="device-card-heading">
                                 <div>
                                     <span className="eyebrow">
-                                        {selected && device.outputActive
-                                            ? "CURRENT CONTROL · OUTPUT ACTIVE"
-                                            : selected
-                                              ? "CURRENT CONTROL DEVICE"
-                                              : device.outputActive
-                                                ? "OUTPUT ACTIVE"
-                                                : "AVAILABLE DEVICE"}
+                                        {device.outputActive
+                                            ? "OUTPUT ACTIVE"
+                                            : "CONNECTED DEVICE"}
                                     </span>
                                     <h2>{device.name}</h2>
                                     <p>
@@ -215,19 +199,6 @@ export const DevicesPage = ({
                                     );
                                 })}
                             </div>
-                            <button
-                                className={
-                                    selected
-                                        ? "active-device-button"
-                                        : "secondary-button device-select-button"
-                                }
-                                disabled={selected || pendingAction !== null}
-                                onClick={() => onSelectDevice(device.controlId)}
-                                type="button"
-                            >
-                                <CheckCircle aria-hidden="true" size={18} />
-                                {selected ? "当前控制设备" : "设为控制设备"}
-                            </button>
                         </section>
                     );
                 })}

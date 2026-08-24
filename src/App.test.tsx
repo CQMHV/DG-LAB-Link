@@ -870,29 +870,20 @@ describe("DG-LAB Link 前端", () => {
         });
     });
 
-    it("输出中切换控制焦点不会停止其他设备", async () => {
+    it("设备页面只展示状态且不提供设备切换入口", async () => {
         const user = userEvent.setup();
         render(<App />);
-
-        await user.click(
-            await screen.findByRole("button", { name: "开始输出" }),
-        );
-        await waitFor(async () => {
-            expect((await getHubSnapshot()).output.state).toBe("running");
-        });
+        const selectedDeviceId = (await getHubSnapshot()).selectedDeviceId;
 
         await user.click(screen.getByRole("button", { name: "设备" }));
         expect(screen.getByText("郊狼 3.0")).toBeTruthy();
         expect(screen.getByText("郊狼 2.0")).toBeTruthy();
-        await user.click(
-            screen.getByRole("button", { name: "设为控制设备" }),
-        );
-
-        await waitFor(async () => {
-            const snapshot = await getHubSnapshot();
-            expect(snapshot.device?.name).toBe("郊狼 2.0");
-            expect(snapshot.output.state).toBe("running");
-            expect(snapshot.devices).toHaveLength(2);
-        });
+        expect(
+            screen.queryByRole("button", { name: "设为控制设备" }),
+        ).toBeNull();
+        expect(
+            screen.queryByRole("button", { name: "当前控制设备" }),
+        ).toBeNull();
+        expect((await getHubSnapshot()).selectedDeviceId).toBe(selectedDeviceId);
     });
 });
