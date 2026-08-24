@@ -1,3 +1,4 @@
+import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 
 import type { DeviceSnapshot } from "./contracts";
@@ -8,6 +9,11 @@ export interface DeviceWindowContext {
     tabId: string | null;
 }
 
+export interface DeviceTabReturnPayload {
+    deviceId: string | null;
+    tabId: string;
+}
+
 interface DeviceWindowOptions {
     device?: DeviceSnapshot;
     onClosed?: () => void;
@@ -15,6 +21,7 @@ interface DeviceWindowOptions {
 }
 
 const browserDeviceWindows = new Map<string, Window>();
+export const DEVICE_TAB_RETURN_EVENT = "device-tab://return-to-main";
 
 const bringDeviceWindowToFront = async (
     deviceWindow: WebviewWindow,
@@ -53,6 +60,70 @@ export const updateDetachedWindowDevice = (deviceId: string | null): void => {
         query.delete("deviceId");
     }
     window.history.replaceState(null, "", `${window.location.pathname}?${query}`);
+};
+
+const isDeviceTabReturnPayload = (
+    payload: unknown,
+): payload is DeviceTabReturnPayload => {
+    if (!payload || typeof payload !== "object") {
+        return false;
+    }
+    const candidate = payload as Partial<DeviceTabReturnPayload>;
+    return (
+        typeof candidate.tabId === "string" &&
+        (candidate.deviceId === null || typeof candidate.deviceId === "string")
+    );
+};
+
+export const listenForDeviceTabReturn = async (
+    listener: (payload: DeviceTabReturnPayload) => void,
+): Promise<UnlistenFn> => {
+    if (!("__TAURI_INTERNALS__" in window)) {
+        const handleMessage = (event: MessageEvent) => {
+            if (
+                event.origin !== window.location.origin ||
+                event.data?.type !== DEVICE_TAB_RETURN_EVENT ||
+                !isDeviceTabReturnPayload(event.data.payload)
+            ) {
+                return;
+            }
+            listener(event.data.payload);
+        };
+        window.addEventListener("message", handleMessage);
+        return () => window.removeEventListener("message", handleMessage);
+    }
+
+    return listen<DeviceTabReturnPayload>(DEVICE_TAB_RETURN_EVENT, (event) => {
+        if (isDeviceTabReturnPayload(event.payload)) {
+            listener(event.payload);
+        }
+    });
+};
+
+export const returnDeviceTabToMain = async (
+    payload: DeviceTabReturnPayload,
+): Promise<void> => {
+    if (!("__TAURI_INTERNALS__" in window)) {
+        const mainWindow = window.opener;
+        if (!mainWindow || mainWindow.closed) {
+            throw new Error("主窗口已关闭，无法移回标签页");
+        }
+        mainWindow.postMessage(
+            { type: DEVICE_TAB_RETURN_EVENT, payload },
+            window.location.origin,
+        );
+        mainWindow.focus();
+        window.close();
+        return;
+    }
+
+    const mainWindow = await WebviewWindow.getByLabel("main");
+    if (!mainWindow) {
+        throw new Error("主窗口已关闭，无法移回标签页");
+    }
+    await emitTo("main", DEVICE_TAB_RETURN_EVENT, payload);
+    await bringDeviceWindowToFront(mainWindow);
+    await WebviewWindow.getCurrent().close();
 };
 
 const deviceWindowQuery = ({

@@ -5,6 +5,7 @@
     "windows": ["main", "device-*"],
     "permissions": [
         "core:event:allow-listen",
+        "core:event:allow-emit-to",
         "core:event:allow-unlisten",
         "core:webview:allow-create-webview-window",
         "core:window:allow-close",

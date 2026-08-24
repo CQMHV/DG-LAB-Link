@@ -36,7 +36,9 @@ import type {
 import {
     focusDeviceWindow,
     getDeviceWindowContext,
+    listenForDeviceTabReturn,
     openDeviceWindow,
+    returnDeviceTabToMain,
     updateDetachedWindowDevice,
 } from "./lib/deviceWindows";
 import { getErrorMessage } from "./lib/errors";
@@ -358,6 +360,20 @@ export default function App() {
         });
     };
 
+    const handleReturnToMain = () => {
+        const tabId = windowContext.tabId;
+        if (!tabId) {
+            setActionError("当前窗口缺少标签页标识，无法移回主窗口");
+            return;
+        }
+        void runAction(`return-${tabId}`, () =>
+            returnDeviceTabToMain({
+                deviceId: detachedDeviceId,
+                tabId,
+            }),
+        );
+    };
+
     const runtimeError =
         snapshot?.output.lastError ?? snapshot?.connection.lastError ?? null;
     const externalError = snapshotError ?? runtimeError;
@@ -377,6 +393,58 @@ export default function App() {
         : dashboardTabsInitialized.current
           ? activeDashboardTab?.deviceId ?? null
           : snapshot?.selectedDeviceId ?? snapshot?.devices[0]?.controlId ?? null;
+
+    useEffect(() => {
+        if (windowContext.detached) {
+            return;
+        }
+
+        let disposed = false;
+        let stopListening: (() => void) | undefined;
+        void listenForDeviceTabReturn((tab) => {
+            setDetachedTabs((current) =>
+                current.filter((candidate) => candidate.id !== tab.tabId),
+            );
+            setDashboardTabs((current) => {
+                const existing = current.tabs.some(
+                    (candidate) => candidate.id === tab.tabId,
+                );
+                return {
+                    activeTabId: tab.tabId,
+                    tabs: existing
+                        ? current.tabs.map((candidate) =>
+                              candidate.id === tab.tabId
+                                  ? { ...candidate, deviceId: tab.deviceId }
+                                  : candidate,
+                          )
+                        : [
+                              ...current.tabs,
+                              { id: tab.tabId, deviceId: tab.deviceId },
+                          ],
+                };
+            });
+            setPage("dashboard");
+        })
+            .then((unlisten) => {
+                if (disposed) {
+                    unlisten();
+                } else {
+                    stopListening = unlisten;
+                }
+            })
+            .catch((error) => {
+                if (!disposed) {
+                    setActionError(
+                        getErrorMessage(error, "监听标签页窗口失败"),
+                    );
+                }
+            });
+
+        return () => {
+            disposed = true;
+            stopListening?.();
+        };
+    }, []);
 
     useEffect(() => {
         setDismissedExternalError(null);
@@ -431,6 +499,10 @@ export default function App() {
             className={`app-shell ${windowContext.detached ? "app-shell-detached" : ""}`}
         >
             <WindowChrome
+                disableReturnToMain={pendingAction !== null}
+                onReturnToMain={
+                    windowContext.detached ? handleReturnToMain : undefined
+                }
                 title={
                     windowContext.detached
                         ? `DG-LAB Link · ${detachedWindowTitle}`

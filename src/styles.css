@@ -197,6 +197,21 @@ code {
     background: #242624;
 }
 
+.window-action:disabled {
+    color: #6f716d;
+    background: transparent;
+}
+
+.window-return-action {
+    display: flex;
+    width: auto;
+    gap: 7px;
+    padding: 0 16px;
+    border-left: 1px solid var(--border);
+    font-size: 12px;
+    white-space: nowrap;
+}
+
 .window-action-close:hover {
     background: #b93c38;
 }

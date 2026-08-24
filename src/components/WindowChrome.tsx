@@ -1,18 +1,37 @@
-import { Minus, Square, X } from "@phosphor-icons/react";
+import { ArrowSquareIn, Minus, Square, X } from "@phosphor-icons/react";
 
 import { performWindowAction } from "../lib/bridge";
 
 interface WindowChromeProps {
+    disableReturnToMain?: boolean;
+    onReturnToMain?: () => void;
     title?: string;
 }
 
-export const WindowChrome = ({ title = "DG-LAB Link" }: WindowChromeProps) => (
+export const WindowChrome = ({
+    disableReturnToMain = false,
+    onReturnToMain,
+    title = "DG-LAB Link",
+}: WindowChromeProps) => (
     <header className="window-chrome" data-tauri-drag-region>
         <div className="window-brand" data-tauri-drag-region>
             {title}
         </div>
         <div className="window-drag-region" data-tauri-drag-region />
         <div className="window-actions">
+            {onReturnToMain && (
+                <button
+                    aria-label="移回主窗口标签页"
+                    className="window-action window-return-action"
+                    disabled={disableReturnToMain}
+                    onClick={onReturnToMain}
+                    title="移回主窗口标签页"
+                    type="button"
+                >
+                    <ArrowSquareIn aria-hidden="true" size={17} weight="light" />
+                    <span>移回主窗口</span>
+                </button>
+            )}
             <button
                 aria-label="最小化窗口"
                 className="window-action"

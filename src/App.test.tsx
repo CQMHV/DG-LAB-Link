@@ -14,12 +14,14 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
+import { WindowChrome } from "./components/WindowChrome";
 import {
     __emitMockSnapshot,
     __resetMockBridge,
     getAppPreferences,
     getHubSnapshot,
 } from "./lib/bridge";
+import { DEVICE_TAB_RETURN_EVENT } from "./lib/deviceWindows";
 import { DashboardPage } from "./pages/DashboardPage";
 
 class ResizeObserverMock {
@@ -700,6 +702,39 @@ describe("DG-LAB Link 前端", () => {
             }),
         );
         await waitFor(() => expect(focus).toHaveBeenCalledTimes(2));
+
+        const detachedUrl = new URL(open.mock.calls[0][0] as string);
+        const detachedTabId = detachedUrl.searchParams.get("tabId");
+        expect(detachedTabId).toBeTruthy();
+        window.dispatchEvent(
+            new MessageEvent("message", {
+                data: {
+                    payload: {
+                        deviceId: "demo-app:slot-a1",
+                        tabId: detachedTabId,
+                    },
+                    type: DEVICE_TAB_RETURN_EVENT,
+                },
+                origin: window.location.origin,
+            }),
+        );
+
+        expect(
+            await screen.findByRole("tab", { name: /郊狼 3\.0/ }),
+        ).toBeTruthy();
+        expect(screen.queryByRole("region", { name: "未打开标签页" })).toBeNull();
+    });
+
+    it("分离窗口标题栏提供移回主窗口入口", async () => {
+        const user = userEvent.setup();
+        const onReturnToMain = vi.fn();
+        render(<WindowChrome onReturnToMain={onReturnToMain} />);
+
+        await user.click(
+            screen.getByRole("button", { name: "移回主窗口标签页" }),
+        );
+
+        expect(onReturnToMain).toHaveBeenCalledOnce();
     });
 
     it("可以关闭所有标签并通过加号重新创建标签页", async () => {
