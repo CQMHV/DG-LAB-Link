@@ -342,7 +342,7 @@ code {
     background: #141615;
     border: 1px solid var(--border);
     border-radius: 9px 9px 0 0;
-    cursor: grab;
+    cursor: default;
     user-select: none;
     transition:
         opacity 140ms ease,
@@ -416,18 +416,12 @@ code {
     box-shadow:
         0 14px 34px rgba(0, 0, 0, 0.34),
         0 0 0 1px rgba(240, 207, 106, 0.08);
-    cursor: grabbing;
     transition: none;
     will-change: transform;
 }
 
 .device-tab-drag-preview .device-tab-select {
     transform: none;
-}
-
-body.device-tab-drag-active,
-body.device-tab-drag-active * {
-    cursor: grabbing !important;
 }
 
 .device-tab-select {

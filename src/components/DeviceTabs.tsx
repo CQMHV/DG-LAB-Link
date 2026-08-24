@@ -116,7 +116,6 @@ export const DeviceTabs = ({
         dragTrackRect.current = null;
         dragTab.current = null;
         dragElement.current = null;
-        document.body.classList.remove("device-tab-drag-active");
         setDragPreview(null);
     };
 
@@ -207,7 +206,6 @@ export const DeviceTabs = ({
         if (!draggingTabIdRef.current) {
             draggingTabIdRef.current = tab.id;
             dragElement.current?.setPointerCapture?.(event.pointerId);
-            document.body.classList.add("device-tab-drag-active");
             setDragPreview({
                 height: bounds.height,
                 tabId: tab.id,
@@ -313,7 +311,6 @@ export const DeviceTabs = ({
             window.removeEventListener("pointerup", handlePointerUp);
             window.removeEventListener("pointercancel", handlePointerCancel);
             window.removeEventListener("blur", handleWindowBlur);
-            document.body.classList.remove("device-tab-drag-active");
         };
     }, []);
 

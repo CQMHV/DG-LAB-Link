@@ -878,9 +878,6 @@ describe("DG-LAB Link 前端", () => {
         expect(deviceTab.getAttribute("aria-selected")).toBe("true");
         expect(newTab.getAttribute("aria-selected")).toBe("false");
         expect(open).not.toHaveBeenCalled();
-        expect(document.body.classList.contains("device-tab-drag-active")).toBe(
-            false,
-        );
         expect(elementFromPoint).toHaveBeenNthCalledWith(1, 415, 115);
         expect(elementFromPoint).toHaveBeenNthCalledWith(2, 165, 115);
     });
