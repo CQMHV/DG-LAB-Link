@@ -1,4 +1,10 @@
-import { Plus, X } from "@phosphor-icons/react";
+import {
+    CaretDown,
+    Check,
+    MagnifyingGlass,
+    Plus,
+    X,
+} from "@phosphor-icons/react";
 import {
     useEffect,
     useRef,
@@ -16,11 +22,13 @@ export interface DeviceViewTab {
 
 interface DeviceTabsProps {
     activeTabId: string;
+    detachedTabs: DeviceViewTab[];
     devices: DeviceSnapshot[];
     onClose: (tabId: string) => void;
     onDetach: (tab: DeviceViewTab) => void;
     onMove: (tabId: string, targetTabId: string) => void;
     onNewTab: () => void;
+    onFocusDetached: (tabId: string) => void;
     onSelect: (tabId: string) => void;
     pendingAction: string | null;
     tabs: DeviceViewTab[];
@@ -60,38 +68,25 @@ const shouldDetachFromTrack = (
     );
 
 const DeviceTabLabel = ({ device }: DeviceTabLabelProps) => (
-    <>
-        {device ? (
-            <span
-                aria-hidden="true"
-                className={`device-tab-status ${device.outputActive ? "device-tab-status-active" : ""}`}
-            />
-        ) : (
-            <Plus aria-hidden="true" size={17} />
-        )}
-        <span className="device-tab-copy">
-            <strong>{device?.name ?? "新标签页"}</strong>
-            <small>
-                {device
-                    ? `A ${device.intensityA} · B ${device.intensityB}`
-                    : "选择或连接设备"}
-            </small>
-        </span>
-    </>
+    <span className="device-tab-name">{device?.name ?? "新标签页"}</span>
 );
 
 export const DeviceTabs = ({
     activeTabId,
+    detachedTabs,
     devices,
     onClose,
     onDetach,
     onMove,
     onNewTab,
+    onFocusDetached,
     onSelect,
     pendingAction,
     tabs,
 }: DeviceTabsProps) => {
     const [dragPreview, setDragPreview] = useState<DragPreview | null>(null);
+    const [tabListOpen, setTabListOpen] = useState(false);
+    const [tabQuery, setTabQuery] = useState("");
     const draggingTabIdRef = useRef<string | null>(null);
     const activePointerId = useRef<number | null>(null);
     const pointerOrigin = useRef({ x: 0, y: 0 });
@@ -101,6 +96,9 @@ export const DeviceTabs = ({
     const dragElement = useRef<HTMLElement | null>(null);
     const grabOffset = useRef({ x: 0, y: 0 });
     const suppressClickTabId = useRef<string | null>(null);
+    const tabListButtonRef = useRef<HTMLButtonElement | null>(null);
+    const tabListRef = useRef<HTMLDivElement | null>(null);
+    const tabSearchRef = useRef<HTMLInputElement | null>(null);
     const tabsRef = useRef(tabs);
     const pointerMoveHandler = useRef<(event: PointerEvent) => void>(() => {});
     const pointerUpHandler = useRef<(event: PointerEvent) => void>(() => {});
@@ -314,6 +312,48 @@ export const DeviceTabs = ({
         };
     }, []);
 
+    useEffect(() => {
+        const handleShortcut = (event: KeyboardEvent) => {
+            if (
+                (event.ctrlKey || event.metaKey) &&
+                event.shiftKey &&
+                event.key.toLowerCase() === "a"
+            ) {
+                event.preventDefault();
+                setTabListOpen(true);
+            }
+        };
+        window.addEventListener("keydown", handleShortcut);
+        return () => window.removeEventListener("keydown", handleShortcut);
+    }, []);
+
+    useEffect(() => {
+        if (!tabListOpen) {
+            return;
+        }
+        tabSearchRef.current?.focus();
+        const handlePointerDown = (event: PointerEvent) => {
+            if (!tabListRef.current?.contains(event.target as Node)) {
+                setTabListOpen(false);
+                setTabQuery("");
+            }
+        };
+        const handleKeyDown = (event: KeyboardEvent) => {
+            if (event.key === "Escape") {
+                event.preventDefault();
+                setTabListOpen(false);
+                setTabQuery("");
+                tabListButtonRef.current?.focus();
+            }
+        };
+        document.addEventListener("pointerdown", handlePointerDown);
+        document.addEventListener("keydown", handleKeyDown);
+        return () => {
+            document.removeEventListener("pointerdown", handlePointerDown);
+            document.removeEventListener("keydown", handleKeyDown);
+        };
+    }, [tabListOpen]);
+
     const beginDrag = (
         tab: DeviceViewTab,
         pending: boolean,
@@ -351,9 +391,113 @@ export const DeviceTabs = ({
     const previewDevice = devices.find(
         (device) => device.controlId === previewTab?.deviceId,
     );
+    const normalizedQuery = tabQuery.trim().toLocaleLowerCase();
+    const tabListItems = [
+        ...tabs.map((tab) => ({ detached: false, tab })),
+        ...detachedTabs.map((tab) => ({ detached: true, tab })),
+    ]
+        .map(({ detached, tab }) => {
+            const device = devices.find(
+                (candidate) => candidate.controlId === tab.deviceId,
+            );
+            return {
+                detached,
+                name: device?.name ?? "新标签页",
+                tab,
+            };
+        })
+        .filter(({ name }) =>
+            name.toLocaleLowerCase().includes(normalizedQuery),
+        );
 
     return (
         <div className="device-tabs-shell">
+            <div className="device-tab-list" ref={tabListRef}>
+                <button
+                    aria-controls="device-tab-list-dialog"
+                    aria-expanded={tabListOpen}
+                    aria-haspopup="dialog"
+                    aria-label="搜索标签页"
+                    className="device-tab-list-button"
+                    onClick={() => {
+                        setTabListOpen((open) => !open);
+                        if (tabListOpen) {
+                            setTabQuery("");
+                        }
+                    }}
+                    ref={tabListButtonRef}
+                    title="搜索标签页 (Ctrl+Shift+A)"
+                    type="button"
+                >
+                    <CaretDown aria-hidden="true" size={17} weight="bold" />
+                </button>
+                {tabListOpen && (
+                    <div
+                        aria-label="标签页列表"
+                        className="device-tab-list-dialog"
+                        id="device-tab-list-dialog"
+                        role="dialog"
+                    >
+                        <label className="device-tab-search">
+                            <MagnifyingGlass
+                                aria-hidden="true"
+                                size={17}
+                                weight="light"
+                            />
+                            <span className="visually-hidden">搜索标签页</span>
+                            <input
+                                aria-label="搜索标签页"
+                                onChange={(event) =>
+                                    setTabQuery(event.currentTarget.value)
+                                }
+                                placeholder="搜索标签页"
+                                ref={tabSearchRef}
+                                type="search"
+                                value={tabQuery}
+                            />
+                            <kbd>Ctrl+Shift+A</kbd>
+                        </label>
+                        <div className="device-tab-list-heading">打开的标签页</div>
+                        <div className="device-tab-list-results">
+                            {tabListItems.length > 0 ? (
+                                tabListItems.map(({ detached, name, tab }) => (
+                                    <button
+                                        aria-label={`${detached ? "聚焦窗口标签页" : "切换到标签页"}：${name}`}
+                                        className={`device-tab-list-option ${!detached && tab.id === activeTabId ? "device-tab-list-option-active" : ""}`}
+                                        key={tab.id}
+                                        onClick={() => {
+                                            if (detached) {
+                                                onFocusDetached(tab.id);
+                                            } else {
+                                                onSelect(tab.id);
+                                            }
+                                            setTabListOpen(false);
+                                            setTabQuery("");
+                                            tabListButtonRef.current?.focus();
+                                        }}
+                                        type="button"
+                                    >
+                                        <span>{name}</span>
+                                        {!detached && tab.id === activeTabId && (
+                                            <Check
+                                                aria-hidden="true"
+                                                size={16}
+                                                weight="bold"
+                                            />
+                                        )}
+                                    </button>
+                                ))
+                            ) : (
+                                <p className="device-tab-list-empty">
+                                    {tabs.length + detachedTabs.length > 0
+                                        ? "没有匹配的标签页"
+                                        : "没有打开的标签页"}
+                                </p>
+                            )}
+                        </div>
+                    </div>
+                )}
+            </div>
             <div aria-label="设备视图" className="device-tabs" role="tablist">
                 {tabs.map((tab) => {
                     const device = devices.find(
@@ -369,7 +513,7 @@ export const DeviceTabs = ({
 
                     return (
                         <div
-                            className={`device-tab-item ${active ? "device-tab-active" : ""} ${dragging ? "device-tab-placeholder" : ""} ${device ? "" : "device-new-tab-item"}`}
+                            className={`device-tab-item ${active ? "device-tab-active" : ""} ${dragging ? "device-tab-placeholder" : ""}`}
                             data-device-tab-id={tab.id}
                             key={tab.id}
                             onPointerDown={(event) =>

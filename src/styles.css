@@ -290,8 +290,8 @@ code {
 
 .dashboard-page {
     display: grid;
-    grid-template-rows: minmax(0, 1fr) 128px;
-    gap: 18px;
+    grid-template-rows: minmax(0, 1fr);
+    gap: 0;
     width: 100%;
     height: 100%;
     padding: 18px 16px 14px;
@@ -313,12 +313,166 @@ code {
 .device-tabs-shell {
     z-index: 2;
     display: flex;
-    height: 64px;
+    height: 58px;
     min-width: 0;
     flex: 0 0 auto;
     align-items: flex-end;
     margin-bottom: -1px;
     overflow: visible;
+}
+
+.device-tab-list {
+    position: relative;
+    z-index: 8;
+    flex: 0 0 auto;
+}
+
+.device-tab-list-button {
+    display: grid;
+    width: 38px;
+    height: 38px;
+    margin: 0 6px 10px 0;
+    padding: 0;
+    place-items: center;
+    color: #9b9d96;
+    background: #171917;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    transition:
+        color 140ms ease,
+        background-color 140ms ease,
+        border-color 140ms ease,
+        transform 140ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .device-tab-list-button:hover {
+        color: var(--gold);
+        background: #1d201d;
+        border-color: rgba(240, 207, 106, 0.22);
+    }
+}
+
+.device-tab-list-button:active {
+    transform: scale(0.94);
+}
+
+.device-tab-list-button[aria-expanded="true"] {
+    color: var(--gold);
+    background: rgba(240, 207, 106, 0.09);
+    border-color: rgba(240, 207, 106, 0.38);
+}
+
+.device-tab-list-dialog {
+    position: absolute;
+    top: 48px;
+    left: 0;
+    display: flex;
+    width: min(330px, calc(100vw - 188px));
+    max-height: min(420px, calc(100vh - 170px));
+    flex-direction: column;
+    overflow: hidden;
+    background: #151816;
+    border: 1px solid rgba(240, 207, 106, 0.2);
+    border-radius: 11px;
+    box-shadow:
+        0 18px 45px rgba(0, 0, 0, 0.48),
+        0 0 0 1px rgba(255, 255, 255, 0.025);
+    transform-origin: top left;
+}
+
+.device-tab-search {
+    display: grid;
+    min-height: 52px;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 10px;
+    align-items: center;
+    padding: 0 14px;
+    color: #8f918b;
+    border-bottom: 1px solid var(--border);
+}
+
+.device-tab-search input {
+    width: 100%;
+    min-width: 0;
+    padding: 0;
+    color: #dedfd9;
+    background: transparent;
+    border: 0;
+    outline: 0;
+}
+
+.device-tab-search input::placeholder {
+    color: #777a73;
+}
+
+.device-tab-search input::-webkit-search-cancel-button {
+    display: none;
+}
+
+.device-tab-search kbd {
+    color: #777a73;
+    font-family: inherit;
+    font-size: 10px;
+    white-space: nowrap;
+}
+
+.device-tab-list-heading {
+    padding: 13px 14px 8px;
+    color: #777a73;
+    font-size: 11px;
+}
+
+.device-tab-list-results {
+    min-height: 0;
+    padding: 0 7px 7px;
+    overflow-y: auto;
+}
+
+.device-tab-list-option {
+    display: grid;
+    width: 100%;
+    min-height: 38px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px;
+    align-items: center;
+    padding: 0 10px;
+    color: #c7c9c2;
+    text-align: left;
+    background: transparent;
+    border: 0;
+    border-radius: 7px;
+    transition: color 120ms ease, background-color 120ms ease;
+}
+
+.device-tab-list-option span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.device-tab-list-option svg {
+    color: var(--gold);
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .device-tab-list-option:hover {
+        color: #f0f0eb;
+        background: rgba(255, 255, 255, 0.055);
+    }
+}
+
+.device-tab-list-option-active {
+    color: var(--gold);
+    background: rgba(240, 207, 106, 0.07);
+}
+
+.device-tab-list-empty {
+    margin: 0;
+    padding: 15px 10px 17px;
+    color: #777a73;
+    font-size: 12px;
+    text-align: center;
 }
 
 .device-tabs {
@@ -347,15 +501,6 @@ code {
     transition:
         opacity 140ms ease,
         transform 140ms cubic-bezier(0.23, 1, 0.32, 1);
-}
-
-.device-new-tab-item {
-    min-width: 210px;
-}
-
-.device-new-tab-item .device-tab-select > svg {
-    flex: 0 0 auto;
-    color: var(--gold-dark);
 }
 
 .device-new-tab-button {
@@ -433,7 +578,6 @@ code {
 .device-tab-select {
     display: flex;
     min-width: 0;
-    gap: 10px;
     align-items: center;
     padding: 0 4px 0 15px;
     text-align: left;
@@ -473,45 +617,17 @@ code {
     outline-offset: 1px;
 }
 
-.device-tab-status {
-    width: 7px;
-    height: 7px;
-    flex: 0 0 auto;
-    border-radius: 50%;
-    background: #686965;
-}
-
-.device-tab-status-active {
-    background: var(--green);
-    box-shadow: 0 0 0 3px rgba(119, 185, 86, 0.09);
-}
-
-.device-tab-copy {
-    display: flex;
+.device-tab-name {
     min-width: 0;
-    flex-direction: column;
-    gap: 3px;
-}
-
-.device-tab-copy strong,
-.device-tab-copy small {
     overflow: hidden;
+    color: #d6d7d1;
+    font-size: 13px;
+    font-weight: 560;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
 
-.device-tab-copy strong {
-    color: #d6d7d1;
-    font-size: 13px;
-    font-weight: 560;
-}
-
-.device-tab-copy small {
-    color: #777973;
-    font-size: 11px;
-}
-
-.device-tab-active .device-tab-copy strong {
+.device-tab-active .device-tab-name {
     color: var(--gold);
 }
 
@@ -524,7 +640,7 @@ code {
     overflow: hidden;
     background: var(--surface-raised);
     border: 1px solid rgba(240, 207, 106, 0.62);
-    border-radius: 0 10px 10px 10px;
+    border-radius: 10px;
     container-name: device-panel;
     container-type: size;
 }
@@ -1138,169 +1254,6 @@ code {
     background: #1c1e1c;
     border-color: var(--border-strong);
     transform: translateY(-1px);
-}
-
-.control-footer {
-    display: grid;
-    min-width: 0;
-    grid-template-columns: minmax(550px, 1.45fr) minmax(190px, 0.42fr) auto;
-    align-items: stretch;
-    padding: 0 22px;
-    overflow: hidden;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-}
-
-.footer-context,
-.safety-summary,
-.output-summary,
-.output-actions {
-    display: flex;
-    min-width: 0;
-    align-items: center;
-}
-
-.footer-context {
-    gap: 24px;
-}
-
-.global-output-scope {
-    display: flex;
-    min-width: 160px;
-    flex-direction: column;
-    gap: 6px;
-    justify-content: center;
-    padding-right: 24px;
-    border-right: 1px solid var(--border);
-}
-
-.global-output-scope strong {
-    color: var(--gold);
-    font-size: 15px;
-    font-weight: 650;
-}
-
-.global-output-scope small {
-    color: #6f716d;
-    font-size: 11px;
-    white-space: nowrap;
-}
-
-.safety-summary {
-    gap: 16px;
-}
-
-.safety-summary > span:not(.bullet-separator) {
-    display: inline-flex;
-    gap: 8px;
-    align-items: center;
-    color: #b5b6b0;
-    font-size: 13px;
-    white-space: nowrap;
-}
-
-.safety-summary svg {
-    color: #aaa;
-}
-
-.bullet-separator {
-    color: #555752;
-}
-
-.output-summary {
-    flex-direction: column;
-    gap: 8px;
-    align-items: flex-start;
-    justify-content: center;
-    padding: 0 28px;
-    border-right: 1px solid var(--border);
-    border-left: 1px solid var(--border);
-}
-
-.output-summary > span {
-    color: #777973;
-    font-size: 11px;
-}
-
-.output-summary strong {
-    display: inline-flex;
-    gap: 8px;
-    align-items: center;
-    color: var(--gold);
-    font-size: 15px;
-    font-weight: 550;
-}
-
-.output-status-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: currentColor;
-}
-
-.output-summary .output-running {
-    color: var(--green);
-}
-
-.output-summary .output-error,
-.output-summary .output-stopped {
-    color: var(--red);
-}
-
-.output-actions {
-    gap: 16px;
-    padding-left: 28px;
-}
-
-.output-button,
-.emergency-button {
-    display: inline-flex;
-    height: 58px;
-    gap: 11px;
-    align-items: center;
-    justify-content: center;
-    border-radius: 8px;
-    font-size: 16px;
-    font-weight: 650;
-    white-space: nowrap;
-    transition:
-        transform 140ms ease,
-        background-color 140ms ease,
-        border-color 140ms ease;
-}
-
-.output-button {
-    min-width: 218px;
-    padding: 0 30px;
-    color: #171813;
-    background: var(--gold);
-    border: 1px solid var(--gold);
-}
-
-.output-button:hover:not(:disabled) {
-    background: var(--gold-strong);
-    transform: translateY(-1px);
-}
-
-.output-button-stop {
-    color: #e6c669;
-    background: #262217;
-    border-color: #79682e;
-}
-
-.emergency-button {
-    min-width: 154px;
-    padding: 0 20px;
-    color: var(--red);
-    background: transparent;
-    border: 1px solid #a74540;
-}
-
-.emergency-button:hover:not(:disabled) {
-    color: #ff7168;
-    background: rgba(167, 69, 64, 0.1);
-    border-color: #d75a52;
 }
 
 .standard-page {
@@ -2495,51 +2448,6 @@ code {
         min-width: 205px;
     }
 
-    .control-footer {
-        grid-template-columns: minmax(380px, 1fr) minmax(145px, 0.38fr) auto;
-        padding-right: 18px;
-        padding-left: 22px;
-    }
-
-    .footer-context {
-        gap: 16px;
-    }
-
-    .global-output-scope {
-        min-width: 136px;
-        padding-right: 16px;
-    }
-
-    .global-output-scope small {
-        display: none;
-    }
-
-    .safety-summary {
-        gap: 10px;
-    }
-
-    .safety-summary > strong {
-        margin-right: 5px;
-    }
-
-    .output-summary {
-        padding: 0 20px;
-    }
-
-    .output-actions {
-        gap: 10px;
-        padding-left: 18px;
-    }
-
-    .output-button {
-        min-width: 176px;
-        padding: 0 22px;
-    }
-
-    .emergency-button {
-        min-width: 132px;
-        padding: 0 14px;
-    }
 }
 
 @media (max-width: 900px) {
@@ -2574,35 +2482,6 @@ code {
 
     .device-tab-item {
         min-width: 168px;
-    }
-
-    .control-footer {
-        grid-template-columns: minmax(90px, 1fr) auto;
-        padding: 0 10px;
-    }
-
-    .footer-context {
-        display: none;
-    }
-
-    .output-summary {
-        padding: 0 12px;
-        border-left: 0;
-    }
-
-    .output-actions {
-        gap: 6px;
-        padding-left: 10px;
-    }
-
-    .output-button {
-        min-width: 122px;
-        padding: 0 12px;
-    }
-
-    .emergency-button {
-        min-width: 110px;
-        padding: 0 10px;
     }
 
     .standard-page {

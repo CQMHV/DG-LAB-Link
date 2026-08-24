@@ -1,15 +1,9 @@
 import {
     BatteryHigh,
     Broadcast,
-    Clock,
     DeviceMobile,
     LinkSimple,
-    Play,
     Plus,
-    ShieldCheck,
-    SpinnerGap,
-    Stop,
-    WarningOctagon,
     Waveform,
 } from "@phosphor-icons/react";
 
@@ -27,17 +21,17 @@ interface DashboardPageProps {
     snapshot: HubSnapshot;
     tabs: DeviceViewTab[];
     pendingAction: string | null;
-    emergencyPending: boolean;
     activeTabId: string;
     activeDeviceId: string | null;
     detached?: boolean;
+    detachedTabs: DeviceViewTab[];
     onAdjust: (channel: HubChannel, delta: number, deviceId: string) => void;
     onCloseTab: (tabId: string) => void;
     onConnect: () => void;
     onDetachTab: (tab: DeviceViewTab) => void;
-    onEmergencyStop: () => void;
     onMoveTab: (tabId: string, targetTabId: string) => void;
     onNewDeviceTab: () => void;
+    onFocusDetachedTab: (tabId: string) => void;
     onOpenPairing: () => void;
     onSelectDevice: (deviceId: string) => void;
     onSelectTab: (tabId: string) => void;
@@ -50,45 +44,28 @@ interface DashboardPageProps {
         deviceId: string,
         enabled: boolean,
     ) => void;
-    onStartOutput: () => void;
-    onStopOutput: () => void;
 }
-
-const outputLabel = (state: HubSnapshot["output"]["state"]): string => {
-    if (state === "running") {
-        return "输出中";
-    }
-    if (state === "error") {
-        return "输出异常";
-    }
-    if (state === "stopped") {
-        return "已停止";
-    }
-    return "待机";
-};
 
 export const DashboardPage = ({
     snapshot,
     tabs,
     pendingAction,
-    emergencyPending,
     activeTabId,
     activeDeviceId,
     detached = false,
+    detachedTabs,
     onAdjust,
     onCloseTab,
     onConnect,
     onDetachTab,
-    onEmergencyStop,
     onMoveTab,
     onNewDeviceTab,
+    onFocusDetachedTab,
     onOpenPairing,
     onSelectDevice,
     onSelectTab,
     onSetDeviceChannelSource,
     onSetDeviceChannelSourceSync,
-    onStartOutput,
-    onStopOutput,
 }: DashboardPageProps) => {
     const device = activeDeviceId
         ? snapshot.devices.find(
@@ -98,7 +75,6 @@ export const DashboardPage = ({
     const hasOpenTab = detached || tabs.length > 0;
     const deviceUnavailable = Boolean(activeDeviceId) && !device;
     const isConnected = snapshot.connection.state === "connected";
-    const isRunning = snapshot.output.state === "running";
     const deviceSources = {
         a: snapshot.sources.find((source) => source.id === device?.sourceIdA),
         b: snapshot.sources.find((source) => source.id === device?.sourceIdB),
@@ -130,14 +106,7 @@ export const DashboardPage = ({
             status: device?.channelBStatus ?? "disconnected",
         },
     } satisfies HubSnapshot["channels"];
-    const canOutput =
-        isConnected &&
-        Boolean(device) &&
-        snapshot.devices.length > 0 &&
-        snapshot.devices.every(
-            (candidate) => Boolean(candidate.sourceIdA && candidate.sourceIdB),
-        );
-    const busy = pendingAction !== null || emergencyPending;
+    const busy = pendingAction !== null;
     const sourceBusy = Boolean(
         device &&
             (pendingAction?.startsWith(`source-${device.controlId}-`) ||
@@ -151,10 +120,12 @@ export const DashboardPage = ({
                     <DeviceTabs
                         activeTabId={activeTabId}
                         devices={snapshot.devices}
+                        detachedTabs={detachedTabs}
                         onClose={onCloseTab}
                         onDetach={onDetachTab}
                         onMove={onMoveTab}
                         onNewTab={onNewDeviceTab}
+                        onFocusDetached={onFocusDetachedTab}
                         onSelect={onSelectTab}
                         pendingAction={pendingAction}
                         tabs={tabs}
@@ -386,76 +357,6 @@ export const DashboardPage = ({
                 </div>
             </section>
 
-            {!detached && (
-                <section className="control-footer" aria-label="安全限制与输出控制">
-                <div className="footer-context">
-                    <div className="global-output-scope">
-                        <strong>全部设备输出</strong>
-                        <small>应用到全部 {snapshot.devices.length} 台在线设备</small>
-                    </div>
-                    <div className="safety-summary">
-                        <span>
-                            <ShieldCheck aria-hidden="true" size={20} weight="light" />
-                            通道上限 {snapshot.safety.channelLimit}
-                        </span>
-                        <span className="bullet-separator">·</span>
-                        <span>
-                            <Clock aria-hidden="true" size={20} weight="light" />
-                            最长输出 {snapshot.safety.maxDurationMinutes} 分钟
-                        </span>
-                    </div>
-                </div>
-                <div className="output-summary">
-                    <span>输出状态</span>
-                    <strong className={`output-${snapshot.output.state}`}>
-                        <span className="output-status-dot" />
-                        {outputLabel(snapshot.output.state)}
-                    </strong>
-                </div>
-                <div className="output-actions">
-                    <button
-                        className={`output-button ${isRunning ? "output-button-stop" : ""}`}
-                        disabled={busy || (!isRunning && !canOutput)}
-                        onClick={isRunning ? onStopOutput : onStartOutput}
-                        type="button"
-                    >
-                        {pendingAction === "output" ? (
-                            <SpinnerGap
-                                aria-hidden="true"
-                                className="spin"
-                                size={21}
-                            />
-                        ) : isRunning ? (
-                            <Stop aria-hidden="true" size={20} weight="fill" />
-                        ) : (
-                            <Play aria-hidden="true" size={20} weight="fill" />
-                        )}
-                        {isRunning ? "停止输出" : "开始输出"}
-                    </button>
-                    <button
-                        className="emergency-button"
-                        disabled={emergencyPending}
-                        onClick={onEmergencyStop}
-                        type="button"
-                    >
-                        {emergencyPending ? (
-                            <SpinnerGap
-                                aria-hidden="true"
-                                className="spin"
-                                size={20}
-                            />
-                        ) : (
-                            <WarningOctagon
-                                aria-hidden="true"
-                                size={20}
-                                weight="fill"
-                            />
-                        )}
-                        {emergencyPending ? "正在停止" : "紧急停止"}
-                    </button>
-                </div>
-                </section>
-            )}
         </div>
     );
 };

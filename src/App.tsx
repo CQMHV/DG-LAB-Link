@@ -16,7 +16,6 @@ import { useHubSnapshot } from "./hooks/useHubSnapshot";
 import {
     adjustIntensity,
     connectRelay,
-    emergencyStop,
     getAppPreferences,
     isBrowserDemo,
     selectDevice,
@@ -27,8 +26,6 @@ import {
     setDeviceChannelSourceSync,
     setSyncAllDevices,
     setStartMinimized,
-    startOutput,
-    stopOutput,
     updateSafety,
 } from "./lib/bridge";
 import type {
@@ -37,6 +34,7 @@ import type {
     SafetyUpdate,
 } from "./lib/contracts";
 import {
+    focusDeviceWindow,
     getDeviceWindowContext,
     openDeviceWindow,
     updateDetachedWindowDevice,
@@ -92,24 +90,22 @@ export default function App() {
             tabs: [initialTab],
         };
     });
+    const [detachedTabs, setDetachedTabs] = useState<DeviceViewTab[]>([]);
     const [detachedDeviceId, setDetachedDeviceId] = useState(
         windowContext.deviceId,
     );
     const [pendingAction, setPendingAction] = useState<string | null>(null);
     const [actionError, setActionError] = useState<string | null>(null);
-    const [emergencyPending, setEmergencyPending] = useState(false);
-    const [emergencyError, setEmergencyError] = useState<string | null>(null);
     const [dismissedExternalError, setDismissedExternalError] = useState<
         string | null
     >(null);
     const [pairingOpen, setPairingOpen] = useState(false);
-    const emergencyGeneration = useRef(0);
     const dashboardTabsInitialized = useRef(false);
     const demoMode = isBrowserDemo();
 
     const runAction = useCallback(
         async (name: string, action: () => Promise<void>) => {
-            if (pendingAction || emergencyPending) {
+            if (pendingAction) {
                 return;
             }
             setPendingAction(name);
@@ -123,27 +119,10 @@ export default function App() {
                 setPendingAction(null);
             }
         },
-        [emergencyPending, pendingAction, refresh],
+        [pendingAction, refresh],
     );
 
     const closePairing = useCallback(() => setPairingOpen(false), []);
-
-    const runEmergencyStop = useCallback(async () => {
-        if (emergencyPending) {
-            return;
-        }
-        emergencyGeneration.current += 1;
-        setEmergencyPending(true);
-        setEmergencyError(null);
-        try {
-            await emergencyStop();
-            await refresh();
-        } catch (stopFailure) {
-            setEmergencyError(getErrorMessage(stopFailure, "紧急停止失败"));
-        } finally {
-            setEmergencyPending(false);
-        }
-    }, [emergencyPending, refresh]);
 
     const handleAdjust = (
         channel: HubChannel,
@@ -314,9 +293,17 @@ export default function App() {
             return;
         }
         const tab = createDeviceViewTab(deviceId);
-        void runAction(`window-${tab.id}`, () =>
-            openDeviceWindow({ device, tabId: tab.id }),
-        );
+        void runAction(`window-${tab.id}`, async () => {
+            await openDeviceWindow({
+                device,
+                onClosed: () =>
+                    setDetachedTabs((current) =>
+                        current.filter((candidate) => candidate.id !== tab.id),
+                    ),
+                tabId: tab.id,
+            });
+            setDetachedTabs((current) => [...current, tab]);
+        });
     };
 
     const handleDetachTab = (tab: DeviceViewTab) => {
@@ -324,7 +311,15 @@ export default function App() {
             (candidate) => candidate.controlId === tab.deviceId,
         );
         void runAction(`window-${tab.id}`, async () => {
-            await openDeviceWindow({ device, tabId: tab.id });
+            await openDeviceWindow({
+                device,
+                onClosed: () =>
+                    setDetachedTabs((current) =>
+                        current.filter((candidate) => candidate.id !== tab.id),
+                    ),
+                tabId: tab.id,
+            });
+            setDetachedTabs((current) => [...current, tab]);
             setDashboardTabs((current) => {
                 const detachedIndex = current.tabs.findIndex(
                     (candidate) => candidate.id === tab.id,
@@ -351,12 +346,14 @@ export default function App() {
         });
     };
 
-    const handleStartOutput = () => {
-        const startGeneration = emergencyGeneration.current;
-        void runAction("output", async () => {
-            await startOutput();
-            if (startGeneration !== emergencyGeneration.current) {
-                await emergencyStop();
+    const handleFocusDetachedTab = (tabId: string) => {
+        void runAction(`window-${tabId}`, async () => {
+            const focused = await focusDeviceWindow(tabId);
+            if (!focused) {
+                setDetachedTabs((current) =>
+                    current.filter((candidate) => candidate.id !== tabId),
+                );
+                throw new Error("标签页所在窗口已关闭");
             }
         });
     };
@@ -366,8 +363,7 @@ export default function App() {
     const externalError = snapshotError ?? runtimeError;
     const visibleExternalError =
         externalError === dismissedExternalError ? null : externalError;
-    const appError =
-        emergencyError ?? actionError ?? visibleExternalError;
+    const appError = actionError ?? visibleExternalError;
     const activeDashboardTab = dashboardTabs.tabs.find(
         (tab) => tab.id === dashboardTabs.activeTabId,
     );
@@ -491,16 +487,16 @@ export default function App() {
                                     activeDashboardDeviceId
                                 }
                                 detached={windowContext.detached}
+                                detachedTabs={detachedTabs}
                                 onAdjust={handleAdjust}
                                 onCloseTab={handleCloseDeviceTab}
                                 onConnect={() =>
                                     void runAction("connect", connectRelay)
                                 }
-                                emergencyPending={emergencyPending}
                                 onDetachTab={handleDetachTab}
-                                onEmergencyStop={() => void runEmergencyStop()}
                                 onMoveTab={handleMoveDeviceTab}
                                 onNewDeviceTab={handleNewDeviceTab}
+                                onFocusDetachedTab={handleFocusDetachedTab}
                                 onOpenPairing={() => setPairingOpen(true)}
                                 onSelectDevice={handleSelectDevice}
                                 onSelectTab={handleSelectTab}
@@ -517,10 +513,6 @@ export default function App() {
                                     void runAction(`source-sync-${deviceId}`, () =>
                                         setDeviceChannelSourceSync(deviceId, enabled),
                                     )
-                                }
-                                onStartOutput={handleStartOutput}
-                                onStopOutput={() =>
-                                    void runAction("output", stopOutput)
                                 }
                                 pendingAction={pendingAction}
                                 snapshot={snapshot}
@@ -589,7 +581,6 @@ export default function App() {
                         <button
                             aria-label="关闭错误提示"
                             onClick={() => {
-                                setEmergencyError(null);
                                 setActionError(null);
                                 setDismissedExternalError(externalError);
                             }}

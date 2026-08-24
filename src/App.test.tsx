@@ -17,7 +17,6 @@ import App from "./App";
 import {
     __emitMockSnapshot,
     __resetMockBridge,
-    __setMockStartOutputCompletion,
     getAppPreferences,
     getHubSnapshot,
 } from "./lib/bridge";
@@ -71,6 +70,44 @@ describe("DG-LAB Link 前端", () => {
         ).toBeTruthy();
     });
 
+    it("标签页只显示设备名称", async () => {
+        render(<App />);
+
+        const tab = await screen.findByRole("tab", { name: "郊狼 3.0" });
+        expect(tab.textContent).toBe("郊狼 3.0");
+    });
+
+    it("可以从标签页列表搜索并切换标签页", async () => {
+        const user = userEvent.setup();
+        render(<App />);
+
+        const deviceTab = await screen.findByRole("tab", {
+            name: "郊狼 3.0",
+        });
+        await user.click(screen.getByRole("button", { name: "新建标签页" }));
+        expect(deviceTab.getAttribute("aria-selected")).toBe("false");
+
+        await user.click(screen.getByRole("button", { name: "搜索标签页" }));
+        const dialog = screen.getByRole("dialog", { name: "标签页列表" });
+        await user.type(
+            within(dialog).getByRole("searchbox", { name: "搜索标签页" }),
+            "郊狼",
+        );
+        expect(
+            within(dialog).queryByRole("button", {
+                name: "切换到标签页：新标签页",
+            }),
+        ).toBeNull();
+        await user.click(
+            within(dialog).getByRole("button", {
+                name: "切换到标签页：郊狼 3.0",
+            }),
+        );
+
+        expect(deviceTab.getAttribute("aria-selected")).toBe("true");
+        expect(screen.queryByRole("dialog", { name: "标签页列表" })).toBeNull();
+    });
+
     it("可以在五个主页面之间切换", async () => {
         const user = userEvent.setup();
         render(<App />);
@@ -100,62 +137,6 @@ describe("DG-LAB Link 前端", () => {
         expect(
             screen.getByRole("region", { name: "当前设备仪表盘" }),
         ).toBeTruthy();
-    });
-
-    it("可以开始并停止波形输出", async () => {
-        const user = userEvent.setup();
-        render(<App />);
-
-        const startButton = await screen.findByRole("button", {
-            name: "开始输出",
-        });
-        await user.click(startButton);
-
-        await waitFor(async () => {
-            expect(
-                screen.getByRole("button", { name: "停止输出" }),
-            ).toBeTruthy();
-            expect((await getHubSnapshot()).output.state).toBe("running");
-        });
-
-        await user.click(screen.getByRole("button", { name: "停止输出" }));
-        await waitFor(() => {
-            expect(
-                screen.getByRole("button", { name: "开始输出" }),
-            ).toBeTruthy();
-        });
-    });
-
-    it("普通操作等待时仍可立即执行紧急停止", async () => {
-        const user = userEvent.setup();
-        let completeStartOutput: (() => void) | undefined;
-        const startOutputCompletion = new Promise<void>((resolve) => {
-            completeStartOutput = resolve;
-        });
-        __setMockStartOutputCompletion(startOutputCompletion);
-        render(<App />);
-
-        await user.click(
-            await screen.findByRole("button", { name: "开始输出" }),
-        );
-
-        const emergencyButton = screen.getByRole("button", {
-            name: "紧急停止",
-        });
-        expect((emergencyButton as HTMLButtonElement).disabled).toBe(false);
-        await user.click(emergencyButton);
-
-        await waitFor(() => {
-            expect(screen.getAllByText("已停止").length).toBeGreaterThan(0);
-        });
-
-        await act(async () => {
-            completeStartOutput?.();
-            await startOutputCompletion;
-        });
-        await waitFor(async () => {
-            expect((await getHubSnapshot()).output.state).toBe("stopped");
-        });
     });
 
     it("展示后端快照中的输出错误", async () => {
@@ -226,7 +207,9 @@ describe("DG-LAB Link 前端", () => {
         ).toBeTruthy();
         expect(
             (
-                screen.getByRole("button", { name: "开始输出" }) as HTMLButtonElement
+                screen.getByRole("button", {
+                    name: "提高 A 通道强度",
+                }) as HTMLButtonElement
             ).disabled,
         ).toBe(false);
 
@@ -261,7 +244,16 @@ describe("DG-LAB Link 前端", () => {
         ).toBeTruthy();
         expect(
             (
-                screen.getByRole("button", { name: "开始输出" }) as HTMLButtonElement
+                screen.getByRole("button", {
+                    name: "提高 A 通道强度",
+                }) as HTMLButtonElement
+            ).disabled,
+        ).toBe(false);
+        expect(
+            (
+                screen.getByRole("button", {
+                    name: "提高 B 通道强度",
+                }) as HTMLButtonElement
             ).disabled,
         ).toBe(false);
     });
@@ -331,7 +323,7 @@ describe("DG-LAB Link 前端", () => {
         expect(document.activeElement).toBe(openButton);
     });
 
-    it("明确区分当前设备和全部设备输出", async () => {
+    it("仪表盘只显示当前设备控制且不保留底部输出栏", async () => {
         const user = userEvent.setup();
         render(<App />);
 
@@ -344,8 +336,10 @@ describe("DG-LAB Link 前端", () => {
                 selector: ".device-scope-title strong",
             }),
         ).toBeTruthy();
-        expect(screen.getByText("全部设备输出")).toBeTruthy();
-        expect(screen.getByText("应用到全部 2 台在线设备")).toBeTruthy();
+        expect(screen.queryByText("全部设备输出")).toBeNull();
+        expect(
+            screen.queryByRole("region", { name: "安全限制与输出控制" }),
+        ).toBeNull();
         expect(screen.queryByRole("button", { name: "切换设备" })).toBeNull();
 
         await user.click(screen.getByRole("button", { name: "设备" }));
@@ -540,12 +534,7 @@ describe("DG-LAB Link 前端", () => {
         render(<App />);
         const initialIntensity = (await getHubSnapshot()).devices[0].intensityA;
 
-        await user.click(
-            await screen.findByRole("button", { name: "开始输出" }),
-        );
-        await waitFor(async () => {
-            expect((await getHubSnapshot()).output.state).toBe("running");
-        });
+        await screen.findByTestId("channel-a-gauge");
         await user.click(screen.getByRole("button", { name: "新建标签页" }));
 
         expect(
@@ -553,8 +542,6 @@ describe("DG-LAB Link 前端", () => {
         ).toBeTruthy();
         expect(screen.getByRole("tab", { name: /新标签页/ })).toBeTruthy();
         expect(screen.queryByTestId("channel-a-gauge")).toBeNull();
-        expect((await getHubSnapshot()).output.state).toBe("running");
-        expect(screen.getByRole("button", { name: "停止输出" })).toBeTruthy();
 
         await user.click(
             screen.getByRole("button", {
@@ -579,7 +566,6 @@ describe("DG-LAB Link 前端", () => {
             (await screen.findByTestId("channel-a-intensity") as HTMLInputElement)
                 .value,
         ).toBe(String(initialIntensity + 1));
-        expect((await getHubSnapshot()).output.state).toBe("running");
     });
 
     it("可以按设备同步 A/B 输入源并在关闭后恢复独立选择", async () => {
@@ -660,6 +646,7 @@ describe("DG-LAB Link 前端", () => {
     });
 
     it("可以把视图标签拖出为独立窗口并从主窗口移除", async () => {
+        const user = userEvent.setup();
         const focus = vi.fn();
         const open = vi
             .spyOn(window, "open")
@@ -703,6 +690,16 @@ describe("DG-LAB Link 前端", () => {
         expect(
             screen.queryByRole("button", { name: /独立窗口打开/ }),
         ).toBeNull();
+
+        await user.click(
+            screen.getByRole("button", { name: "搜索标签页" }),
+        );
+        await user.click(
+            screen.getByRole("button", {
+                name: "聚焦窗口标签页：郊狼 3.0",
+            }),
+        );
+        await waitFor(() => expect(focus).toHaveBeenCalledTimes(2));
     });
 
     it("可以关闭所有标签并通过加号重新创建标签页", async () => {
@@ -925,21 +922,19 @@ describe("DG-LAB Link 前端", () => {
                 activeTabId="detached-test-tab"
                 activeDeviceId={snapshot.devices[0].controlId}
                 detached
-                emergencyPending={false}
+                detachedTabs={[]}
                 onAdjust={vi.fn()}
                 onCloseTab={vi.fn()}
                 onConnect={vi.fn()}
                 onDetachTab={vi.fn()}
-                onEmergencyStop={vi.fn()}
                 onMoveTab={vi.fn()}
                 onNewDeviceTab={vi.fn()}
+                onFocusDetachedTab={vi.fn()}
                 onOpenPairing={vi.fn()}
                 onSelectDevice={vi.fn()}
                 onSelectTab={vi.fn()}
                 onSetDeviceChannelSource={vi.fn()}
                 onSetDeviceChannelSourceSync={vi.fn()}
-                onStartOutput={vi.fn()}
-                onStopOutput={vi.fn()}
                 pendingAction={null}
                 snapshot={snapshot}
                 tabs={[

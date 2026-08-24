@@ -10,8 +10,19 @@ export interface DeviceWindowContext {
 
 interface DeviceWindowOptions {
     device?: DeviceSnapshot;
+    onClosed?: () => void;
     tabId: string;
 }
+
+const browserDeviceWindows = new Map<string, Window>();
+
+const bringDeviceWindowToFront = async (
+    deviceWindow: WebviewWindow,
+): Promise<void> => {
+    await deviceWindow.show();
+    await deviceWindow.unminimize();
+    await deviceWindow.setFocus();
+};
 
 const hashTabId = (tabId: string): string => {
     let hash = 0x811c9dc5;
@@ -79,14 +90,27 @@ export const openDeviceWindow = async (
         if (!popup) {
             throw new Error("浏览器阻止了设备窗口，请允许此站点打开弹出窗口");
         }
+        browserDeviceWindows.set(options.tabId, popup);
+        if (typeof popup.addEventListener === "function") {
+            popup.addEventListener(
+                "beforeunload",
+                () => {
+                    browserDeviceWindows.delete(options.tabId);
+                    options.onClosed?.();
+                },
+                { once: true },
+            );
+        }
         popup.focus();
         return;
     }
 
     const existing = await WebviewWindow.getByLabel(label);
     if (existing) {
-        await existing.show();
-        await existing.setFocus();
+        if (options.onClosed) {
+            void existing.once("tauri://destroyed", options.onClosed);
+        }
+        await bringDeviceWindowToFront(existing);
         return;
     }
 
@@ -105,9 +129,31 @@ export const openDeviceWindow = async (
             focus: true,
         });
 
+        if (options.onClosed) {
+            void detachedWindow.once("tauri://destroyed", options.onClosed);
+        }
         void detachedWindow.once("tauri://created", () => resolve());
         void detachedWindow.once("tauri://error", (event) => {
             reject(new Error(`无法创建设备窗口：${String(event.payload)}`));
         });
     });
+};
+
+export const focusDeviceWindow = async (tabId: string): Promise<boolean> => {
+    if (!("__TAURI_INTERNALS__" in window)) {
+        const popup = browserDeviceWindows.get(tabId);
+        if (!popup || popup.closed === true) {
+            browserDeviceWindows.delete(tabId);
+            return false;
+        }
+        popup.focus();
+        return true;
+    }
+
+    const existing = await WebviewWindow.getByLabel(deviceWindowLabel(tabId));
+    if (!existing) {
+        return false;
+    }
+    await bringDeviceWindowToFront(existing);
+    return true;
 };
