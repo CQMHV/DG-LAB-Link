@@ -5,18 +5,15 @@
     "type": "module",
     "scripts": {
         "dev": "vite",
-        "dev:codex": "vite --host 0.0.0.0",
         "dev:simulator": "vite --config simulator/vite.config.ts",
-        "build": "npm run build:sites",
+        "build": "npm run build:client",
         "build:client": "tsc --noEmit && vite build",
         "build:simulator": "tsc -p simulator/tsconfig.json --noEmit && vite build --config simulator/vite.config.ts",
-        "build:sites": "npm run build:client && node scripts/prepare-sites-build.mjs",
         "preview": "vite preview",
         "check": "tsc --noEmit",
         "test": "vitest run",
         "test:simulator": "vitest run --config simulator/vite.config.ts",
         "test:watch": "vitest",
-        "test:sites": "node --test tests/sites-worker.test.mjs",
         "tauri": "tauri"
     },
     "dependencies": {

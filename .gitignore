@@ -23,6 +23,7 @@ coverage/
 .playwright-cli/
 output/
 design-qa.md
+.openai/
 
 # Local Product Design seed (temporary)
 tmp/

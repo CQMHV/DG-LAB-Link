@@ -24,13 +24,7 @@ npm install
 npm run dev
 ```
 
-`npm run dev` 默认只监听 `127.0.0.1`。仅在 Codex Desktop 等需要通过 `terminal.local` 访问本机预览服务的受信环境中，显式运行：
-
-```powershell
-npm run dev:codex
-```
-
-该命令会监听全部网络接口，预览结束后应立即停止，不应在不可信局域网中长期运行。
+`npm run dev` 默认只监听 `127.0.0.1`，不会向局域网开放开发服务器。
 
 启动桌面应用：
 
@@ -73,13 +67,11 @@ npm test
 npm run test:simulator
 npm run build:client
 npm run build:simulator
-npm run build:sites
-npm run test:sites
 cargo test --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 ```
 
-`npm run build` 是 `build:sites` 的别名。Tauri 的生产构建只调用 `build:client`，不会再依赖 Sites Worker 和托管清单。
+`npm run build` 是 `build:client` 的别名。
 
 当前 `bundle.active` 为 `false`，因此以下命令只生成裸可执行文件，不会产出安装包、更新包或签名 bundle：
 
