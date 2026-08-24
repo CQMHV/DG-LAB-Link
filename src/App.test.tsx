@@ -840,6 +840,36 @@ describe("DG-LAB Link 前端", () => {
         });
     });
 
+    it("开机自启默认关闭且最小化启动默认开启", async () => {
+        const user = userEvent.setup();
+        render(<App />);
+
+        await user.click(await screen.findByRole("button", { name: "设置" }));
+        const autoStart = screen.getByRole("checkbox", {
+            name: "开机自启",
+        }) as HTMLInputElement;
+        const startMinimized = screen.getByRole("checkbox", {
+            name: "以最小化形式启动",
+        }) as HTMLInputElement;
+
+        expect(autoStart.checked).toBe(false);
+        expect(startMinimized.checked).toBe(true);
+        expect(startMinimized.disabled).toBe(true);
+
+        await user.click(autoStart);
+        await waitFor(async () => {
+            expect(autoStart.checked).toBe(true);
+            expect(startMinimized.disabled).toBe(false);
+            expect((await getAppPreferences()).autoStart).toBe(true);
+        });
+
+        await user.click(startMinimized);
+        await waitFor(async () => {
+            expect(startMinimized.checked).toBe(false);
+            expect((await getAppPreferences()).startMinimized).toBe(false);
+        });
+    });
+
     it("输出中切换控制焦点不会停止其他设备", async () => {
         const user = userEvent.setup();
         render(<App />);

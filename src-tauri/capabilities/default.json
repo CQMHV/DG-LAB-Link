@@ -14,6 +14,8 @@
         "core:window:allow-toggle-maximize",
         "allow-get-app-preferences",
         "allow-set-close-to-tray",
+        "allow-set-auto-start",
+        "allow-set-start-minimized",
         "allow-get-hub-snapshot",
         "allow-connect-relay",
         "allow-disconnect-relay",

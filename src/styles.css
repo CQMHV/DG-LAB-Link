@@ -1983,6 +1983,15 @@ code {
 
 .setting-toggle-row-first {
     margin-top: 28px;
+}
+
+.setting-toggle-row-dependent {
+    margin-left: 18px;
+    background: #131513;
+    border-left-color: rgba(240, 207, 106, 0.32);
+}
+
+.setting-toggle-row-last {
     margin-bottom: 0;
 }
 

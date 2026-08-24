@@ -107,4 +107,6 @@ export interface SafetyUpdate {
 
 export interface AppPreferences {
     closeToTray: boolean;
+    autoStart: boolean;
+    startMinimized: boolean;
 }

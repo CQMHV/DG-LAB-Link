@@ -1,5 +1,6 @@
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, State};
+use tauri_plugin_autostart::ManagerExt;
 
 use crate::hub::{HubError, HubHandle, HubSnapshot};
 use crate::model::Channel;
@@ -30,17 +31,63 @@ impl From<PreferencesError> for CommandError {
     }
 }
 
+impl From<tauri_plugin_autostart::Error> for CommandError {
+    fn from(error: tauri_plugin_autostart::Error) -> Self {
+        Self {
+            code: "autostart_error",
+            message: format!("无法更新开机自启设置：{error}"),
+        }
+    }
+}
+
+fn app_preferences(
+    app: &AppHandle,
+    preferences: &PreferencesState,
+) -> Result<AppPreferencesSnapshot, CommandError> {
+    let auto_start = app.autolaunch().is_enabled()?;
+    Ok(preferences.snapshot(auto_start))
+}
+
 #[tauri::command]
-pub fn get_app_preferences(preferences: State<'_, PreferencesState>) -> AppPreferencesSnapshot {
-    preferences.snapshot()
+pub fn get_app_preferences(
+    app: AppHandle,
+    preferences: State<'_, PreferencesState>,
+) -> Result<AppPreferencesSnapshot, CommandError> {
+    app_preferences(&app, &preferences)
 }
 
 #[tauri::command]
 pub fn set_close_to_tray(
+    app: AppHandle,
     preferences: State<'_, PreferencesState>,
     enabled: bool,
 ) -> Result<AppPreferencesSnapshot, CommandError> {
-    preferences.set_close_to_tray(enabled).map_err(Into::into)
+    preferences.set_close_to_tray(enabled)?;
+    app_preferences(&app, &preferences)
+}
+
+#[tauri::command]
+pub fn set_auto_start(
+    app: AppHandle,
+    preferences: State<'_, PreferencesState>,
+    enabled: bool,
+) -> Result<AppPreferencesSnapshot, CommandError> {
+    if enabled {
+        app.autolaunch().enable()?;
+    } else {
+        app.autolaunch().disable()?;
+    }
+    app_preferences(&app, &preferences)
+}
+
+#[tauri::command]
+pub fn set_start_minimized(
+    app: AppHandle,
+    preferences: State<'_, PreferencesState>,
+    enabled: bool,
+) -> Result<AppPreferencesSnapshot, CommandError> {
+    preferences.set_start_minimized(enabled)?;
+    app_preferences(&app, &preferences)
 }
 
 #[tauri::command]

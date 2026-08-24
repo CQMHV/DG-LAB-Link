@@ -18,6 +18,8 @@ type WindowAction = "minimize" | "toggleMaximize" | "close";
 const mockListeners = new Set<SnapshotListener>();
 let mockAppPreferences: AppPreferences = {
     closeToTray: true,
+    autoStart: false,
+    startMinimized: true,
 };
 
 const now = () => new Date().toISOString();
@@ -211,7 +213,29 @@ export const setCloseToTray = async (
         return invoke<AppPreferences>("set_close_to_tray", { enabled });
     }
 
-    mockAppPreferences = { closeToTray: enabled };
+    mockAppPreferences = { ...mockAppPreferences, closeToTray: enabled };
+    return { ...mockAppPreferences };
+};
+
+export const setAutoStart = async (
+    enabled: boolean,
+): Promise<AppPreferences> => {
+    if (isTauriRuntime()) {
+        return invoke<AppPreferences>("set_auto_start", { enabled });
+    }
+
+    mockAppPreferences = { ...mockAppPreferences, autoStart: enabled };
+    return { ...mockAppPreferences };
+};
+
+export const setStartMinimized = async (
+    enabled: boolean,
+): Promise<AppPreferences> => {
+    if (isTauriRuntime()) {
+        return invoke<AppPreferences>("set_start_minimized", { enabled });
+    }
+
+    mockAppPreferences = { ...mockAppPreferences, startMinimized: enabled };
     return { ...mockAppPreferences };
 };
 
@@ -706,7 +730,11 @@ export const performWindowAction = async (
 
 export const __resetMockBridge = (): void => {
     mockSnapshot = createDefaultMockSnapshot();
-    mockAppPreferences = { closeToTray: true };
+    mockAppPreferences = {
+        closeToTray: true,
+        autoStart: false,
+        startMinimized: true,
+    };
     mockStartOutputCompletion = null;
     emitMockSnapshot();
 };

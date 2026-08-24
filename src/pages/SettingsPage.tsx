@@ -19,7 +19,9 @@ interface SettingsPageProps {
     appPreferences: AppPreferences;
     snapshot: HubSnapshot;
     pendingAction: string | null;
+    onSetAutoStart: (enabled: boolean) => void;
     onSetCloseToTray: (enabled: boolean) => void;
+    onSetStartMinimized: (enabled: boolean) => void;
     onSaveSafety: (update: SafetyUpdate) => void;
 }
 
@@ -27,7 +29,9 @@ export const SettingsPage = ({
     appPreferences,
     snapshot,
     pendingAction,
+    onSetAutoStart,
     onSetCloseToTray,
+    onSetStartMinimized,
     onSaveSafety,
 }: SettingsPageProps) => {
     const [channelLimit, setChannelLimit] = useState(
@@ -73,11 +77,62 @@ export const SettingsPage = ({
                     </div>
                     <div>
                         <h2>应用行为</h2>
-                        <p>控制主窗口关闭后的行为，修改后会自动保存。</p>
+                        <p>控制应用启动与主窗口关闭行为，修改后会自动保存。</p>
                     </div>
                 </div>
 
                 <div className="setting-toggle-row setting-toggle-row-first">
+                    <div>
+                        <strong>开机自启</strong>
+                        <span>登录系统后自动启动 DG-LAB Link。</span>
+                    </div>
+                    <label className="toggle-switch">
+                        <span className="visually-hidden">开机自启</span>
+                        <input
+                            aria-label="开机自启"
+                            checked={appPreferences.autoStart}
+                            disabled={pendingAction !== null}
+                            onChange={(event) =>
+                                onSetAutoStart(event.currentTarget.checked)
+                            }
+                            type="checkbox"
+                        />
+                        <span className="toggle-track" aria-hidden="true">
+                            <span />
+                        </span>
+                    </label>
+                </div>
+
+                <div className="setting-toggle-row setting-toggle-row-dependent">
+                    <div>
+                        <strong>以最小化形式启动</strong>
+                        <span>
+                            仅在开机自启时生效；启动后不打开主窗口，只在系统托盘中运行。
+                        </span>
+                    </div>
+                    <label className="toggle-switch">
+                        <span className="visually-hidden">以最小化形式启动</span>
+                        <input
+                            aria-label="以最小化形式启动"
+                            checked={appPreferences.startMinimized}
+                            disabled={
+                                pendingAction !== null ||
+                                !appPreferences.autoStart
+                            }
+                            onChange={(event) =>
+                                onSetStartMinimized(
+                                    event.currentTarget.checked,
+                                )
+                            }
+                            type="checkbox"
+                        />
+                        <span className="toggle-track" aria-hidden="true">
+                            <span />
+                        </span>
+                    </label>
+                </div>
+
+                <div className="setting-toggle-row setting-toggle-row-last">
                     <div>
                         <strong>关闭主窗口时保留在托盘</strong>
                         <span>

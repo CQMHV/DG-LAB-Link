@@ -19,12 +19,18 @@ use crate::dglab::client::DEFAULT_RELAY_ENDPOINT;
 use crate::hub::{HubHandle, create_hub};
 use crate::preferences::PreferencesState;
 
+const AUTOSTART_ARG: &str = "--autostart";
+
 pub fn run() {
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("无法初始化 TLS 加密提供器");
 
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec![AUTOSTART_ARG]),
+        ))
         .setup(|app| {
             let preferences_dir = app.path().app_config_dir()?;
             let preferences =
@@ -32,8 +38,12 @@ pub fn run() {
                     eprintln!("{error}；本次运行使用默认设置");
                     PreferencesState::with_defaults(preferences_dir)
                 });
+            let start_hidden = launched_from_autostart() && preferences.start_minimized();
             app.manage(preferences);
             create_tray(app)?;
+            if start_hidden && let Some(window) = app.get_webview_window("main") {
+                window.hide()?;
+            }
 
             let (hub, runtime) = create_hub(DEFAULT_RELAY_ENDPOINT.to_owned());
             let mut snapshots = hub.subscribe();
@@ -55,6 +65,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_app_preferences,
             commands::set_close_to_tray,
+            commands::set_auto_start,
+            commands::set_start_minimized,
             commands::get_hub_snapshot,
             commands::connect_relay,
             commands::disconnect_relay,
@@ -113,6 +125,10 @@ pub fn run() {
         }
         _ => {}
     });
+}
+
+fn launched_from_autostart() -> bool {
+    std::env::args_os().any(|argument| argument == AUTOSTART_ARG)
 }
 
 fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {

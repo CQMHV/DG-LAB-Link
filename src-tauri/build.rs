@@ -2,6 +2,8 @@ fn main() {
     let app_manifest = tauri_build::AppManifest::new().commands(&[
         "get_app_preferences",
         "set_close_to_tray",
+        "set_auto_start",
+        "set_start_minimized",
         "get_hub_snapshot",
         "connect_relay",
         "disconnect_relay",

@@ -20,11 +20,13 @@ import {
     getAppPreferences,
     isBrowserDemo,
     selectDevice,
+    setAutoStart,
     setDefaultSource,
     setCloseToTray,
     setDeviceChannelSource,
     setDeviceChannelSourceSync,
     setSyncAllDevices,
+    setStartMinimized,
     startOutput,
     stopOutput,
     updateSafety,
@@ -80,6 +82,8 @@ export default function App() {
     const [page, setPage] = useState<PageId>("dashboard");
     const [appPreferences, setAppPreferences] = useState<AppPreferences>({
         closeToTray: true,
+        autoStart: false,
+        startMinimized: true,
     });
     const [dashboardTabs, setDashboardTabs] = useState<DashboardTabsState>(() => {
         const initialTab = createDeviceViewTab();
@@ -157,10 +161,36 @@ export default function App() {
 
     const handleCloseToTrayChange = (enabled: boolean) => {
         const previous = appPreferences;
-        setAppPreferences({ closeToTray: enabled });
+        setAppPreferences({ ...previous, closeToTray: enabled });
         void runAction("close-to-tray", async () => {
             try {
                 setAppPreferences(await setCloseToTray(enabled));
+            } catch (error) {
+                setAppPreferences(previous);
+                throw error;
+            }
+        });
+    };
+
+    const handleAutoStartChange = (enabled: boolean) => {
+        const previous = appPreferences;
+        setAppPreferences({ ...previous, autoStart: enabled });
+        void runAction("auto-start", async () => {
+            try {
+                setAppPreferences(await setAutoStart(enabled));
+            } catch (error) {
+                setAppPreferences(previous);
+                throw error;
+            }
+        });
+    };
+
+    const handleStartMinimizedChange = (enabled: boolean) => {
+        const previous = appPreferences;
+        setAppPreferences({ ...previous, startMinimized: enabled });
+        void runAction("start-minimized", async () => {
+            try {
+                setAppPreferences(await setStartMinimized(enabled));
             } catch (error) {
                 setAppPreferences(previous);
                 throw error;
@@ -442,7 +472,9 @@ export default function App() {
                         {!windowContext.detached && page === "settings" && (
                             <SettingsPage
                                 appPreferences={appPreferences}
+                                onSetAutoStart={handleAutoStartChange}
                                 onSetCloseToTray={handleCloseToTrayChange}
+                                onSetStartMinimized={handleStartMinimizedChange}
                                 onSaveSafety={handleSafetySave}
                                 pendingAction={pendingAction}
                                 snapshot={snapshot}
