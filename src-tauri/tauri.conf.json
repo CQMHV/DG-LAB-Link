@@ -36,8 +36,8 @@
             {
                 "label": "main",
                 "title": "DG-LAB Link",
-                "width": 1440,
-                "height": 1024,
+                "width": 1024,
+                "height": 720,
                 "minWidth": 760,
                 "minHeight": 540,
                 "center": true,
