@@ -3,6 +3,7 @@ use tauri::State;
 
 use crate::hub::{HubError, HubHandle, HubSnapshot};
 use crate::model::Channel;
+use crate::preferences::{AppPreferencesSnapshot, PreferencesError, PreferencesState};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -18,6 +19,28 @@ impl From<HubError> for CommandError {
             message: error.to_string(),
         }
     }
+}
+
+impl From<PreferencesError> for CommandError {
+    fn from(error: PreferencesError) -> Self {
+        Self {
+            code: "preferences_error",
+            message: error.to_string(),
+        }
+    }
+}
+
+#[tauri::command]
+pub fn get_app_preferences(preferences: State<'_, PreferencesState>) -> AppPreferencesSnapshot {
+    preferences.snapshot()
+}
+
+#[tauri::command]
+pub fn set_close_to_tray(
+    preferences: State<'_, PreferencesState>,
+    enabled: bool,
+) -> Result<AppPreferencesSnapshot, CommandError> {
+    preferences.set_close_to_tray(enabled).map_err(Into::into)
 }
 
 #[tauri::command]

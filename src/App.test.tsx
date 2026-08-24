@@ -17,6 +17,7 @@ import {
     __emitMockSnapshot,
     __resetMockBridge,
     __setMockStartOutputCompletion,
+    getAppPreferences,
     getHubSnapshot,
 } from "./lib/bridge";
 import { DashboardPage } from "./pages/DashboardPage";
@@ -818,6 +819,24 @@ describe("DG-LAB Link 前端", () => {
             expect(
                 (await getHubSnapshot()).safety.allowAppIntensityControl,
             ).toBe(true);
+        });
+    });
+
+    it("默认关闭主窗口时保留在托盘并立即保存设置", async () => {
+        const user = userEvent.setup();
+        render(<App />);
+
+        await user.click(await screen.findByRole("button", { name: "设置" }));
+        const toggle = screen.getByRole("checkbox", {
+            name: "关闭主窗口时保留在托盘",
+        }) as HTMLInputElement;
+        expect(toggle.checked).toBe(true);
+        expect((await getAppPreferences()).closeToTray).toBe(true);
+
+        await user.click(toggle);
+        await waitFor(async () => {
+            expect(toggle.checked).toBe(false);
+            expect((await getAppPreferences()).closeToTray).toBe(false);
         });
     });
 

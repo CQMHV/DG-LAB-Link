@@ -2,16 +2,22 @@ mod commands;
 pub mod dglab;
 mod hub;
 pub mod model;
+mod preferences;
 pub mod sources;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use tauri::{Emitter, Manager, RunEvent, WindowEvent};
+use tauri::{
+    Emitter, Manager, RunEvent, WindowEvent,
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+};
 
 use crate::dglab::client::DEFAULT_RELAY_ENDPOINT;
 use crate::hub::{HubHandle, create_hub};
+use crate::preferences::PreferencesState;
 
 pub fn run() {
     rustls::crypto::ring::default_provider()
@@ -20,6 +26,15 @@ pub fn run() {
 
     let app = tauri::Builder::default()
         .setup(|app| {
+            let preferences_dir = app.path().app_config_dir()?;
+            let preferences =
+                PreferencesState::load(preferences_dir.clone()).unwrap_or_else(|error| {
+                    eprintln!("{error}；本次运行使用默认设置");
+                    PreferencesState::with_defaults(preferences_dir)
+                });
+            app.manage(preferences);
+            create_tray(app)?;
+
             let (hub, runtime) = create_hub(DEFAULT_RELAY_ENDPOINT.to_owned());
             let mut snapshots = hub.subscribe();
             let app_handle = app.handle().clone();
@@ -38,6 +53,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::get_app_preferences,
+            commands::set_close_to_tray,
             commands::get_hub_snapshot,
             commands::connect_relay,
             commands::disconnect_relay,
@@ -65,8 +82,20 @@ pub fn run() {
             event: WindowEvent::CloseRequested { api, .. },
             ..
         } if label == "main" && !shutdown_complete.load(Ordering::Acquire) => {
+            let close_to_tray = app_handle
+                .try_state::<PreferencesState>()
+                .map(|preferences| preferences.close_to_tray())
+                .unwrap_or(true);
             api.prevent_close();
-            begin_graceful_shutdown(app_handle, &shutdown_started, &shutdown_complete, 0);
+            if close_to_tray {
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    if let Err(error) = window.hide() {
+                        eprintln!("无法隐藏主窗口：{error}");
+                    }
+                }
+            } else {
+                begin_graceful_shutdown(app_handle, &shutdown_started, &shutdown_complete, 0);
+            }
         }
         RunEvent::ExitRequested { code, api, .. } if !shutdown_complete.load(Ordering::Acquire) => {
             api.prevent_exit();
@@ -84,6 +113,44 @@ pub fn run() {
         }
         _ => {}
     });
+}
+
+fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
+    let show_main = MenuItem::with_id(app, "show-main", "打开主窗口", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show_main, &quit])?;
+    let mut tray = TrayIconBuilder::with_id("main-tray")
+        .tooltip("DG-LAB Link")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "show-main" => show_main_window(app),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main_window(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
+    Ok(())
+}
+
+fn show_main_window<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) {
+    if let Some(window) = app_handle.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
 }
 
 fn begin_graceful_shutdown<R: tauri::Runtime>(

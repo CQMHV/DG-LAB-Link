@@ -1,5 +1,7 @@
 fn main() {
     let app_manifest = tauri_build::AppManifest::new().commands(&[
+        "get_app_preferences",
+        "set_close_to_tray",
         "get_hub_snapshot",
         "connect_relay",
         "disconnect_relay",

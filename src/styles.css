@@ -107,6 +107,18 @@ code {
     font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
 }
 
+.visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+}
+
 .app-shell {
     display: grid;
     grid-template-columns: 140px minmax(0, 1fr);
@@ -1856,6 +1868,10 @@ code {
     border-radius: 12px;
 }
 
+.settings-card + .settings-card {
+    margin-top: 20px;
+}
+
 .settings-heading {
     display: flex;
     gap: 16px;
@@ -1965,6 +1981,11 @@ code {
     border-radius: 8px;
 }
 
+.setting-toggle-row-first {
+    margin-top: 28px;
+    margin-bottom: 0;
+}
+
 .setting-toggle-row > div {
     display: flex;
     min-width: 0;
@@ -1989,6 +2010,7 @@ code {
     position: relative;
     display: inline-flex;
     flex: 0 0 auto;
+    cursor: pointer;
 }
 
 .toggle-switch input {

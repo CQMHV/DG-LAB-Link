@@ -4,21 +4,30 @@ import {
     Globe,
     ShieldCheck,
     SpinnerGap,
+    Tray,
 } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
 
 import { PageHeader } from "../components/PageHeader";
-import type { HubSnapshot, SafetyUpdate } from "../lib/contracts";
+import type {
+    AppPreferences,
+    HubSnapshot,
+    SafetyUpdate,
+} from "../lib/contracts";
 
 interface SettingsPageProps {
+    appPreferences: AppPreferences;
     snapshot: HubSnapshot;
     pendingAction: string | null;
+    onSetCloseToTray: (enabled: boolean) => void;
     onSaveSafety: (update: SafetyUpdate) => void;
 }
 
 export const SettingsPage = ({
+    appPreferences,
     snapshot,
     pendingAction,
+    onSetCloseToTray,
     onSaveSafety,
 }: SettingsPageProps) => {
     const [channelLimit, setChannelLimit] = useState(
@@ -52,10 +61,48 @@ export const SettingsPage = ({
     return (
         <div className="standard-page settings-page">
             <PageHeader
-                description="管理全局安全阈值与 Relay 连接信息。限制由 Rust 后端强制执行。"
+                description="管理应用行为、全局安全阈值与 Relay 连接信息。"
                 eyebrow="PREFERENCES"
                 title="设置"
             />
+
+            <section className="settings-card">
+                <div className="settings-heading">
+                    <div className="settings-icon">
+                        <Tray aria-hidden="true" size={25} weight="light" />
+                    </div>
+                    <div>
+                        <h2>应用行为</h2>
+                        <p>控制主窗口关闭后的行为，修改后会自动保存。</p>
+                    </div>
+                </div>
+
+                <div className="setting-toggle-row setting-toggle-row-first">
+                    <div>
+                        <strong>关闭主窗口时保留在托盘</strong>
+                        <span>
+                            开启后关闭按钮只隐藏主窗口，Relay、设备连接与波形输出会继续运行；可从托盘重新打开或退出。
+                        </span>
+                    </div>
+                    <label className="toggle-switch">
+                        <span className="visually-hidden">
+                            关闭主窗口时保留在托盘
+                        </span>
+                        <input
+                            aria-label="关闭主窗口时保留在托盘"
+                            checked={appPreferences.closeToTray}
+                            disabled={pendingAction !== null}
+                            onChange={(event) =>
+                                onSetCloseToTray(event.currentTarget.checked)
+                            }
+                            type="checkbox"
+                        />
+                        <span className="toggle-track" aria-hidden="true">
+                            <span />
+                        </span>
+                    </label>
+                </div>
+            </section>
 
             <section className="settings-card">
                 <div className="settings-heading">

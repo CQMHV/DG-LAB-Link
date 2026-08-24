@@ -17,9 +17,11 @@ import {
     adjustIntensity,
     connectRelay,
     emergencyStop,
+    getAppPreferences,
     isBrowserDemo,
     selectDevice,
     setDefaultSource,
+    setCloseToTray,
     setDeviceChannelSource,
     setDeviceChannelSourceSync,
     setSyncAllDevices,
@@ -27,7 +29,11 @@ import {
     stopOutput,
     updateSafety,
 } from "./lib/bridge";
-import type { HubChannel, SafetyUpdate } from "./lib/contracts";
+import type {
+    AppPreferences,
+    HubChannel,
+    SafetyUpdate,
+} from "./lib/contracts";
 import {
     getDeviceWindowContext,
     openDeviceWindow,
@@ -72,6 +78,9 @@ export default function App() {
     const { snapshot, loading, error: snapshotError, refresh } =
         useHubSnapshot();
     const [page, setPage] = useState<PageId>("dashboard");
+    const [appPreferences, setAppPreferences] = useState<AppPreferences>({
+        closeToTray: true,
+    });
     const [dashboardTabs, setDashboardTabs] = useState<DashboardTabsState>(() => {
         const initialTab = createDeviceViewTab();
         return {
@@ -144,6 +153,19 @@ export default function App() {
 
     const handleSafetySave = (update: SafetyUpdate) => {
         void runAction("safety", () => updateSafety(update));
+    };
+
+    const handleCloseToTrayChange = (enabled: boolean) => {
+        const previous = appPreferences;
+        setAppPreferences({ closeToTray: enabled });
+        void runAction("close-to-tray", async () => {
+            try {
+                setAppPreferences(await setCloseToTray(enabled));
+            } catch (error) {
+                setAppPreferences(previous);
+                throw error;
+            }
+        });
     };
 
     const handleSelectTab = (tabId: string) => {
@@ -248,6 +270,26 @@ export default function App() {
     useEffect(() => {
         setDismissedExternalError(null);
     }, [externalError]);
+
+    useEffect(() => {
+        let active = true;
+        void getAppPreferences()
+            .then((preferences) => {
+                if (active) {
+                    setAppPreferences(preferences);
+                }
+            })
+            .catch((error) => {
+                if (active) {
+                    setActionError(
+                        getErrorMessage(error, "读取应用偏好设置失败"),
+                    );
+                }
+            });
+        return () => {
+            active = false;
+        };
+    }, []);
 
     useEffect(() => {
         if (
@@ -399,6 +441,8 @@ export default function App() {
                         )}
                         {!windowContext.detached && page === "settings" && (
                             <SettingsPage
+                                appPreferences={appPreferences}
+                                onSetCloseToTray={handleCloseToTrayChange}
                                 onSaveSafety={handleSafetySave}
                                 pendingAction={pendingAction}
                                 snapshot={snapshot}

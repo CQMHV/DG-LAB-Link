@@ -104,3 +104,7 @@ export interface SafetyUpdate {
     maxDurationMinutes: number;
     allowAppIntensityControl: boolean;
 }
+
+export interface AppPreferences {
+    closeToTray: boolean;
+}

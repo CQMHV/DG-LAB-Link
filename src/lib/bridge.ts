@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import type {
+    AppPreferences,
     HubChannel,
     HubSnapshot,
     LogSnapshot,
@@ -15,6 +16,9 @@ type SnapshotListener = (snapshot: HubSnapshot) => void;
 type WindowAction = "minimize" | "toggleMaximize" | "close";
 
 const mockListeners = new Set<SnapshotListener>();
+let mockAppPreferences: AppPreferences = {
+    closeToTray: true,
+};
 
 const now = () => new Date().toISOString();
 
@@ -190,6 +194,25 @@ export const getHubSnapshot = async (): Promise<HubSnapshot> => {
     }
 
     return cloneSnapshot(mockSnapshot);
+};
+
+export const getAppPreferences = async (): Promise<AppPreferences> => {
+    if (isTauriRuntime()) {
+        return invoke<AppPreferences>("get_app_preferences");
+    }
+
+    return { ...mockAppPreferences };
+};
+
+export const setCloseToTray = async (
+    enabled: boolean,
+): Promise<AppPreferences> => {
+    if (isTauriRuntime()) {
+        return invoke<AppPreferences>("set_close_to_tray", { enabled });
+    }
+
+    mockAppPreferences = { closeToTray: enabled };
+    return { ...mockAppPreferences };
 };
 
 export const listenHubSnapshot = async (
@@ -683,6 +706,7 @@ export const performWindowAction = async (
 
 export const __resetMockBridge = (): void => {
     mockSnapshot = createDefaultMockSnapshot();
+    mockAppPreferences = { closeToTray: true };
     mockStartOutputCompletion = null;
     emitMockSnapshot();
 };

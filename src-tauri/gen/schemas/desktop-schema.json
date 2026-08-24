@@ -201,6 +201,12 @@
           "markdownDescription": "Enables the emergency_stop command without any pre-configured scope."
         },
         {
+          "description": "Enables the get_app_preferences command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-app-preferences",
+          "markdownDescription": "Enables the get_app_preferences command without any pre-configured scope."
+        },
+        {
           "description": "Enables the get_hub_snapshot command without any pre-configured scope.",
           "type": "string",
           "const": "allow-get-hub-snapshot",
@@ -223,6 +229,12 @@
           "type": "string",
           "const": "allow-set-channel-limit",
           "markdownDescription": "Enables the set_channel_limit command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_close_to_tray command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-close-to-tray",
+          "markdownDescription": "Enables the set_close_to_tray command without any pre-configured scope."
         },
         {
           "description": "Enables the set_default_source command without any pre-configured scope.",
@@ -291,6 +303,12 @@
           "markdownDescription": "Denies the emergency_stop command without any pre-configured scope."
         },
         {
+          "description": "Denies the get_app_preferences command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-app-preferences",
+          "markdownDescription": "Denies the get_app_preferences command without any pre-configured scope."
+        },
+        {
           "description": "Denies the get_hub_snapshot command without any pre-configured scope.",
           "type": "string",
           "const": "deny-get-hub-snapshot",
@@ -313,6 +331,12 @@
           "type": "string",
           "const": "deny-set-channel-limit",
           "markdownDescription": "Denies the set_channel_limit command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_close_to_tray command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-close-to-tray",
+          "markdownDescription": "Denies the set_close_to_tray command without any pre-configured scope."
         },
         {
           "description": "Denies the set_default_source command without any pre-configured scope.",
