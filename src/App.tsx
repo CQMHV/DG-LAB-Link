@@ -199,6 +199,9 @@ export default function App() {
     };
 
     const handleSelectTab = (tabId: string) => {
+        if (dashboardTabs.activeTabId === tabId) {
+            return;
+        }
         const tab = dashboardTabs.tabs.find((candidate) => candidate.id === tabId);
         setDashboardTabs((current) => ({
             ...current,
@@ -231,6 +234,66 @@ export default function App() {
             activeTabId: tab.id,
             tabs: [...current.tabs, tab],
         }));
+    };
+
+    const handleCloseDeviceTab = (tabId: string) => {
+        const closingIndex = dashboardTabs.tabs.findIndex(
+            (tab) => tab.id === tabId,
+        );
+        if (closingIndex < 0) {
+            return;
+        }
+
+        const closingActiveTab = dashboardTabs.activeTabId === tabId;
+        const remainingTabs = dashboardTabs.tabs.filter(
+            (tab) => tab.id !== tabId,
+        );
+        if (remainingTabs.length === 0) {
+            const replacement = createDeviceViewTab();
+            setDashboardTabs({
+                activeTabId: replacement.id,
+                tabs: [replacement],
+            });
+            return;
+        }
+
+        const nextActiveTab = closingActiveTab
+            ? remainingTabs[Math.min(closingIndex, remainingTabs.length - 1)]
+            : remainingTabs.find(
+                  (tab) => tab.id === dashboardTabs.activeTabId,
+              ) ?? remainingTabs[0];
+        setDashboardTabs({
+            activeTabId: nextActiveTab.id,
+            tabs: remainingTabs,
+        });
+        const nextDeviceId = nextActiveTab.deviceId;
+        if (closingActiveTab && nextDeviceId) {
+            void runAction(`device-${nextDeviceId}`, () =>
+                selectDevice(nextDeviceId),
+            );
+        }
+    };
+
+    const handleMoveDeviceTab = (tabId: string, targetTabId: string) => {
+        setDashboardTabs((current) => {
+            const tabIndex = current.tabs.findIndex(
+                (tab) => tab.id === tabId,
+            );
+            const targetIndex = current.tabs.findIndex(
+                (tab) => tab.id === targetTabId,
+            );
+            if (tabIndex < 0 || targetIndex < 0 || tabIndex === targetIndex) {
+                return current;
+            }
+
+            const tabs = [...current.tabs];
+            const [movedTab] = tabs.splice(tabIndex, 1);
+            tabs.splice(targetIndex, 0, movedTab);
+            return {
+                ...current,
+                tabs,
+            };
+        });
     };
 
     const handleOpenDeviceInNewTab = (deviceId: string) => {
@@ -431,12 +494,14 @@ export default function App() {
                                 }
                                 detached={windowContext.detached}
                                 onAdjust={handleAdjust}
+                                onCloseTab={handleCloseDeviceTab}
                                 onConnect={() =>
                                     void runAction("connect", connectRelay)
                                 }
                                 emergencyPending={emergencyPending}
                                 onDetachTab={handleDetachTab}
                                 onEmergencyStop={() => void runEmergencyStop()}
+                                onMoveTab={handleMoveDeviceTab}
                                 onNewDeviceTab={handleNewDeviceTab}
                                 onOpenPairing={() => setPairingOpen(true)}
                                 onSelectDevice={handleSelectDevice}

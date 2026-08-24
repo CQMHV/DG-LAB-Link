@@ -57,6 +57,7 @@ afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    Reflect.deleteProperty(document, "elementFromPoint");
 });
 
 describe("DG-LAB Link 前端", () => {
@@ -668,17 +669,24 @@ describe("DG-LAB Link 前端", () => {
         const tab = await screen.findByRole("tab", { name: /郊狼 3\.0/ });
         const tabItem = tab.closest(".device-tab-item");
         expect(tabItem).toBeTruthy();
-        const dragStart = createEvent.dragStart(tabItem as HTMLElement, {
-            dataTransfer: {
-                effectAllowed: "none",
-                setData: vi.fn(),
-            },
+        fireEvent.pointerDown(tabItem as HTMLElement, {
+            button: 0,
+            clientX: 100,
+            clientY: 100,
+            pointerId: 1,
         });
-        Object.defineProperty(dragStart, "screenY", { value: 100 });
-        fireEvent(tabItem as HTMLElement, dragStart);
-        const dragEnd = createEvent.dragEnd(tabItem as HTMLElement);
-        Object.defineProperty(dragEnd, "screenY", { value: 190 });
-        fireEvent(tabItem as HTMLElement, dragEnd);
+        fireEvent.pointerMove(tabItem as HTMLElement, {
+            buttons: 1,
+            clientX: 100,
+            clientY: 300,
+            pointerId: 1,
+        });
+        fireEvent.pointerUp(tabItem as HTMLElement, {
+            button: 0,
+            clientX: 100,
+            clientY: 300,
+            pointerId: 1,
+        });
 
         await waitFor(() => expect(open).toHaveBeenCalledOnce());
         expect(open.mock.calls[0][0]).toContain("detached=1");
@@ -700,6 +708,219 @@ describe("DG-LAB Link 前端", () => {
         ).toBeNull();
     });
 
+    it("可以关闭已有标签并在关闭最后一个标签后保留空白标签页", async () => {
+        const user = userEvent.setup();
+        render(<App />);
+
+        const deviceTab = await screen.findByRole("tab", {
+            name: /郊狼 3\.0/,
+        });
+        await user.click(screen.getByRole("button", { name: "新建标签页" }));
+        expect(screen.getAllByRole("tab")).toHaveLength(2);
+
+        await user.click(
+            screen.getByRole("button", { name: "关闭标签页：新标签页" }),
+        );
+        expect(screen.getAllByRole("tab")).toHaveLength(1);
+        expect(deviceTab.getAttribute("aria-selected")).toBe("true");
+
+        await user.click(
+            screen.getByRole("button", { name: "关闭标签页：郊狼 3.0" }),
+        );
+        const replacementTab = screen.getByRole("tab", {
+            name: /新标签页/,
+        });
+        expect(screen.getAllByRole("tab")).toHaveLength(1);
+        expect(replacementTab.getAttribute("aria-selected")).toBe("true");
+        expect(screen.getByRole("region", { name: "新设备标签页" })).toBeTruthy();
+    });
+
+    it("普通点击标签页时可以正常切换而不会触发拖拽捕获", async () => {
+        const user = userEvent.setup();
+        render(<App />);
+
+        const deviceTab = await screen.findByRole("tab", {
+            name: /郊狼 3\.0/,
+        });
+        await user.click(screen.getByRole("button", { name: "新建标签页" }));
+        const newTab = screen.getByRole("tab", { name: /新标签页/ });
+        expect(newTab.getAttribute("aria-selected")).toBe("true");
+
+        await user.click(deviceTab);
+
+        expect(deviceTab.getAttribute("aria-selected")).toBe("true");
+        expect(newTab.getAttribute("aria-selected")).toBe("false");
+        expect(screen.getByTestId("channel-a-gauge")).toBeTruthy();
+    });
+
+    it("可以横向拖动调整标签页顺序且不会拆出窗口", async () => {
+        const open = vi.spyOn(window, "open");
+        render(<App />);
+
+        const deviceTab = await screen.findByRole("tab", {
+            name: /郊狼 3\.0/,
+        });
+        fireEvent.click(screen.getByRole("button", { name: "新建标签页" }));
+        const newTab = screen.getByRole("tab", { name: /新标签页/ });
+        const deviceTabItem = deviceTab.closest(".device-tab-item");
+        const newTabItem = newTab.closest(".device-tab-item");
+        const tabTrack = deviceTabItem?.closest(".device-tabs");
+        expect(deviceTabItem).toBeTruthy();
+        expect(newTabItem).toBeTruthy();
+        expect(tabTrack).toBeTruthy();
+
+        const setPointerCapture = vi.fn();
+        Object.defineProperty(deviceTabItem, "setPointerCapture", {
+            configurable: true,
+            value: setPointerCapture,
+        });
+
+        Object.defineProperty(deviceTabItem, "getBoundingClientRect", {
+            configurable: true,
+            value: vi.fn().mockReturnValue({
+                bottom: 144,
+                height: 58,
+                left: 0,
+                right: 230,
+                top: 86,
+                width: 230,
+                x: 0,
+                y: 86,
+                toJSON: () => ({}),
+            }),
+        });
+        Object.defineProperty(newTabItem, "getBoundingClientRect", {
+            configurable: true,
+            value: vi.fn().mockReturnValue({
+                bottom: 144,
+                height: 58,
+                left: 235,
+                right: 445,
+                top: 86,
+                width: 210,
+                x: 235,
+                y: 86,
+                toJSON: () => ({}),
+            }),
+        });
+        Object.defineProperty(tabTrack, "getBoundingClientRect", {
+            configurable: true,
+            value: vi.fn().mockReturnValue({
+                bottom: 144,
+                height: 64,
+                left: 0,
+                right: 800,
+                top: 80,
+                width: 800,
+                x: 0,
+                y: 80,
+                toJSON: () => ({}),
+            }),
+        });
+
+        const elementFromPoint = vi.fn().mockReturnValue(newTabItem);
+        Object.defineProperty(document, "elementFromPoint", {
+            configurable: true,
+            value: elementFromPoint,
+        });
+        fireEvent.pointerDown(deviceTabItem as HTMLElement, {
+            button: 0,
+            clientX: 100,
+            clientY: 100,
+            pointerId: 1,
+        });
+        expect(deviceTab.getAttribute("aria-selected")).toBe("true");
+        expect(newTab.getAttribute("aria-selected")).toBe("false");
+        expect(setPointerCapture).not.toHaveBeenCalled();
+        fireEvent.pointerMove(deviceTabItem as HTMLElement, {
+            buttons: 1,
+            clientX: 400,
+            clientY: 130,
+            pointerId: 1,
+        });
+        expect(setPointerCapture).toHaveBeenCalledWith(1);
+        const dragPreview = document.querySelector<HTMLElement>(
+            ".device-tab-drag-preview",
+        );
+        expect(dragPreview).toBeTruthy();
+        expect(dragPreview?.style.transform).toBe(
+            "translate3d(300px, 86px, 0)",
+        );
+        expect(
+            screen.getAllByRole("tab").map((tab) => tab.textContent),
+        ).toEqual([
+            expect.stringContaining("新标签页"),
+            expect.stringContaining("郊狼 3.0"),
+        ]);
+
+        fireEvent.pointerMove(window, {
+            buttons: 1,
+            clientX: 150,
+            clientY: 130,
+            pointerId: 1,
+        });
+        expect(dragPreview?.style.transform).toBe(
+            "translate3d(50px, 86px, 0)",
+        );
+        fireEvent.pointerUp(window, {
+            button: 0,
+            clientX: 150,
+            clientY: 130,
+            pointerId: 1,
+        });
+
+        expect(
+            screen.getAllByRole("tab").map((tab) => tab.textContent),
+        ).toEqual([
+            expect.stringContaining("郊狼 3.0"),
+            expect.stringContaining("新标签页"),
+        ]);
+        expect(deviceTab.getAttribute("aria-selected")).toBe("true");
+        expect(newTab.getAttribute("aria-selected")).toBe("false");
+        expect(open).not.toHaveBeenCalled();
+        expect(document.body.classList.contains("device-tab-drag-active")).toBe(
+            false,
+        );
+        expect(elementFromPoint).toHaveBeenNthCalledWith(1, 415, 115);
+        expect(elementFromPoint).toHaveBeenNthCalledWith(2, 165, 115);
+    });
+
+    it("可以从标签栏横向拖出标签并创建独立窗口", async () => {
+        const open = vi
+            .spyOn(window, "open")
+            .mockReturnValue({ focus: vi.fn() } as unknown as Window);
+        render(<App />);
+
+        const tab = await screen.findByRole("tab", { name: /郊狼 3\.0/ });
+        const tabItem = tab.closest(".device-tab-item");
+        expect(tabItem).toBeTruthy();
+
+        fireEvent.pointerDown(tabItem as HTMLElement, {
+            button: 0,
+            clientX: 100,
+            clientY: 100,
+            pointerId: 1,
+        });
+        fireEvent.pointerMove(tabItem as HTMLElement, {
+            buttons: 1,
+            clientX: 600,
+            clientY: 100,
+            pointerId: 1,
+        });
+        fireEvent.pointerUp(tabItem as HTMLElement, {
+            button: 0,
+            clientX: 600,
+            clientY: 100,
+            pointerId: 1,
+        });
+
+        await waitFor(() => expect(open).toHaveBeenCalledOnce());
+        expect(open.mock.calls[0][0]).toContain("detached=1");
+        await waitFor(() => {
+            expect(screen.queryByRole("tab", { name: /郊狼 3\.0/ })).toBeNull();
+        });
+    });
+
     it("独立设备窗口只显示自身配置", async () => {
         const snapshot = await getHubSnapshot();
         render(
@@ -709,9 +930,11 @@ describe("DG-LAB Link 前端", () => {
                 detached
                 emergencyPending={false}
                 onAdjust={vi.fn()}
+                onCloseTab={vi.fn()}
                 onConnect={vi.fn()}
                 onDetachTab={vi.fn()}
                 onEmergencyStop={vi.fn()}
+                onMoveTab={vi.fn()}
                 onNewDeviceTab={vi.fn()}
                 onOpenPairing={vi.fn()}
                 onSelectDevice={vi.fn()}

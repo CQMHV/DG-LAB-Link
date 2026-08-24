@@ -31,9 +31,11 @@ interface DashboardPageProps {
     activeDeviceId: string | null;
     detached?: boolean;
     onAdjust: (channel: HubChannel, delta: number, deviceId: string) => void;
+    onCloseTab: (tabId: string) => void;
     onConnect: () => void;
     onDetachTab: (tab: DeviceViewTab) => void;
     onEmergencyStop: () => void;
+    onMoveTab: (tabId: string, targetTabId: string) => void;
     onNewDeviceTab: () => void;
     onOpenPairing: () => void;
     onSelectDevice: (deviceId: string) => void;
@@ -73,9 +75,11 @@ export const DashboardPage = ({
     activeDeviceId,
     detached = false,
     onAdjust,
+    onCloseTab,
     onConnect,
     onDetachTab,
     onEmergencyStop,
+    onMoveTab,
     onNewDeviceTab,
     onOpenPairing,
     onSelectDevice,
@@ -145,7 +149,9 @@ export const DashboardPage = ({
                     <DeviceTabs
                         activeTabId={activeTabId}
                         devices={snapshot.devices}
+                        onClose={onCloseTab}
                         onDetach={onDetachTab}
+                        onMove={onMoveTab}
                         onNewTab={onNewDeviceTab}
                         onSelect={onSelectTab}
                         pendingAction={pendingAction}

@@ -336,13 +336,14 @@ code {
     display: grid;
     min-width: 230px;
     height: 58px;
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) auto;
     align-items: stretch;
     margin-right: 5px;
     background: #141615;
     border: 1px solid var(--border);
     border-radius: 9px 9px 0 0;
     cursor: grab;
+    user-select: none;
     transition:
         opacity 140ms ease,
         transform 140ms cubic-bezier(0.23, 1, 0.32, 1);
@@ -350,7 +351,6 @@ code {
 
 .device-new-tab-item {
     min-width: 210px;
-    grid-template-columns: minmax(0, 1fr);
 }
 
 .device-new-tab-item .device-tab-select > svg {
@@ -400,10 +400,35 @@ code {
     border-bottom-color: var(--surface-raised);
 }
 
-.device-tab-dragging {
-    opacity: 0.55;
-    transform: scale(0.98);
+.device-tab-placeholder {
+    opacity: 0;
+}
+
+.device-tab-drag-preview {
+    position: fixed;
+    z-index: 10000;
+    top: 0;
+    left: 0;
+    margin: 0;
+    opacity: 0.98;
+    pointer-events: none;
+    background: var(--surface-raised);
+    border-color: rgba(240, 207, 106, 0.72);
+    box-shadow:
+        0 14px 34px rgba(0, 0, 0, 0.34),
+        0 0 0 1px rgba(240, 207, 106, 0.08);
     cursor: grabbing;
+    transition: none;
+    will-change: transform;
+}
+
+.device-tab-drag-preview .device-tab-select {
+    transform: none;
+}
+
+body.device-tab-drag-active,
+body.device-tab-drag-active * {
+    cursor: grabbing !important;
 }
 
 .device-tab-select {
@@ -417,12 +442,46 @@ code {
     min-width: 0;
     gap: 10px;
     align-items: center;
-    padding: 0 8px 0 15px;
+    padding: 0 4px 0 15px;
     text-align: left;
 }
 
 .device-tab-select:active {
     transform: scale(0.97);
+}
+
+.device-tab-close {
+    display: grid;
+    width: 30px;
+    height: 30px;
+    align-self: center;
+    margin-right: 8px;
+    padding: 0;
+    place-items: center;
+    color: #777973;
+    background: transparent;
+    border: 0;
+    border-radius: 6px;
+    transition:
+        color 140ms ease,
+        background-color 140ms ease,
+        transform 140ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .device-tab-close:hover:not(:disabled) {
+        color: #d6d7d1;
+        background: rgba(255, 255, 255, 0.06);
+    }
+}
+
+.device-tab-close:active:not(:disabled) {
+    transform: scale(0.92);
+}
+
+.device-tab-close:focus-visible {
+    outline: 2px solid rgba(240, 207, 106, 0.45);
+    outline-offset: 1px;
 }
 
 .device-tab-status {
