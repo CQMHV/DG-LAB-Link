@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 
 import { Minus, Plus, Pulse } from "@phosphor-icons/react";
 import {
@@ -15,6 +16,7 @@ interface ChannelControlProps {
     disabled: boolean;
     pending: boolean;
     onAdjust: (channel: HubChannel, delta: number) => void;
+    children?: ReactNode;
 }
 
 const statusLabel = (status: ChannelSnapshot["status"]): string => {
@@ -42,6 +44,7 @@ export const ChannelControl = ({
     disabled,
     pending,
     onAdjust,
+    children,
 }: ChannelControlProps) => {
     const name = channel.toUpperCase();
     const [draftIntensity, setDraftIntensity] = useState(snapshot.intensity);
@@ -264,6 +267,8 @@ export const ChannelControl = ({
                     <Plus aria-hidden="true" size={27} weight="light" />
                 </button>
             </div>
+
+            {children && <div className="channel-feature-slot">{children}</div>}
         </section>
     );
 };

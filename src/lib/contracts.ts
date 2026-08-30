@@ -39,6 +39,10 @@ export interface DeviceSnapshot {
     intensityLimitB: number;
     sourceIdA: string | null;
     sourceIdB: string | null;
+    waveformIdA: string | null;
+    waveformIdB: string | null;
+    waveformNameA: string | null;
+    waveformNameB: string | null;
     sourceSync: boolean;
     outputActive: boolean;
     channelAStatus: ChannelStatus;
@@ -51,6 +55,21 @@ export interface SourceSnapshot {
     name: string;
     enabled: boolean;
     assignedChannelCount: number;
+    selectedPresetId: string | null;
+    selectedPresetName: string | null;
+}
+
+export interface WaveformConfig {
+    presetId: string;
+    presetName: string;
+    frames: string[];
+}
+
+export interface CustomWaveformSnapshot {
+    id: string;
+    name: string;
+    frameCount: number;
+    durationMs: number;
 }
 
 export interface OutputSnapshot {
@@ -87,6 +106,7 @@ export interface HubSnapshot {
     syncAllDevices: boolean;
     outputDeviceCount: number;
     sources: SourceSnapshot[];
+    customWaveforms: CustomWaveformSnapshot[];
     defaultSourceId: string | null;
     output: OutputSnapshot;
     channels: {

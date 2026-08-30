@@ -17,8 +17,10 @@
         "tauri": "tauri"
     },
     "dependencies": {
+        "@dg-kit/waveforms": "1.16.3",
         "@phosphor-icons/react": "2.1.10",
         "@tauri-apps/api": "2.11.1",
+        "dglab-kit": "1.0.5",
         "qrcode": "1.5.4",
         "react": "19.2.0",
         "react-circular-progressbar": "2.2.0",

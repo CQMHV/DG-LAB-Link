@@ -5,6 +5,7 @@ import {
     ShieldCheck,
     SpinnerGap,
     Tray,
+    Waveform,
 } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
 
@@ -21,6 +22,7 @@ interface SettingsPageProps {
     pendingAction: string | null;
     onSetAutoStart: (enabled: boolean) => void;
     onSetCloseToTray: (enabled: boolean) => void;
+    onSetDefaultSource: (sourceId: string | null) => void;
     onSetStartMinimized: (enabled: boolean) => void;
     onSaveSafety: (update: SafetyUpdate) => void;
 }
@@ -31,6 +33,7 @@ export const SettingsPage = ({
     pendingAction,
     onSetAutoStart,
     onSetCloseToTray,
+    onSetDefaultSource,
     onSetStartMinimized,
     onSaveSafety,
 }: SettingsPageProps) => {
@@ -156,6 +159,41 @@ export const SettingsPage = ({
                             <span />
                         </span>
                     </label>
+                </div>
+            </section>
+
+            <section className="settings-card">
+                <div className="settings-heading">
+                    <div className="settings-icon">
+                        <Waveform aria-hidden="true" size={25} weight="light" />
+                    </div>
+                    <div>
+                        <h2>输入源默认值</h2>
+                        <p>设置新接入设备的 A/B 通道初始输入源。</p>
+                    </div>
+                </div>
+
+                <div className="setting-select-row">
+                    <div>
+                        <strong>新设备默认输入源</strong>
+                        <span>选择“每次询问”时，新设备接入后由仪表盘决定。</span>
+                    </div>
+                    <select
+                        aria-label="选择默认输入源"
+                        disabled={pendingAction !== null}
+                        id="default-source-select"
+                        onChange={(event) =>
+                            onSetDefaultSource(event.currentTarget.value || null)
+                        }
+                        value={snapshot.defaultSourceId ?? ""}
+                    >
+                        <option value="">每次询问</option>
+                        {snapshot.sources.map((source) => (
+                            <option key={source.id} value={source.id}>
+                                {source.name}{!source.enabled ? "（未配置）" : ""}
+                            </option>
+                        ))}
+                    </select>
                 </div>
             </section>
 

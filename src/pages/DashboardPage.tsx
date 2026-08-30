@@ -3,7 +3,10 @@ import {
     Broadcast,
     DeviceMobile,
     LinkSimple,
+    Play,
     Plus,
+    SpinnerGap,
+    Stop,
     Waveform,
 } from "@phosphor-icons/react";
 
@@ -12,9 +15,11 @@ import {
     DeviceTabs,
     type DeviceViewTab,
 } from "../components/DeviceTabs";
+import { FixedWaveformChannelDashboard } from "../components/FixedWaveformDashboard";
 import type {
     HubChannel,
     HubSnapshot,
+    WaveformConfig,
 } from "../lib/contracts";
 
 interface DashboardPageProps {
@@ -34,7 +39,19 @@ interface DashboardPageProps {
     onFocusDetachedTab: (tabId: string) => void;
     onOpenPairing: () => void;
     onSelectDevice: (deviceId: string) => void;
+    onSelectCustomWaveform: (
+        deviceId: string,
+        channel: HubChannel,
+        presetId: string,
+    ) => void;
     onSelectTab: (tabId: string) => void;
+    onSetFixedWaveform: (
+        deviceId: string,
+        channel: HubChannel,
+        config: WaveformConfig,
+    ) => void;
+    onStartOutput: (deviceId: string) => void;
+    onStopOutput: (deviceId: string) => void;
     onSetDeviceChannelSource: (
         deviceId: string,
         channel: HubChannel,
@@ -63,7 +80,11 @@ export const DashboardPage = ({
     onFocusDetachedTab,
     onOpenPairing,
     onSelectDevice,
+    onSelectCustomWaveform,
     onSelectTab,
+    onSetFixedWaveform,
+    onStartOutput,
+    onStopOutput,
     onSetDeviceChannelSource,
     onSetDeviceChannelSourceSync,
 }: DashboardPageProps) => {
@@ -111,6 +132,12 @@ export const DashboardPage = ({
         device &&
             (pendingAction?.startsWith(`source-${device.controlId}-`) ||
                 pendingAction === `source-sync-${device.controlId}`),
+    );
+    const outputPending = pendingAction === `output-${device?.controlId}`;
+    const canStartOutput = Boolean(
+        isConnected &&
+            deviceSources.a?.enabled &&
+            deviceSources.b?.enabled,
     );
 
     return (
@@ -167,7 +194,11 @@ export const DashboardPage = ({
                                     <strong>{device.name}</strong>
                                 </div>
                                 <div className="device-source-control">
-                                    <Waveform aria-hidden="true" size={17} weight="light" />
+                                    <Waveform
+                                        aria-hidden="true"
+                                        size={17}
+                                        weight="light"
+                                    />
                                     <span>输入源</span>
                                     {(["a", "b"] as const).map((channel) => (
                                         <label key={channel}>
@@ -182,18 +213,21 @@ export const DashboardPage = ({
                                                         event.currentTarget.value,
                                                     )
                                                 }
-                                                value={deviceSources[channel]?.id ?? ""}
+                                                value={
+                                                    deviceSources[channel]?.id ?? ""
+                                                }
                                             >
                                                 {!deviceSources[channel] && (
                                                     <option value="">未分配</option>
                                                 )}
-                                                {snapshot.sources
-                                                    .filter((source) => source.enabled)
-                                                    .map((source) => (
-                                                        <option key={source.id} value={source.id}>
-                                                            {source.name}
-                                                        </option>
-                                                    ))}
+                                                {snapshot.sources.map((source) => (
+                                                    <option
+                                                        key={source.id}
+                                                        value={source.id}
+                                                    >
+                                                        {source.name}
+                                                    </option>
+                                                ))}
                                             </select>
                                         </label>
                                     ))}
@@ -234,32 +268,98 @@ export const DashboardPage = ({
                                         已发送 {snapshot.output.framesSent.toLocaleString("zh-CN")} 帧
                                     </span>
                                 </div>
+                                <button
+                                    aria-label={`${device.outputActive ? "停止" : "开始"} ${device.name} 的波形输出`}
+                                    className={`device-output-button ${device.outputActive ? "is-running" : ""}`}
+                                    disabled={
+                                        outputPending ||
+                                        (!device.outputActive && !canStartOutput)
+                                    }
+                                    onClick={() =>
+                                        device.outputActive
+                                            ? onStopOutput(device.controlId)
+                                            : onStartOutput(device.controlId)
+                                    }
+                                    type="button"
+                                >
+                                    {outputPending ? (
+                                        <SpinnerGap
+                                            aria-hidden="true"
+                                            className="spin"
+                                            size={17}
+                                        />
+                                    ) : device.outputActive ? (
+                                        <Stop aria-hidden="true" size={16} weight="fill" />
+                                    ) : (
+                                        <Play aria-hidden="true" size={16} weight="fill" />
+                                    )}
+                                    {device.outputActive ? "停止输出" : "开始输出"}
+                                </button>
                             </header>
-                            <div className="realtime-stage" aria-label="双通道实时控制">
-                                <ChannelControl
-                                    channel="a"
-                                    disabled={!isConnected}
-                                    onAdjust={(channel, delta) =>
-                                        onAdjust(channel, delta, device.controlId)
-                                    }
-                                    pending={
-                                        pendingAction ===
-                                        `intensity-${device.controlId}-a`
-                                    }
-                                    snapshot={deviceChannels.a}
-                                />
-                                <ChannelControl
-                                    channel="b"
-                                    disabled={!isConnected}
-                                    onAdjust={(channel, delta) =>
-                                        onAdjust(channel, delta, device.controlId)
-                                    }
-                                    pending={
-                                        pendingAction ===
-                                        `intensity-${device.controlId}-b`
-                                    }
-                                    snapshot={deviceChannels.b}
-                                />
+                            <div className="device-dashboard-content">
+                                <div className="realtime-stage" aria-label="双通道实时控制">
+                                    {(["a", "b"] as const).map((channel) => {
+                                        const source = deviceSources[channel];
+                                        const selectedWaveformId =
+                                            channel === "a"
+                                                ? device.waveformIdA
+                                                : device.waveformIdB;
+                                        const selectedWaveformName =
+                                            channel === "a"
+                                                ? device.waveformNameA
+                                                : device.waveformNameB;
+                                        return (
+                                            <ChannelControl
+                                                channel={channel}
+                                                disabled={!isConnected}
+                                                key={channel}
+                                                onAdjust={(targetChannel, delta) =>
+                                                    onAdjust(
+                                                        targetChannel,
+                                                        delta,
+                                                        device.controlId,
+                                                    )
+                                                }
+                                                pending={
+                                                    pendingAction ===
+                                                    `intensity-${device.controlId}-${channel}`
+                                                }
+                                                snapshot={deviceChannels[channel]}
+                                            >
+                                                {source?.kind ===
+                                                    "builtin.fixed_waveform" && (
+                                                    <FixedWaveformChannelDashboard
+                                                        channel={channel}
+                                                        customWaveforms={
+                                                            snapshot.customWaveforms
+                                                        }
+                                                        disabled={busy}
+                                                        onSelectCustomWaveform={(
+                                                            presetId,
+                                                        ) =>
+                                                            onSelectCustomWaveform(
+                                                                device.controlId,
+                                                                channel,
+                                                                presetId,
+                                                            )
+                                                        }
+                                                        onSetFixedWaveform={(config) =>
+                                                            onSetFixedWaveform(
+                                                                device.controlId,
+                                                                channel,
+                                                                config,
+                                                            )
+                                                        }
+                                                        selectedId={selectedWaveformId}
+                                                        selectedName={
+                                                            selectedWaveformName
+                                                        }
+                                                    />
+                                                )}
+                                            </ChannelControl>
+                                        );
+                                    })}
+                                </div>
                             </div>
                         </>
                     ) : deviceUnavailable ? (

@@ -8,6 +8,7 @@ import type {
     HubSnapshot,
     LogSnapshot,
     SafetyUpdate,
+    WaveformConfig,
 } from "./contracts";
 
 const SNAPSHOT_EVENT = "hub://snapshot";
@@ -47,8 +48,12 @@ const createDefaultMockSnapshot = (): HubSnapshot => {
         intensityB: 11,
         intensityLimitA: 100,
         intensityLimitB: 100,
-        sourceIdA: "source-test-pattern",
-        sourceIdB: "source-manual",
+        sourceIdA: "source-fixed-waveform",
+        sourceIdB: "source-fixed-waveform",
+        waveformIdA: "BREATHING",
+        waveformIdB: "BUBBLE",
+        waveformNameA: "呼吸",
+        waveformNameB: "气泡",
         sourceSync: false,
         outputActive: false,
         channelAStatus: "ready" as const,
@@ -65,8 +70,12 @@ const createDefaultMockSnapshot = (): HubSnapshot => {
         intensityB: 7,
         intensityLimitA: 80,
         intensityLimitB: 80,
-        sourceIdA: "source-manual",
-        sourceIdB: "source-test-pattern",
+        sourceIdA: "source-fixed-waveform",
+        sourceIdB: "source-fixed-waveform",
+        waveformIdA: "BREATHING",
+        waveformIdB: "BREATHING",
+        waveformNameA: "呼吸",
+        waveformNameB: "呼吸",
         sourceSync: false,
         outputActive: false,
         channelAStatus: "ready" as const,
@@ -90,18 +99,21 @@ const createDefaultMockSnapshot = (): HubSnapshot => {
     outputDeviceCount: 0,
     sources: [
         {
-            id: "source-test-pattern",
-            kind: "builtin.test_pattern",
-            name: "测试波形",
+            id: "source-fixed-waveform",
+            kind: "builtin.fixed_waveform",
+            name: "固定波形",
             enabled: true,
-            assignedChannelCount: 2,
+            assignedChannelCount: 4,
+            selectedPresetId: null,
+            selectedPresetName: null,
         },
+    ],
+    customWaveforms: [
         {
-            id: "source-manual",
-            kind: "builtin.manual",
-            name: "手动波形",
-            enabled: true,
-            assignedChannelCount: 2,
+            id: "custom-demo",
+            name: "演示波形",
+            frameCount: 2,
+            durationMs: 200,
         },
     ],
     defaultSourceId: null,
@@ -130,7 +142,7 @@ const createDefaultMockSnapshot = (): HubSnapshot => {
     logs: [
         makeLog("log-3", "info", "DG-LAB 4 APP 已连接"),
         makeLog("log-2", "info", "检测到设备：郊狼 3.0"),
-        makeLog("log-1", "info", "测试波形已设为当前输入源"),
+        makeLog("log-1", "info", "固定波形已设为当前输入源"),
     ],
     };
 };
@@ -426,66 +438,74 @@ export const setSyncAllDevices = async (enabled: boolean): Promise<void> => {
     });
 };
 
-export const startOutput = async (): Promise<void> => {
+export const startOutput = async (deviceId: string): Promise<void> => {
     if (isTauriRuntime()) {
-        await invoke("start_output");
+        await invoke("start_output", { deviceId });
         return;
     }
 
     await mockStartOutputCompletion;
     updateMockSnapshot((snapshot) => {
-        if (snapshot.connection.state !== "connected" || !snapshot.device) {
+        if (snapshot.connection.state !== "connected") {
             throw new Error("设备尚未连接");
         }
-        if (
-            snapshot.devices.some(
-                (device) => !device.sourceIdA || !device.sourceIdB,
-            )
-        ) {
-            throw new Error("请先为所有设备的 A/B 通道选择输入源");
+        const device = snapshot.devices.find(
+            (candidate) => candidate.controlId === deviceId,
+        );
+        if (!device) {
+            throw new Error("设备不存在或已断开");
+        }
+        if (!device.sourceIdA || !device.sourceIdB) {
+            throw new Error("请先为此设备的 A/B 通道选择输入源");
         }
         snapshot.output.state = "running";
-        snapshot.outputDeviceCount = snapshot.devices.length;
-        snapshot.devices.forEach((device) => {
-            device.outputActive = true;
-            device.channelAStatus =
-                device.channelAStatus === "disabled" ? "disabled" : "active";
-            device.channelBStatus =
-                device.channelBStatus === "disabled" ? "disabled" : "active";
-        });
+        device.outputActive = true;
+        device.channelAStatus =
+            device.channelAStatus === "disabled" ? "disabled" : "active";
+        device.channelBStatus =
+            device.channelBStatus === "disabled" ? "disabled" : "active";
+        snapshot.outputDeviceCount = snapshot.devices.filter(
+            (candidate) => candidate.outputActive,
+        ).length;
         snapshot.output.lastError = null;
         snapshot.output.framesSent += 1;
-        snapshot.channels.a.status =
-            snapshot.device?.channelAStatus === "disabled"
-                ? "disabled"
-                : "active";
-        snapshot.channels.b.status =
-            snapshot.device?.channelBStatus === "disabled"
-                ? "disabled"
-                : "active";
-        prependMockLog(snapshot, "info", "波形输出已开始");
+        if (snapshot.device?.controlId === deviceId) {
+            snapshot.device = { ...device };
+            snapshot.channels.a.status = device.channelAStatus;
+            snapshot.channels.b.status = device.channelBStatus;
+        }
+        prependMockLog(snapshot, "info", `${device.name} 的波形输出已开始`);
     });
 };
 
-export const stopOutput = async (): Promise<void> => {
+export const stopOutput = async (deviceId: string): Promise<void> => {
     if (isTauriRuntime()) {
-        await invoke("stop_output");
+        await invoke("stop_output", { deviceId });
         return;
     }
 
     updateMockSnapshot((snapshot) => {
-        snapshot.output.state = "idle";
-        snapshot.outputDeviceCount = 0;
-        snapshot.devices.forEach((device) => {
-            device.outputActive = false;
-            device.channelAStatus =
-                device.channelAStatus === "active" ? "ready" : device.channelAStatus;
-            device.channelBStatus =
-                device.channelBStatus === "active" ? "ready" : device.channelBStatus;
-        });
-        snapshot.channels.a.status = snapshot.device ? "ready" : "disconnected";
-        snapshot.channels.b.status = snapshot.device ? "ready" : "disconnected";
-        prependMockLog(snapshot, "info", "波形输出已停止");
+        const device = snapshot.devices.find(
+            (candidate) => candidate.controlId === deviceId,
+        );
+        if (!device) {
+            throw new Error("设备不存在或已断开");
+        }
+        device.outputActive = false;
+        device.channelAStatus =
+            device.channelAStatus === "active" ? "ready" : device.channelAStatus;
+        device.channelBStatus =
+            device.channelBStatus === "active" ? "ready" : device.channelBStatus;
+        snapshot.outputDeviceCount = snapshot.devices.filter(
+            (candidate) => candidate.outputActive,
+        ).length;
+        snapshot.output.state = snapshot.outputDeviceCount > 0 ? "running" : "idle";
+        if (snapshot.device?.controlId === deviceId) {
+            snapshot.device = { ...device };
+            snapshot.channels.a.status = device.channelAStatus;
+            snapshot.channels.b.status = device.channelBStatus;
+        }
+        prependMockLog(snapshot, "info", `${device.name} 的波形输出已停止`);
     });
 };
 
@@ -630,6 +650,175 @@ export const setDefaultSource = async (sourceId: string | null): Promise<void> =
             `默认输入源已切换：${target.name}；已有设备绑定保持不变`,
         );
     });
+};
+
+export const setFixedWaveform = async (
+    deviceId: string,
+    channel: HubChannel,
+    config: WaveformConfig,
+): Promise<void> => {
+    if (isTauriRuntime()) {
+        await invoke("set_fixed_waveform", { deviceId, channel, config });
+        return;
+    }
+
+    updateMockSnapshot((snapshot) => {
+        requireMockFixedWaveformSource(snapshot);
+        const device = snapshot.devices.find(
+            (candidate) => candidate.controlId === deviceId,
+        );
+        if (!device) {
+            throw new Error("设备不存在或已断开");
+        }
+        const sourceId = channel === "a" ? device.sourceIdA : device.sourceIdB;
+        if (sourceId !== "source-fixed-waveform") {
+            throw new Error("此通道没有使用固定波形输入源");
+        }
+        if (channel === "a") {
+            device.waveformIdA = config.presetId;
+            device.waveformNameA = config.presetName;
+        } else {
+            device.waveformIdB = config.presetId;
+            device.waveformNameB = config.presetName;
+        }
+        if (snapshot.device?.controlId === deviceId) {
+            snapshot.device = { ...device };
+        }
+        prependMockLog(
+            snapshot,
+            "info",
+            `${device.name} 的 ${channel.toUpperCase()} 通道固定波形已切换：${config.presetName}`,
+        );
+    });
+};
+
+export const importCustomWaveforms = async (
+    configs: WaveformConfig[],
+): Promise<void> => {
+    if (isTauriRuntime()) {
+        await invoke("import_custom_waveforms", { configs });
+        return;
+    }
+    updateMockSnapshot((snapshot) => {
+        if (snapshot.customWaveforms.length + configs.length > 128) {
+            throw new Error("自定义波形库最多保存 128 项");
+        }
+        for (const config of configs) {
+            if (snapshot.customWaveforms.some((waveform) => waveform.id === config.presetId)) {
+                throw new Error("自定义波形标识不能重复");
+            }
+            snapshot.customWaveforms.push({
+                id: config.presetId,
+                name: config.presetName,
+                frameCount: config.frames.length,
+                durationMs: config.frames.length * 100,
+            });
+        }
+        prependMockLog(snapshot, "info", `已导入 ${configs.length} 个自定义波形`);
+    });
+};
+
+export const selectCustomWaveform = async (
+    deviceId: string,
+    channel: HubChannel,
+    presetId: string,
+): Promise<void> => {
+    if (isTauriRuntime()) {
+        await invoke("select_custom_waveform", { deviceId, channel, presetId });
+        return;
+    }
+    updateMockSnapshot((snapshot) => {
+        const waveform = snapshot.customWaveforms.find((item) => item.id === presetId);
+        if (!waveform) {
+            throw new Error("选择的自定义波形不存在");
+        }
+        requireMockFixedWaveformSource(snapshot);
+        const device = snapshot.devices.find(
+            (candidate) => candidate.controlId === deviceId,
+        );
+        if (!device) {
+            throw new Error("设备不存在或已断开");
+        }
+        const sourceId = channel === "a" ? device.sourceIdA : device.sourceIdB;
+        if (sourceId !== "source-fixed-waveform") {
+            throw new Error("此通道没有使用固定波形输入源");
+        }
+        if (channel === "a") {
+            device.waveformIdA = waveform.id;
+            device.waveformNameA = waveform.name;
+        } else {
+            device.waveformIdB = waveform.id;
+            device.waveformNameB = waveform.name;
+        }
+        if (snapshot.device?.controlId === deviceId) {
+            snapshot.device = { ...device };
+        }
+        prependMockLog(
+            snapshot,
+            "info",
+            `${device.name} 的 ${channel.toUpperCase()} 通道自定义波形已切换：${waveform.name}`,
+        );
+    });
+};
+
+export const deleteCustomWaveform = async (presetId: string): Promise<void> => {
+    if (isTauriRuntime()) {
+        await invoke("delete_custom_waveform", { presetId });
+        return;
+    }
+    updateMockSnapshot((snapshot) => {
+        const index = snapshot.customWaveforms.findIndex((item) => item.id === presetId);
+        if (index < 0) {
+            throw new Error("要删除的自定义波形不存在");
+        }
+        snapshot.customWaveforms.splice(index, 1);
+        snapshot.devices.forEach((device) => {
+            if (device.waveformIdA === presetId) {
+                device.waveformIdA = null;
+                device.waveformNameA = null;
+            }
+            if (device.waveformIdB === presetId) {
+                device.waveformIdB = null;
+                device.waveformNameB = null;
+            }
+        });
+        const selected = snapshot.devices.find(
+            (device) => device.controlId === snapshot.selectedDeviceId,
+        );
+        if (selected) {
+            snapshot.device = { ...selected };
+        }
+        prependMockLog(snapshot, "info", "已删除自定义波形");
+    });
+};
+
+export const reorderCustomWaveforms = async (presetIds: string[]): Promise<void> => {
+    if (isTauriRuntime()) {
+        await invoke("reorder_custom_waveforms", { presetIds });
+        return;
+    }
+    updateMockSnapshot((snapshot) => {
+        if (presetIds.length !== snapshot.customWaveforms.length) {
+            throw new Error("排序结果必须包含全部自定义波形");
+        }
+        const byId = new Map(snapshot.customWaveforms.map((waveform) => [waveform.id, waveform]));
+        const reordered = presetIds.map((id) => byId.get(id));
+        if (reordered.some((waveform) => !waveform) || new Set(presetIds).size !== presetIds.length) {
+            throw new Error("排序结果包含未知或重复的自定义波形");
+        }
+        snapshot.customWaveforms = reordered as typeof snapshot.customWaveforms;
+        prependMockLog(snapshot, "info", "自定义波形顺序已更新");
+    });
+};
+
+const requireMockFixedWaveformSource = (snapshot: HubSnapshot) => {
+    const source = snapshot.sources.find(
+        (candidate) => candidate.kind === "builtin.fixed_waveform",
+    );
+    if (!source) {
+        throw new Error("固定波形输入源不可用");
+    }
+    return source;
 };
 
 export const selectDevice = async (deviceId: string): Promise<void> => {

@@ -79,6 +79,35 @@ describe("DG-LAB Link 前端", () => {
         expect(tab.textContent).toBe("郊狼 3.0");
     });
 
+    it("可以在设备标签页内独立开始和停止输出", async () => {
+        const user = userEvent.setup();
+        render(<App />);
+
+        await user.click(
+            await screen.findByRole("button", {
+                name: "开始 郊狼 3.0 的波形输出",
+            }),
+        );
+        expect(
+            await screen.findByRole("button", {
+                name: "停止 郊狼 3.0 的波形输出",
+            }),
+        ).toBeTruthy();
+        expect((await getHubSnapshot()).devices[0].outputActive).toBe(true);
+
+        await user.click(
+            screen.getByRole("button", {
+                name: "停止 郊狼 3.0 的波形输出",
+            }),
+        );
+        expect(
+            await screen.findByRole("button", {
+                name: "开始 郊狼 3.0 的波形输出",
+            }),
+        ).toBeTruthy();
+        expect((await getHubSnapshot()).devices[0].outputActive).toBe(false);
+    });
+
     it("可以从标签页列表搜索并切换标签页", async () => {
         const user = userEvent.setup();
         render(<App />);
@@ -484,7 +513,7 @@ describe("DG-LAB Link 前端", () => {
         });
     });
 
-    it("可以为每台设备的 A/B 通道独立选择输入源", async () => {
+    it("所有设备通道共享同一个固定波形输入源", async () => {
         const user = userEvent.setup();
         render(<App />);
 
@@ -494,21 +523,19 @@ describe("DG-LAB Link 前端", () => {
         const firstDeviceSourceB = screen.getByRole("combobox", {
             name: "选择 郊狼 3.0 B 通道的输入源",
         }) as HTMLSelectElement;
-        expect(firstDeviceSourceA.value).toBe("source-test-pattern");
-        expect(firstDeviceSourceB.value).toBe("source-manual");
-        await user.selectOptions(firstDeviceSourceA, "source-manual");
-
+        expect(firstDeviceSourceA.value).toBe("source-fixed-waveform");
+        expect(firstDeviceSourceB.value).toBe("source-fixed-waveform");
         await waitFor(async () => {
             const snapshot = await getHubSnapshot();
-            expect(snapshot.devices[0].sourceIdA).toBe("source-manual");
-            expect(snapshot.devices[0].sourceIdB).toBe("source-manual");
-            expect(snapshot.devices[1].sourceIdA).toBe("source-manual");
-            expect(snapshot.devices[1].sourceIdB).toBe("source-test-pattern");
+            expect(snapshot.devices[0].sourceIdA).toBe("source-fixed-waveform");
+            expect(snapshot.devices[0].sourceIdB).toBe("source-fixed-waveform");
+            expect(snapshot.devices[1].sourceIdA).toBe("source-fixed-waveform");
+            expect(snapshot.devices[1].sourceIdB).toBe("source-fixed-waveform");
             expect(
                 snapshot.sources.find(
-                    (source) => source.id === "source-manual",
+                    (source) => source.id === "source-fixed-waveform",
                 )?.assignedChannelCount,
-            ).toBe(3);
+            ).toBe(4);
         });
         await user.click(screen.getByRole("button", { name: "新建标签页" }));
         await user.click(
@@ -519,15 +546,13 @@ describe("DG-LAB Link 前端", () => {
         const secondDeviceSourceB = screen.getByRole("combobox", {
             name: "选择 郊狼 2.0 B 通道的输入源",
         }) as HTMLSelectElement;
-        expect(secondDeviceSourceB.value).toBe("source-test-pattern");
-        await user.selectOptions(secondDeviceSourceB, "source-manual");
-
+        expect(secondDeviceSourceB.value).toBe("source-fixed-waveform");
         await waitFor(async () => {
             const snapshot = await getHubSnapshot();
-            expect(snapshot.devices[0].sourceIdA).toBe("source-manual");
-            expect(snapshot.devices[0].sourceIdB).toBe("source-manual");
-            expect(snapshot.devices[1].sourceIdA).toBe("source-manual");
-            expect(snapshot.devices[1].sourceIdB).toBe("source-manual");
+            expect(snapshot.devices[0].sourceIdA).toBe("source-fixed-waveform");
+            expect(snapshot.devices[0].sourceIdB).toBe("source-fixed-waveform");
+            expect(snapshot.devices[1].sourceIdA).toBe("source-fixed-waveform");
+            expect(snapshot.devices[1].sourceIdB).toBe("source-fixed-waveform");
         });
     });
 
@@ -585,8 +610,8 @@ describe("DG-LAB Link 前端", () => {
         }) as HTMLInputElement;
 
         expect(sync.checked).toBe(false);
-        expect(sourceA.value).toBe("source-test-pattern");
-        expect(sourceB.value).toBe("source-manual");
+        expect(sourceA.value).toBe("source-fixed-waveform");
+        expect(sourceB.value).toBe("source-fixed-waveform");
         await user.click(sync);
 
         await waitFor(async () => {
@@ -595,56 +620,234 @@ describe("DG-LAB Link 前端", () => {
             expect(snapshot.devices[0].sourceIdA).toBeNull();
             expect(snapshot.devices[0].sourceIdB).toBeNull();
         });
-        await user.selectOptions(sourceB, "source-manual");
+        await user.selectOptions(sourceB, "source-fixed-waveform");
         await waitFor(async () => {
             const snapshot = await getHubSnapshot();
-            expect(snapshot.devices[0].sourceIdA).toBe("source-manual");
-            expect(snapshot.devices[0].sourceIdB).toBe("source-manual");
+            expect(snapshot.devices[0].sourceIdA).toBe("source-fixed-waveform");
+            expect(snapshot.devices[0].sourceIdB).toBe("source-fixed-waveform");
         });
 
         await user.click(sync);
-        await user.selectOptions(sourceA, "source-test-pattern");
+        await user.selectOptions(sourceA, "source-fixed-waveform");
         await waitFor(async () => {
             const snapshot = await getHubSnapshot();
             expect(snapshot.devices[0].sourceSync).toBe(false);
-            expect(snapshot.devices[0].sourceIdA).toBe("source-test-pattern");
-            expect(snapshot.devices[0].sourceIdB).toBe("source-manual");
+            expect(snapshot.devices[0].sourceIdA).toBe("source-fixed-waveform");
+            expect(snapshot.devices[0].sourceIdB).toBe("source-fixed-waveform");
         });
     });
 
-    it("可以在输入源页面选择新设备的默认输入源", async () => {
+    it("可以在设置页面选择新设备的默认输入源", async () => {
         const user = userEvent.setup();
         render(<App />);
 
-        await user.click(await screen.findByRole("button", { name: "输入源" }));
+        await user.click(await screen.findByRole("button", { name: "设置" }));
         const defaultSource = screen.getByRole("combobox", {
             name: "选择默认输入源",
         }) as HTMLSelectElement;
         expect(defaultSource.value).toBe("");
-        await user.selectOptions(defaultSource, "source-manual");
+        await user.selectOptions(defaultSource, "source-fixed-waveform");
 
         await waitFor(async () => {
             const snapshot = await getHubSnapshot();
-            expect(snapshot.defaultSourceId).toBe("source-manual");
-            expect(snapshot.devices[0].sourceIdA).toBe("source-test-pattern");
-            expect(snapshot.devices[0].sourceIdB).toBe("source-manual");
-            expect(snapshot.devices[1].sourceIdA).toBe("source-manual");
-            expect(snapshot.devices[1].sourceIdB).toBe("source-test-pattern");
+            expect(snapshot.defaultSourceId).toBe("source-fixed-waveform");
+            expect(snapshot.devices[0].sourceIdA).toBe("source-fixed-waveform");
+            expect(snapshot.devices[0].sourceIdB).toBe("source-fixed-waveform");
+            expect(snapshot.devices[1].sourceIdA).toBe("source-fixed-waveform");
+            expect(snapshot.devices[1].sourceIdB).toBe("source-fixed-waveform");
         });
-        expect(
-            screen.getByText("新接入设备的 A/B 将默认使用此输入源"),
-        ).toBeTruthy();
+        expect(defaultSource.value).toBe("source-fixed-waveform");
 
         await user.selectOptions(defaultSource, "");
         await waitFor(async () => {
             const snapshot = await getHubSnapshot();
             expect(snapshot.defaultSourceId).toBeNull();
-            expect(snapshot.devices[0].sourceIdA).toBe("source-test-pattern");
-            expect(snapshot.devices[0].sourceIdB).toBe("source-manual");
-            expect(snapshot.devices[1].sourceIdA).toBe("source-manual");
-            expect(snapshot.devices[1].sourceIdB).toBe("source-test-pattern");
+            expect(snapshot.devices[0].sourceIdA).toBe("source-fixed-waveform");
+            expect(snapshot.devices[0].sourceIdB).toBe("source-fixed-waveform");
+            expect(snapshot.devices[1].sourceIdA).toBe("source-fixed-waveform");
+            expect(snapshot.devices[1].sourceIdB).toBe("source-fixed-waveform");
         });
         expect(defaultSource.value).toBe("");
+    });
+
+    it("自定义波形资源只在固定波形输入源设置中管理", async () => {
+        const user = userEvent.setup();
+        render(<App />);
+
+        await screen.findByRole("region", {
+            name: "A 通道固定波形仪表盘",
+        });
+        expect(
+            screen.queryByRole("region", { name: "固定波形输入源设置" }),
+        ).toBeNull();
+        expect(screen.queryByLabelText("导入自定义波形文件")).toBeNull();
+
+        await user.click(await screen.findByRole("button", { name: "输入源" }));
+
+        expect(screen.getByRole("heading", { name: "固定波形" })).toBeTruthy();
+        expect(screen.getByText("按设备通道配置")).toBeTruthy();
+        expect(screen.queryByRole("combobox")).toBeNull();
+        expect(
+            screen.queryByRole("region", { name: "固定波形输入源设置" }),
+        ).toBeNull();
+        await user.click(
+            screen.getByRole("button", { name: "打开 固定波形 详情" }),
+        );
+        expect(
+            screen.getByRole("region", { name: "固定波形 输入源详情" }),
+        ).toBeTruthy();
+        expect(
+            screen.getByRole("region", { name: "固定波形输入源设置" }),
+        ).toBeTruthy();
+        expect(screen.getByLabelText("导入自定义波形文件")).toBeTruthy();
+        expect(screen.getByRole("button", { name: "导入波形" })).toBeTruthy();
+    });
+
+    it("可以为固定波形选择 DG-LAB 官方内置波形", async () => {
+        const user = userEvent.setup();
+        render(<App />);
+
+        const channelA = await screen.findByRole("button", {
+            name: "A 通道选择 呼吸",
+        });
+        const channelB = screen.getByRole("button", {
+            name: "B 通道选择 气泡",
+        });
+        expect(channelA.getAttribute("aria-pressed")).toBe("true");
+        expect(channelB.getAttribute("aria-pressed")).toBe("true");
+
+        await user.click(
+            screen.getByRole("button", { name: "A 通道选择 气泡" }),
+        );
+
+        await waitFor(async () => {
+            const snapshot = await getHubSnapshot();
+            expect(snapshot.devices[0].waveformIdA).toBe("BUBBLE");
+            expect(snapshot.devices[0].waveformNameA).toBe("气泡");
+            expect(snapshot.devices[0].waveformIdB).toBe("BUBBLE");
+        });
+        expect(
+            screen
+                .getByRole("button", { name: "A 通道选择 气泡" })
+                .getAttribute("aria-pressed"),
+        ).toBe("true");
+
+        await user.click(
+            screen.getByRole("button", { name: "B 通道选择 呼吸" }),
+        );
+        await waitFor(async () => {
+            const snapshot = await getHubSnapshot();
+            expect(snapshot.devices[0].waveformIdA).toBe("BUBBLE");
+            expect(snapshot.devices[0].waveformIdB).toBe("BREATHING");
+        });
+        expect(
+            screen
+                .getByRole("button", { name: "A 通道选择 气泡" })
+                .getAttribute("aria-pressed"),
+        ).toBe("true");
+        expect(
+            screen
+                .getByRole("button", { name: "B 通道选择 呼吸" })
+                .getAttribute("aria-pressed"),
+        ).toBe("true");
+    });
+
+    it("可以导入、选择、排序和删除自定义波形", async () => {
+        const user = userEvent.setup();
+        render(<App />);
+
+        await screen.findByRole("region", {
+            name: "A 通道固定波形仪表盘",
+        });
+        expect(screen.queryByLabelText("导入自定义波形文件")).toBeNull();
+        await user.click(screen.getByRole("button", { name: "输入源" }));
+        await user.click(
+            screen.getByRole("button", { name: "打开 固定波形 详情" }),
+        );
+        const file = new File(
+            [JSON.stringify({ name: "导入波形", frames: ["0A0A0A0A64646464"] })],
+            "导入.json",
+            { type: "application/json" },
+        );
+        Object.defineProperty(file, "text", {
+            value: async () =>
+                JSON.stringify({
+                    name: "导入波形",
+                    frames: ["0A0A0A0A64646464"],
+                }),
+        });
+        fireEvent.change(screen.getByLabelText("导入自定义波形文件"), {
+            target: { files: [file] },
+        });
+
+        let importedId = "";
+        await waitFor(async () => {
+            const snapshot = await getHubSnapshot();
+            expect(snapshot.customWaveforms).toHaveLength(2);
+            importedId = snapshot.customWaveforms[1].id;
+        });
+        await user.click(screen.getByRole("button", { name: "控制台" }));
+        await user.click(
+            screen.getByRole("button", { name: "A 通道选择 导入波形" }),
+        );
+        await waitFor(async () => {
+            const snapshot = await getHubSnapshot();
+            expect(snapshot.devices[0].waveformIdA).toBe(importedId);
+            expect(snapshot.devices[0].waveformIdB).toBe("BUBBLE");
+        });
+
+        await user.click(screen.getByRole("button", { name: "输入源" }));
+        await user.click(
+            screen.getByRole("button", { name: "打开 固定波形 详情" }),
+        );
+        await user.click(screen.getByRole("button", { name: "前移 导入波形" }));
+        await waitFor(async () => {
+            const snapshot = await getHubSnapshot();
+            expect(snapshot.customWaveforms.map((waveform) => waveform.name)).toEqual([
+                "导入波形",
+                "演示波形",
+            ]);
+        });
+
+        await user.click(screen.getByRole("button", { name: "删除 导入波形" }));
+        await user.click(screen.getByRole("button", { name: "确认删除 导入波形" }));
+        await waitFor(async () => {
+            const snapshot = await getHubSnapshot();
+            expect(snapshot.customWaveforms.map((waveform) => waveform.name)).toEqual([
+                "演示波形",
+            ]);
+            expect(snapshot.devices[0].waveformIdA).toBeNull();
+            expect(snapshot.devices[0].waveformIdB).toBe("BUBBLE");
+        });
+        await user.click(screen.getByRole("button", { name: "控制台" }));
+        const channelADashboard = screen.getByRole("region", {
+            name: "A 通道固定波形仪表盘",
+        });
+        expect(within(channelADashboard).getByText("无波形")).toBeTruthy();
+
+        await user.click(
+            screen.getByRole("button", { name: "A 通道选择 演示波形" }),
+        );
+        await waitFor(async () => {
+            const snapshot = await getHubSnapshot();
+            expect(snapshot.devices[0].waveformIdA).toBe("custom-demo");
+            expect(snapshot.devices[0].waveformIdB).toBe("BUBBLE");
+        });
+
+        await user.click(screen.getByRole("button", { name: "输入源" }));
+        await user.click(
+            screen.getByRole("button", { name: "打开 固定波形 详情" }),
+        );
+        await user.click(screen.getByRole("button", { name: "删除 演示波形" }));
+        await user.click(screen.getByRole("button", { name: "确认删除 演示波形" }));
+        await waitFor(async () => {
+            const snapshot = await getHubSnapshot();
+            expect(snapshot.customWaveforms).toEqual([]);
+            expect(snapshot.devices[0].waveformIdA).toBeNull();
+            expect(snapshot.devices[0].waveformIdB).toBe("BUBBLE");
+            expect(snapshot.devices[0].sourceIdB).toBe("source-fixed-waveform");
+        });
+        expect(screen.getAllByText("尚未导入波形").length).toBeGreaterThan(0);
     });
 
     it("可以把视图标签拖出为独立窗口并从主窗口移除", async () => {
@@ -967,9 +1170,13 @@ describe("DG-LAB Link 前端", () => {
                 onFocusDetachedTab={vi.fn()}
                 onOpenPairing={vi.fn()}
                 onSelectDevice={vi.fn()}
+                onSelectCustomWaveform={vi.fn()}
                 onSelectTab={vi.fn()}
                 onSetDeviceChannelSource={vi.fn()}
                 onSetDeviceChannelSourceSync={vi.fn()}
+                onSetFixedWaveform={vi.fn()}
+                onStartOutput={vi.fn()}
+                onStopOutput={vi.fn()}
                 pendingAction={null}
                 snapshot={snapshot}
                 tabs={[
@@ -988,6 +1195,11 @@ describe("DG-LAB Link 前端", () => {
         ).toBeTruthy();
         expect(screen.getByTestId("channel-a-gauge")).toBeTruthy();
         expect(screen.getByTestId("channel-b-gauge")).toBeTruthy();
+        expect(
+            screen.getByRole("region", {
+                name: "A 通道固定波形仪表盘",
+            }),
+        ).toBeTruthy();
         expect(screen.queryByRole("region", { name: "全局控制" })).toBeNull();
         expect(
             screen.queryByRole("region", { name: "安全限制与输出控制" }),

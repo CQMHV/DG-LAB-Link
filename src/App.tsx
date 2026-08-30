@@ -16,16 +16,23 @@ import { useHubSnapshot } from "./hooks/useHubSnapshot";
 import {
     adjustIntensity,
     connectRelay,
+    deleteCustomWaveform,
     getAppPreferences,
+    importCustomWaveforms,
     isBrowserDemo,
+    reorderCustomWaveforms,
     selectDevice,
+    selectCustomWaveform,
     setAutoStart,
     setDefaultSource,
+    setFixedWaveform,
     setCloseToTray,
     setDeviceChannelSource,
     setDeviceChannelSourceSync,
     setSyncAllDevices,
     setStartMinimized,
+    startOutput,
+    stopOutput,
     updateSafety,
 } from "./lib/bridge";
 import type {
@@ -134,6 +141,14 @@ export default function App() {
         void runAction(`intensity-${deviceId}-${channel}`, () =>
             adjustIntensity(channel, delta, deviceId),
         );
+    };
+
+    const handleStartOutput = (deviceId: string) => {
+        void runAction(`output-${deviceId}`, () => startOutput(deviceId));
+    };
+
+    const handleStopOutput = (deviceId: string) => {
+        void runAction(`output-${deviceId}`, () => stopOutput(deviceId));
     };
 
     const handleSafetySave = (update: SafetyUpdate) => {
@@ -571,6 +586,17 @@ export default function App() {
                                 onFocusDetachedTab={handleFocusDetachedTab}
                                 onOpenPairing={() => setPairingOpen(true)}
                                 onSelectDevice={handleSelectDevice}
+                                onSelectCustomWaveform={(deviceId, channel, presetId) =>
+                                    void runAction(
+                                        `select-custom-waveform-${deviceId}-${channel}`,
+                                        () =>
+                                            selectCustomWaveform(
+                                                deviceId,
+                                                channel,
+                                                presetId,
+                                            ),
+                                    )
+                                }
                                 onSelectTab={handleSelectTab}
                                 onSetDeviceChannelSource={(deviceId, channel, sourceId) =>
                                     void runAction(`source-${deviceId}-${channel}`, () =>
@@ -586,6 +612,19 @@ export default function App() {
                                         setDeviceChannelSourceSync(deviceId, enabled),
                                     )
                                 }
+                                onStartOutput={handleStartOutput}
+                                onStopOutput={handleStopOutput}
+                                onSetFixedWaveform={(deviceId, channel, config) =>
+                                    void runAction(
+                                        `fixed-waveform-${deviceId}-${channel}`,
+                                        () =>
+                                            setFixedWaveform(
+                                                deviceId,
+                                                channel,
+                                                config,
+                                            ),
+                                    )
+                                }
                                 pendingAction={pendingAction}
                                 snapshot={snapshot}
                                 tabs={dashboardTabs.tabs}
@@ -593,9 +632,20 @@ export default function App() {
                         )}
                         {!windowContext.detached && page === "sources" && (
                             <SourcesPage
-                                onSetDefaultSource={(sourceId) =>
-                                    void runAction("default-source", () =>
-                                        setDefaultSource(sourceId),
+                                onDeleteCustomWaveform={(presetId) =>
+                                    void runAction("delete-custom-waveform", () =>
+                                        deleteCustomWaveform(presetId),
+                                    )
+                                }
+                                onError={setActionError}
+                                onImportCustomWaveforms={(configs) =>
+                                    void runAction("import-custom-waveforms", () =>
+                                        importCustomWaveforms(configs),
+                                    )
+                                }
+                                onReorderCustomWaveforms={(presetIds) =>
+                                    void runAction("reorder-custom-waveforms", () =>
+                                        reorderCustomWaveforms(presetIds),
                                     )
                                 }
                                 pendingAction={pendingAction}
@@ -624,6 +674,11 @@ export default function App() {
                                 appPreferences={appPreferences}
                                 onSetAutoStart={handleAutoStartChange}
                                 onSetCloseToTray={handleCloseToTrayChange}
+                                onSetDefaultSource={(sourceId) =>
+                                    void runAction("default-source", () =>
+                                        setDefaultSource(sourceId),
+                                    )
+                                }
                                 onSetStartMinimized={handleStartMinimizedChange}
                                 onSaveSafety={handleSafetySave}
                                 pendingAction={pendingAction}
