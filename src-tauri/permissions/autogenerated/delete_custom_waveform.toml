@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-delete-custom-waveform"
+description = "Enables the delete_custom_waveform command without any pre-configured scope."
+commands.allow = ["delete_custom_waveform"]
+
+[[permission]]
+identifier = "deny-delete-custom-waveform"
+description = "Denies the delete_custom_waveform command without any pre-configured scope."
+commands.deny = ["delete_custom_waveform"]

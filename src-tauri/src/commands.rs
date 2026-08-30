@@ -5,6 +5,7 @@ use tauri_plugin_autostart::ManagerExt;
 use crate::hub::{HubError, HubHandle, HubSnapshot};
 use crate::model::Channel;
 use crate::preferences::{AppPreferencesSnapshot, PreferencesError, PreferencesState};
+use crate::sources::WaveformConfig;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -123,13 +124,16 @@ pub async fn adjust_intensity(
 }
 
 #[tauri::command]
-pub async fn start_output(hub: State<'_, HubHandle>) -> Result<(), CommandError> {
-    hub.start_output().await.map_err(Into::into)
+pub async fn start_output(
+    hub: State<'_, HubHandle>,
+    device_id: String,
+) -> Result<(), CommandError> {
+    hub.start_output(device_id).await.map_err(Into::into)
 }
 
 #[tauri::command]
-pub async fn stop_output(hub: State<'_, HubHandle>) -> Result<(), CommandError> {
-    hub.stop_output().await.map_err(Into::into)
+pub async fn stop_output(hub: State<'_, HubHandle>, device_id: String) -> Result<(), CommandError> {
+    hub.stop_output(device_id).await.map_err(Into::into)
 }
 
 #[tauri::command]
@@ -170,6 +174,162 @@ pub async fn set_default_source(
     hub.set_default_source(source_id.clone()).await?;
     if let Err(error) = preferences.set_default_source_id(source_id) {
         let _ = hub.set_default_source(previous_source_id).await;
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_fixed_waveform(
+    hub: State<'_, HubHandle>,
+    device_id: String,
+    channel: Channel,
+    config: WaveformConfig,
+) -> Result<(), CommandError> {
+    hub.set_fixed_waveform(device_id, channel, Some(config))
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn import_custom_waveforms(
+    hub: State<'_, HubHandle>,
+    preferences: State<'_, PreferencesState>,
+    configs: Vec<WaveformConfig>,
+) -> Result<(), CommandError> {
+    if configs.is_empty() {
+        return Ok(());
+    }
+    let previous_waveforms = preferences.custom_waveforms();
+    let previous_selected = preferences.fixed_waveform();
+    let mut next_waveforms = previous_waveforms.clone();
+    next_waveforms.extend(configs);
+    apply_waveform_state(
+        &hub,
+        &preferences,
+        previous_selected.clone(),
+        previous_waveforms,
+        previous_selected,
+        next_waveforms,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn select_custom_waveform(
+    hub: State<'_, HubHandle>,
+    preferences: State<'_, PreferencesState>,
+    device_id: String,
+    channel: Channel,
+    preset_id: String,
+) -> Result<(), CommandError> {
+    let waveforms = preferences.custom_waveforms();
+    let selected = waveforms
+        .iter()
+        .find(|waveform| waveform.preset_id == preset_id)
+        .cloned()
+        .ok_or_else(|| {
+            CommandError::from(HubError::InvalidSourceConfig(
+                "选择的自定义波形不存在".to_owned(),
+            ))
+        })?;
+    hub.set_fixed_waveform(device_id, channel, Some(selected))
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn delete_custom_waveform(
+    hub: State<'_, HubHandle>,
+    preferences: State<'_, PreferencesState>,
+    preset_id: String,
+) -> Result<(), CommandError> {
+    let previous_waveforms = preferences.custom_waveforms();
+    let previous_selected = preferences.fixed_waveform();
+    let removed_index = previous_waveforms
+        .iter()
+        .position(|waveform| waveform.preset_id == preset_id)
+        .ok_or_else(|| {
+            CommandError::from(HubError::InvalidSourceConfig(
+                "要删除的自定义波形不存在".to_owned(),
+            ))
+        })?;
+    let mut next_waveforms = previous_waveforms.clone();
+    next_waveforms.remove(removed_index);
+    let next_selected = if previous_selected
+        .as_ref()
+        .map(|item| item.preset_id.as_str())
+        == Some(preset_id.as_str())
+    {
+        None
+    } else {
+        previous_selected.clone()
+    };
+    apply_waveform_state(
+        &hub,
+        &preferences,
+        previous_selected,
+        previous_waveforms,
+        next_selected,
+        next_waveforms,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn reorder_custom_waveforms(
+    hub: State<'_, HubHandle>,
+    preferences: State<'_, PreferencesState>,
+    preset_ids: Vec<String>,
+) -> Result<(), CommandError> {
+    let previous_waveforms = preferences.custom_waveforms();
+    let selected = preferences.fixed_waveform();
+    if preset_ids.len() != previous_waveforms.len() {
+        return Err(
+            HubError::InvalidSourceConfig("排序结果必须包含全部自定义波形".to_owned()).into(),
+        );
+    }
+    let mut remaining = previous_waveforms
+        .iter()
+        .cloned()
+        .map(|waveform| (waveform.preset_id.clone(), waveform))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut next_waveforms = Vec::with_capacity(preset_ids.len());
+    for preset_id in preset_ids {
+        let waveform = remaining.remove(&preset_id).ok_or_else(|| {
+            CommandError::from(HubError::InvalidSourceConfig(
+                "排序结果包含未知或重复的自定义波形".to_owned(),
+            ))
+        })?;
+        next_waveforms.push(waveform);
+    }
+    if !remaining.is_empty() {
+        return Err(
+            HubError::InvalidSourceConfig("排序结果必须包含全部自定义波形".to_owned()).into(),
+        );
+    }
+    apply_waveform_state(
+        &hub,
+        &preferences,
+        selected.clone(),
+        previous_waveforms,
+        selected,
+        next_waveforms,
+    )
+    .await
+}
+
+async fn apply_waveform_state(
+    hub: &HubHandle,
+    preferences: &PreferencesState,
+    previous_selected: Option<WaveformConfig>,
+    previous_waveforms: Vec<WaveformConfig>,
+    next_selected: Option<WaveformConfig>,
+    next_waveforms: Vec<WaveformConfig>,
+) -> Result<(), CommandError> {
+    preferences.set_waveform_state(next_selected.clone(), next_waveforms.clone())?;
+    if let Err(error) = hub.set_waveform_state(next_waveforms, next_selected).await {
+        let _ = preferences.set_waveform_state(previous_selected, previous_waveforms);
         return Err(error.into());
     }
     Ok(())

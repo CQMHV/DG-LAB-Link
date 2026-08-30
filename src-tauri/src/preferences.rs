@@ -6,6 +6,8 @@ use std::sync::RwLock;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::sources::WaveformConfig;
+
 const PREFERENCES_FILE_NAME: &str = "preferences.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -22,6 +24,11 @@ struct StoredPreferences {
     close_to_tray: bool,
     start_minimized: bool,
     default_source_id: Option<String>,
+    #[serde(alias = "manualWaveform", alias = "defaultWaveform")]
+    fixed_waveform: Option<WaveformConfig>,
+    custom_waveforms: Vec<WaveformConfig>,
+    #[serde(skip_serializing)]
+    selected_custom_waveform_id: Option<String>,
 }
 
 impl Default for StoredPreferences {
@@ -30,6 +37,9 @@ impl Default for StoredPreferences {
             close_to_tray: true,
             start_minimized: true,
             default_source_id: None,
+            fixed_waveform: Some(WaveformConfig::default()),
+            custom_waveforms: Vec::new(),
+            selected_custom_waveform_id: None,
         }
     }
 }
@@ -54,11 +64,19 @@ pub struct PreferencesState {
 impl PreferencesState {
     pub fn load(config_dir: PathBuf) -> Result<Self, PreferencesError> {
         let file_path = config_dir.join(PREFERENCES_FILE_NAME);
-        let snapshot = match fs::read_to_string(&file_path) {
+        let mut snapshot: StoredPreferences = match fs::read_to_string(&file_path) {
             Ok(content) => serde_json::from_str(&content).map_err(PreferencesError::Parse)?,
             Err(error) if error.kind() == ErrorKind::NotFound => StoredPreferences::default(),
             Err(error) => return Err(PreferencesError::Read(error)),
         };
+        if let Some(selected_id) = snapshot.selected_custom_waveform_id.take()
+            && let Some(selected) = snapshot
+                .custom_waveforms
+                .iter()
+                .find(|waveform| waveform.preset_id == selected_id)
+        {
+            snapshot.fixed_waveform = Some(selected.clone());
+        }
         Ok(Self::new(file_path, snapshot))
     }
 
@@ -103,6 +121,22 @@ impl PreferencesState {
             .clone()
     }
 
+    pub fn fixed_waveform(&self) -> Option<WaveformConfig> {
+        self.stored
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .fixed_waveform
+            .clone()
+    }
+
+    pub fn custom_waveforms(&self) -> Vec<WaveformConfig> {
+        self.stored
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .custom_waveforms
+            .clone()
+    }
+
     pub fn set_close_to_tray(&self, enabled: bool) -> Result<(), PreferencesError> {
         self.update(|stored| stored.close_to_tray = enabled)
     }
@@ -113,6 +147,17 @@ impl PreferencesState {
 
     pub fn set_default_source_id(&self, source_id: Option<String>) -> Result<(), PreferencesError> {
         self.update(|stored| stored.default_source_id = source_id)
+    }
+
+    pub fn set_waveform_state(
+        &self,
+        selected: Option<WaveformConfig>,
+        waveforms: Vec<WaveformConfig>,
+    ) -> Result<(), PreferencesError> {
+        self.update(|stored| {
+            stored.fixed_waveform = selected;
+            stored.custom_waveforms = waveforms;
+        })
     }
 
     fn new(file_path: PathBuf, snapshot: StoredPreferences) -> Self {
@@ -159,6 +204,11 @@ mod tests {
         assert!(state.close_to_tray());
         assert!(state.start_minimized());
         assert_eq!(state.default_source_id(), None);
+        assert_eq!(
+            state.fixed_waveform().unwrap().preset_id,
+            crate::sources::DEFAULT_WAVEFORM_ID
+        );
+        assert_eq!(state.custom_waveforms(), Vec::new());
     }
 
     #[test]
@@ -200,6 +250,10 @@ mod tests {
         assert!(!state.close_to_tray());
         assert!(state.start_minimized());
         assert_eq!(state.default_source_id(), None);
+        assert_eq!(
+            state.fixed_waveform().unwrap().preset_id,
+            crate::sources::DEFAULT_WAVEFORM_ID
+        );
 
         fs::remove_dir_all(config_dir).unwrap();
     }
@@ -209,18 +263,83 @@ mod tests {
         let config_dir = temporary_config_dir();
         let state = PreferencesState::load(config_dir.clone()).unwrap();
         state
-            .set_default_source_id(Some("source-manual".to_owned()))
+            .set_default_source_id(Some("source-fixed-waveform".to_owned()))
             .unwrap();
 
         let reloaded = PreferencesState::load(config_dir.clone()).unwrap();
         assert_eq!(
             reloaded.default_source_id().as_deref(),
-            Some("source-manual")
+            Some("source-fixed-waveform")
         );
         reloaded.set_default_source_id(None).unwrap();
 
         let cleared = PreferencesState::load(config_dir.clone()).unwrap();
         assert_eq!(cleared.default_source_id(), None);
+
+        fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn waveform_preferences_are_persisted() {
+        let config_dir = temporary_config_dir();
+        let state = PreferencesState::load(config_dir.clone()).unwrap();
+        let custom = WaveformConfig {
+            preset_id: "custom-1".to_owned(),
+            preset_name: "自定义".to_owned(),
+            frames: vec!["0A0A0A0A64646464".to_owned()],
+        };
+        state
+            .set_waveform_state(Some(custom.clone()), vec![custom.clone()])
+            .unwrap();
+
+        let reloaded = PreferencesState::load(config_dir.clone()).unwrap();
+        assert_eq!(reloaded.fixed_waveform(), Some(custom.clone()));
+        assert_eq!(reloaded.custom_waveforms(), vec![custom]);
+
+        fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn manual_waveform_field_migrates_to_fixed_waveform() {
+        let config_dir = temporary_config_dir();
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(
+            config_dir.join(PREFERENCES_FILE_NAME),
+            r#"{"manualWaveform":{"presetId":"BUBBLE","presetName":"气泡","frames":["2D2D2D2D64646464"]}}"#,
+        )
+        .unwrap();
+
+        let state = PreferencesState::load(config_dir.clone()).unwrap();
+        assert_eq!(state.fixed_waveform().unwrap().preset_id, "BUBBLE");
+
+        fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn selected_custom_waveform_migrates_to_fixed_waveform() {
+        let config_dir = temporary_config_dir();
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(
+            config_dir.join(PREFERENCES_FILE_NAME),
+            r#"{
+                "defaultWaveform": {
+                    "presetId": "BREATHING",
+                    "presetName": "呼吸",
+                    "frames": ["0A0A0A0A64646464"]
+                },
+                "customWaveforms": [{
+                    "presetId": "custom-1",
+                    "presetName": "已选择的导入波形",
+                    "frames": ["1414141464646464"]
+                }],
+                "selectedCustomWaveformId": "custom-1"
+            }"#,
+        )
+        .unwrap();
+
+        let state = PreferencesState::load(config_dir.clone()).unwrap();
+        assert_eq!(state.fixed_waveform().unwrap().preset_id, "custom-1");
+        assert_eq!(state.custom_waveforms()[0].preset_id, "custom-1");
 
         fs::remove_dir_all(config_dir).unwrap();
     }

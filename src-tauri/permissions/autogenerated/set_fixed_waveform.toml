@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-fixed-waveform"
+description = "Enables the set_fixed_waveform command without any pre-configured scope."
+commands.allow = ["set_fixed_waveform"]
+
+[[permission]]
+identifier = "deny-set-fixed-waveform"
+description = "Denies the set_fixed_waveform command without any pre-configured scope."
+commands.deny = ["set_fixed_waveform"]

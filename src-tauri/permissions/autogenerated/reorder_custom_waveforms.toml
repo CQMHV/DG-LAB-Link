@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-reorder-custom-waveforms"
+description = "Enables the reorder_custom_waveforms command without any pre-configured scope."
+commands.allow = ["reorder_custom_waveforms"]
+
+[[permission]]
+identifier = "deny-reorder-custom-waveforms"
+description = "Denies the reorder_custom_waveforms command without any pre-configured scope."
+commands.deny = ["reorder_custom_waveforms"]

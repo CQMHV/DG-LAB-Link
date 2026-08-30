@@ -189,6 +189,12 @@
           "markdownDescription": "Enables the connect_relay command without any pre-configured scope."
         },
         {
+          "description": "Enables the delete_custom_waveform command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-delete-custom-waveform",
+          "markdownDescription": "Enables the delete_custom_waveform command without any pre-configured scope."
+        },
+        {
           "description": "Enables the disconnect_relay command without any pre-configured scope.",
           "type": "string",
           "const": "allow-disconnect-relay",
@@ -213,10 +219,28 @@
           "markdownDescription": "Enables the get_hub_snapshot command without any pre-configured scope."
         },
         {
+          "description": "Enables the import_custom_waveforms command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-import-custom-waveforms",
+          "markdownDescription": "Enables the import_custom_waveforms command without any pre-configured scope."
+        },
+        {
           "description": "Enables the refresh_pairing command without any pre-configured scope.",
           "type": "string",
           "const": "allow-refresh-pairing",
           "markdownDescription": "Enables the refresh_pairing command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the reorder_custom_waveforms command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-reorder-custom-waveforms",
+          "markdownDescription": "Enables the reorder_custom_waveforms command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the select_custom_waveform command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-select-custom-waveform",
+          "markdownDescription": "Enables the select_custom_waveform command without any pre-configured scope."
         },
         {
           "description": "Enables the select_device command without any pre-configured scope.",
@@ -261,6 +285,12 @@
           "markdownDescription": "Enables the set_device_channel_source_sync command without any pre-configured scope."
         },
         {
+          "description": "Enables the set_fixed_waveform command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-fixed-waveform",
+          "markdownDescription": "Enables the set_fixed_waveform command without any pre-configured scope."
+        },
+        {
           "description": "Enables the set_start_minimized command without any pre-configured scope.",
           "type": "string",
           "const": "allow-set-start-minimized",
@@ -303,6 +333,12 @@
           "markdownDescription": "Denies the connect_relay command without any pre-configured scope."
         },
         {
+          "description": "Denies the delete_custom_waveform command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-delete-custom-waveform",
+          "markdownDescription": "Denies the delete_custom_waveform command without any pre-configured scope."
+        },
+        {
           "description": "Denies the disconnect_relay command without any pre-configured scope.",
           "type": "string",
           "const": "deny-disconnect-relay",
@@ -327,10 +363,28 @@
           "markdownDescription": "Denies the get_hub_snapshot command without any pre-configured scope."
         },
         {
+          "description": "Denies the import_custom_waveforms command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-import-custom-waveforms",
+          "markdownDescription": "Denies the import_custom_waveforms command without any pre-configured scope."
+        },
+        {
           "description": "Denies the refresh_pairing command without any pre-configured scope.",
           "type": "string",
           "const": "deny-refresh-pairing",
           "markdownDescription": "Denies the refresh_pairing command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the reorder_custom_waveforms command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-reorder-custom-waveforms",
+          "markdownDescription": "Denies the reorder_custom_waveforms command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the select_custom_waveform command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-select-custom-waveform",
+          "markdownDescription": "Denies the select_custom_waveform command without any pre-configured scope."
         },
         {
           "description": "Denies the select_device command without any pre-configured scope.",
@@ -373,6 +427,12 @@
           "type": "string",
           "const": "deny-set-device-channel-source-sync",
           "markdownDescription": "Denies the set_device_channel_source_sync command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_fixed_waveform command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-fixed-waveform",
+          "markdownDescription": "Denies the set_fixed_waveform command without any pre-configured scope."
         },
         {
           "description": "Denies the set_start_minimized command without any pre-configured scope.",

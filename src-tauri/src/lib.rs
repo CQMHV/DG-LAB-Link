@@ -16,7 +16,7 @@ use tauri::{
 };
 
 use crate::dglab::client::DEFAULT_RELAY_ENDPOINT;
-use crate::hub::{HubHandle, create_hub_with_default_source};
+use crate::hub::{HubHandle, create_hub_with_source_preferences};
 use crate::preferences::PreferencesState;
 
 const AUTOSTART_ARG: &str = "--autostart";
@@ -40,15 +40,19 @@ pub fn run() {
                 });
             let start_hidden = launched_from_autostart() && preferences.start_minimized();
             let default_source_id = preferences.default_source_id();
+            let fixed_waveform = preferences.fixed_waveform();
+            let custom_waveforms = preferences.custom_waveforms();
             app.manage(preferences);
             create_tray(app)?;
             if start_hidden && let Some(window) = app.get_webview_window("main") {
                 window.hide()?;
             }
 
-            let (hub, runtime) = create_hub_with_default_source(
+            let (hub, runtime) = create_hub_with_source_preferences(
                 DEFAULT_RELAY_ENDPOINT.to_owned(),
                 default_source_id,
+                fixed_waveform,
+                custom_waveforms,
             );
             let mut snapshots = hub.subscribe();
             let app_handle = app.handle().clone();
@@ -82,6 +86,11 @@ pub fn run() {
             commands::set_device_channel_source,
             commands::set_device_channel_source_sync,
             commands::set_default_source,
+            commands::set_fixed_waveform,
+            commands::import_custom_waveforms,
+            commands::select_custom_waveform,
+            commands::delete_custom_waveform,
+            commands::reorder_custom_waveforms,
             commands::select_device,
             commands::set_sync_all_devices,
             commands::set_channel_limit,

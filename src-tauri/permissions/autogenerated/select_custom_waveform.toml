@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-select-custom-waveform"
+description = "Enables the select_custom_waveform command without any pre-configured scope."
+commands.allow = ["select_custom_waveform"]
+
+[[permission]]
+identifier = "deny-select-custom-waveform"
+description = "Denies the select_custom_waveform command without any pre-configured scope."
+commands.deny = ["select_custom_waveform"]

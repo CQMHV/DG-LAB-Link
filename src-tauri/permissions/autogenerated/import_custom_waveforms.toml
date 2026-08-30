@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-import-custom-waveforms"
+description = "Enables the import_custom_waveforms command without any pre-configured scope."
+commands.allow = ["import_custom_waveforms"]
+
+[[permission]]
+identifier = "deny-import-custom-waveforms"
+description = "Denies the import_custom_waveforms command without any pre-configured scope."
+commands.deny = ["import_custom_waveforms"]
