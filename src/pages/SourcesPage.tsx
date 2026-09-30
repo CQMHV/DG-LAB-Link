@@ -4,15 +4,21 @@ import {
     CirclesThreePlus,
     DeviceMobile,
     FileArrowDown,
+    HandTap,
+    Microphone,
     Star,
     Waveform,
 } from "@phosphor-icons/react";
 import { useState } from "react";
 
 import { FixedWaveformSourceSettings } from "../components/FixedWaveformSourceSettings";
+import { TouchSourceSettings } from "../components/TouchSourceSettings";
+import { AudioPlayer } from "../components/AudioSourceControls";
 import { PageHeader } from "../components/PageHeader";
 import type {
     HubSnapshot,
+    AudioAction,
+    TouchConfig,
     SourceSnapshot,
     WaveformConfig,
 } from "../lib/contracts";
@@ -24,7 +30,16 @@ interface SourcesPageProps {
     onError: (message: string) => void;
     onImportCustomWaveforms: (configs: WaveformConfig[]) => void;
     onReorderCustomWaveforms: (presetIds: string[]) => void;
+    onSetTouchConfig: (config: TouchConfig) => void;
+    onAudioControl: (action: AudioAction) => Promise<void>;
 }
+
+const descriptions: Record<string, string> = {
+    "builtin.fixed_waveform": "循环输出选定的固定波形；统一管理波形库，各设备通道分别选择使用项。",
+    "builtin.touch": "按住自由触控板调整周期与相对强度，或在律动网格滑动切换波形；支持 A/B 路由与背景波形。",
+    "builtin.audio": "支持本地音频或视频音轨、麦克风实时收音、录音回放及桌面音频四种模式，将音量与频谱映射为各设备通道的波形。",
+};
+const sourceIcon = (kind: string) => kind === "builtin.touch" ? HandTap : kind === "builtin.audio" ? Microphone : Waveform;
 
 const getSourceAssignmentText = (
     snapshot: HubSnapshot,
@@ -42,6 +57,8 @@ export const SourcesPage = ({
     onError,
     onImportCustomWaveforms,
     onReorderCustomWaveforms,
+    onSetTouchConfig,
+    onAudioControl,
 }: SourcesPageProps) => {
     const [openSourceId, setOpenSourceId] = useState<string | null>(null);
     const openSource = snapshot.sources.find((source) => source.id === openSourceId);
@@ -51,6 +68,7 @@ export const SourcesPage = ({
     );
 
     if (openSource) {
+        const Icon = sourceIcon(openSource.kind);
         return (
             <div className="standard-page">
                 <PageHeader
@@ -75,7 +93,7 @@ export const SourcesPage = ({
                 >
                     <div className="source-card-heading">
                         <div className="source-icon">
-                            <Waveform aria-hidden="true" size={25} weight="light" />
+                            <Icon aria-hidden="true" size={25} weight="light" />
                         </div>
                         <div>
                             <h2>{openSource.name}</h2>
@@ -89,7 +107,7 @@ export const SourcesPage = ({
                     </div>
 
                     <p>
-                        循环输出选定的固定波形；波形资源由此输入源统一管理，设备通道分别选择使用项。
+                        {descriptions[openSource.kind] ?? "打开详情查看此输入源的配置。"}
                     </p>
 
                     <dl className="source-details source-detail-meta">
@@ -98,8 +116,8 @@ export const SourcesPage = ({
                             <dd>{openSource.id}</dd>
                         </div>
                         <div>
-                            <dt>波形配置</dt>
-                            <dd>按设备通道配置</dd>
+                            <dt>配置范围</dt>
+                            <dd>{openSource.kind === "builtin.touch" ? "共用面板，设备独立触点" : openSource.kind === "builtin.audio" ? "共用声音，通道独立映射" : "按设备通道配置"}</dd>
                         </div>
                         <div>
                             <dt>分配通道</dt>
@@ -126,6 +144,9 @@ export const SourcesPage = ({
                             onReorderCustomWaveforms={onReorderCustomWaveforms}
                         />
                     )}
+                    {openSource.kind === "builtin.touch" && <TouchSourceSettings config={snapshot.inputModes.touchConfig} customWaveforms={snapshot.customWaveforms} disabled={pendingAction !== null} onSave={onSetTouchConfig} onError={onError} />}
+                    {openSource.kind === "builtin.audio" && <AudioPlayer audio={snapshot.inputModes.audio} disabled={pendingAction !== null} onControl={onAudioControl} />}
+                    {openSource.kind === "builtin.audio" && <p className="input-mode-note">在控制台将通道设为音频模式，即可编辑该通道的音量、频段和周期映射，并复制 A/B 配置。</p>}
                 </section>
             </div>
         );
@@ -160,14 +181,16 @@ export const SourcesPage = ({
             </section>
 
             <div className="source-grid">
-                {snapshot.sources.map((source) => (
+                {snapshot.sources.map((source) => {
+                    const Icon = sourceIcon(source.kind);
+                    return (
                     <article
                         className={`source-card ${source.assignedChannelCount > 0 ? "source-card-active" : ""}`}
                         key={source.id}
                     >
                         <div className="source-card-heading">
                             <div className="source-icon">
-                                <Waveform aria-hidden="true" size={25} weight="light" />
+                                <Icon aria-hidden="true" size={25} weight="light" />
                             </div>
                             <div>
                                 <h2>{source.name}</h2>
@@ -180,7 +203,7 @@ export const SourcesPage = ({
                             </span>
                         </div>
                         <p>
-                            循环输出选定的固定波形；打开详情可查看和修改此输入源的专属配置。
+                            {descriptions[source.kind] ?? "打开详情查看此输入源的配置。"}
                         </p>
 
                         <dl className="source-details">
@@ -189,8 +212,8 @@ export const SourcesPage = ({
                                 <dd>{source.id}</dd>
                             </div>
                             <div>
-                                <dt>波形配置</dt>
-                                <dd>按设备通道配置</dd>
+                                <dt>配置范围</dt>
+                                <dd>{source.kind === "builtin.touch" ? "共用面板，设备独立触点" : source.kind === "builtin.audio" ? "共用声音，通道独立映射" : "按设备通道配置"}</dd>
                             </div>
                             <div>
                                 <dt>分配通道</dt>
@@ -217,7 +240,8 @@ export const SourcesPage = ({
                             </button>
                         </div>
                     </article>
-                ))}
+                    );
+                })}
             </div>
         </div>
     );

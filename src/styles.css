@@ -26,6 +26,414 @@
     --scrollbar-thumb-active: rgba(240, 207, 106, 0.72);
 }
 
+.input-mode-settings,
+.touch-console,
+.audio-player,
+.audio-channel-settings {
+    min-width: 0;
+    padding: 20px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+}
+
+.audio-channel-switch {
+    border: 0;
+    padding: 0;
+    margin: 16px 0 0;
+    color: var(--muted-strong);
+    font-size: 12px;
+}
+
+.audio-channel-switch label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.audio-mapping-details > summary {
+    cursor: pointer;
+    padding: 10px 0;
+    border-top: 1px solid var(--border);
+    color: var(--gold);
+    font-size: 12px;
+}
+
+.input-mode-settings {
+    margin-top: 24px;
+}
+
+.touch-console,
+.device-dashboard-content > .audio-player {
+    margin-top: 20px;
+}
+
+.audio-channel-settings {
+    margin-top: 18px;
+    padding: 16px;
+}
+
+.input-mode-heading {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    color: var(--gold);
+}
+
+.input-mode-heading h3 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+}
+
+.input-mode-heading > span {
+    margin-left: auto;
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.input-mode-heading > button {
+    margin-left: auto;
+}
+
+.input-mode-note,
+.input-mode-help p,
+.input-mode-channel-note {
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.8;
+}
+
+.input-mode-error {
+    color: var(--red);
+    font-size: 12px;
+    line-height: 1.7;
+}
+
+.input-mode-demo {
+    color: var(--warning);
+    font-size: 12px;
+    line-height: 1.7;
+}
+
+.input-mode-running {
+    color: var(--gold) !important;
+}
+
+.input-mode-fields {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+    padding: 0;
+    margin: 18px 0;
+    border: 0;
+    min-width: 0;
+}
+
+.input-mode-fields > label,
+.touch-cell-settings > label,
+.mapping-node > label {
+    display: grid;
+    gap: 7px;
+    font-size: 12px;
+    color: var(--muted-strong);
+    min-width: 0;
+}
+
+.input-mode-fields select,
+.input-mode-fields input[type="number"],
+.touch-cell-settings select,
+.mapping-node input {
+    width: 100%;
+    min-width: 0;
+    background: var(--surface-soft);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font: inherit;
+}
+
+.input-mode-fields select:focus,
+.input-mode-fields input:focus,
+.touch-cell-settings select:focus,
+.mapping-node input:focus {
+    outline: 1px solid var(--gold-dark);
+}
+
+.input-mode-fields > .input-mode-checkbox {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+}
+
+.input-mode-checkbox input {
+    accent-color: var(--gold);
+}
+
+.input-mode-actions,
+.audio-input-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 18px;
+    align-items: center;
+}
+
+.mapping-editor-pair {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px;
+    margin: 22px 0;
+}
+
+.mapping-editor {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    min-width: 0;
+    padding: 14px;
+    margin: 18px 0;
+}
+
+.mapping-editor legend {
+    color: var(--muted-strong);
+    font-size: 12px;
+    padding: 0 7px;
+}
+
+.mapping-node-list {
+    display: grid;
+    gap: 10px;
+    margin-bottom: 12px;
+}
+
+.mapping-node {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 30px;
+    gap: 8px;
+    align-items: end;
+}
+
+.mapping-node .icon-button {
+    width: 30px;
+    height: 32px;
+}
+
+.input-mode-help {
+    padding: 18px;
+    background: var(--surface-soft);
+    border-radius: 8px;
+    color: var(--gold);
+    font-size: 13px;
+}
+
+.touch-cell-settings {
+    display: grid;
+    gap: 12px;
+    margin-top: 16px;
+}
+
+.touch-cell-settings > label {
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+
+.touch-board {
+    user-select: none;
+    touch-action: none;
+    -webkit-user-select: none;
+    margin-top: 16px;
+}
+
+.touch-board.is-disabled {
+    opacity: 0.45;
+}
+
+.touch-free-pad {
+    position: relative;
+    height: 230px;
+    display: grid;
+    place-items: center;
+    color: var(--gold-dark);
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    overflow: hidden;
+    background-image: linear-gradient(to right, rgba(240, 207, 106, 0.06) 1px, transparent 1px), linear-gradient(to bottom, rgba(240, 207, 106, 0.06) 1px, transparent 1px);
+    background-size: 10% 10%;
+}
+
+.touch-axis-x {
+    position: absolute;
+    bottom: 12px;
+    left: 12px;
+    color: var(--muted);
+    font-size: 11px;
+}
+
+.touch-axis-y {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    color: var(--muted);
+    font-size: 11px;
+}
+
+.touch-pointer {
+    position: absolute;
+    display: grid;
+    place-items: center;
+    transform: translate(-50%, -50%);
+    width: 38px;
+    height: 38px;
+    border: 1px solid var(--gold);
+    border-radius: 50%;
+    color: var(--gold);
+    background: rgba(240, 207, 106, 0.15);
+    pointer-events: none;
+}
+
+.touch-live-grid {
+    display: grid;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.touch-live-cell {
+    min-height: 68px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 6px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface-raised);
+}
+
+.touch-live-cell small {
+    color: var(--muted);
+    font-size: 10px;
+}
+
+.touch-live-cell strong {
+    font-size: 13px;
+    font-weight: 500;
+}
+
+.touch-live-cell.is-held {
+    border-color: var(--gold);
+    color: var(--gold);
+    background: rgba(240, 207, 106, 0.1);
+}
+
+.audio-transport {
+    margin-top: 18px;
+    padding: 16px;
+    border-radius: 8px;
+    background: var(--surface-raised);
+}
+
+.audio-file-name {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 12px;
+    margin-bottom: 12px;
+}
+
+.audio-file-name strong {
+    font-weight: 500;
+    overflow-wrap: anywhere;
+}
+
+.audio-file-name span {
+    color: var(--muted);
+    white-space: nowrap;
+}
+
+.audio-transport > input {
+    width: 100%;
+    accent-color: var(--gold);
+}
+
+.audio-playback-options {
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+    border: 0;
+    padding: 0;
+    margin: 16px 0 0;
+    font-size: 12px;
+    color: var(--muted-strong);
+}
+
+.audio-playback-options label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.audio-playback-options input {
+    accent-color: var(--gold);
+}
+
+.audio-levels {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 18px;
+    margin-top: 18px;
+}
+
+.audio-levels > div {
+    display: grid;
+    gap: 7px;
+    font-size: 12px;
+    color: var(--muted);
+}
+
+.audio-levels meter {
+    width: 100%;
+    height: 12px;
+    accent-color: var(--gold);
+}
+
+.audio-levels small {
+    font-size: 11px;
+}
+
+.is-recording {
+    color: var(--red) !important;
+    border-color: rgba(223, 91, 83, 0.5) !important;
+}
+
+@media (max-width: 760px) {
+    .mapping-editor-pair {
+        grid-template-columns: 1fr;
+    }
+
+    .touch-cell-settings {
+        grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    }
+
+    .touch-free-pad {
+        height: 190px;
+    }
+
+    .input-mode-settings,
+    .touch-console,
+    .audio-player {
+        padding: 15px;
+    }
+
+    .touch-live-cell {
+        padding: 8px;
+    }
+
+}
+
+
 * {
     box-sizing: border-box;
     scrollbar-color: var(--scrollbar-thumb) transparent;

@@ -4,12 +4,17 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import type {
     AppPreferences,
+    AudioAction,
+    AudioChannelConfig,
     HubChannel,
     HubSnapshot,
     LogSnapshot,
     SafetyUpdate,
+    TouchConfig,
+    TouchInput,
     WaveformConfig,
 } from "./contracts";
+import { defaultAudioConfig, defaultTouchConfig } from "./inputModes";
 
 const SNAPSHOT_EVENT = "hub://snapshot";
 
@@ -107,6 +112,8 @@ const createDefaultMockSnapshot = (): HubSnapshot => {
             selectedPresetId: null,
             selectedPresetName: null,
         },
+        { id: "source-touch", kind: "builtin.touch", name: "触控模式", enabled: true, assignedChannelCount: 0, selectedPresetId: null, selectedPresetName: null },
+        { id: "source-audio", kind: "builtin.audio", name: "音频模式", enabled: true, assignedChannelCount: 0, selectedPresetId: null, selectedPresetName: null },
     ],
     customWaveforms: [
         {
@@ -117,6 +124,16 @@ const createDefaultMockSnapshot = (): HubSnapshot => {
         },
     ],
     defaultSourceId: null,
+    inputModes: {
+        touchConfig: defaultTouchConfig(),
+        audio: {
+            mode: "file", state: "idle", fileName: null, positionMs: 0, durationMs: 0,
+            levelLeft: 0, levelRight: 0, peakLeftHz: 0, peakRightHz: 0,
+            lastError: null, hasRecording: false, loop: false, speakerEnabled: true,
+        },
+        audioBindings: [primaryDevice, secondaryDevice].flatMap((device) =>
+            (["a", "b"] as const).map((channel) => ({ deviceId: device.controlId, channel, config: defaultAudioConfig() }))),
+    },
     output: {
         state: "idle",
         framesSent: 1284,
@@ -149,6 +166,8 @@ const createDefaultMockSnapshot = (): HubSnapshot => {
 
 let mockSnapshot = createDefaultMockSnapshot();
 let mockStartOutputCompletion: Promise<void> | null = null;
+let mockTouchInput: TouchInput | null = null;
+const mockWaveformConfigs = new Map<string, WaveformConfig>();
 
 const cloneSnapshot = (snapshot: HubSnapshot): HubSnapshot =>
     structuredClone(snapshot);
@@ -706,6 +725,7 @@ export const importCustomWaveforms = async (
                 frameCount: config.frames.length,
                 durationMs: config.frames.length * 100,
             });
+            mockWaveformConfigs.set(config.presetId, structuredClone(config));
         }
         prependMockLog(snapshot, "info", `已导入 ${configs.length} 个自定义波形`);
     });
@@ -885,6 +905,98 @@ export const performWindowAction = async (
     }
 };
 
+export const getCustomWaveform = async (presetId: string): Promise<WaveformConfig> => {
+    if (isTauriRuntime()) {
+        return invoke<WaveformConfig>("get_custom_waveform", { presetId });
+    }
+    const config = mockWaveformConfigs.get(presetId);
+    if (config) return structuredClone(config);
+    const waveform = mockSnapshot.customWaveforms.find((item) => item.id === presetId);
+    if (!waveform) throw new Error("选择的自定义波形不存在");
+    return { presetId, presetName: waveform.name, frames: ["0A0A0A0A64646464"] };
+};
+
+export const setTouchConfig = async (config: TouchConfig): Promise<void> => {
+    if (isTauriRuntime()) {
+        await invoke("set_touch_config", { config });
+        return;
+    }
+    mockTouchInput = null;
+    updateMockSnapshot((snapshot) => { snapshot.inputModes.touchConfig = structuredClone(config); });
+};
+
+export const updateTouchInput = async (input: TouchInput): Promise<void> => {
+    if (isTauriRuntime()) {
+        await invoke("update_touch_input", { input });
+        return;
+    }
+    const device = mockSnapshot.devices.find((candidate) => candidate.controlId === input.deviceId);
+    if (input.pointers.length > 0 && (!device?.outputActive ||
+        (device.sourceIdA !== "source-touch" && device.sourceIdB !== "source-touch"))) {
+        throw new Error("请先开始此设备的触控输出");
+    }
+    mockTouchInput = structuredClone(input);
+};
+
+export const setAudioConfig = async (deviceId: string, channel: HubChannel, config: AudioChannelConfig): Promise<void> => {
+    if (isTauriRuntime()) {
+        await invoke("set_audio_config", { deviceId, channel, config });
+        return;
+    }
+    updateMockSnapshot((snapshot) => {
+        const binding = snapshot.inputModes.audioBindings.find((item) => item.deviceId === deviceId && item.channel === channel);
+        if (binding) binding.config = structuredClone(config);
+        else snapshot.inputModes.audioBindings.push({ deviceId, channel, config: structuredClone(config) });
+    });
+};
+
+export const chooseAudioFile = async (): Promise<string | null> => isTauriRuntime()
+    ? invoke<string | null>("choose_audio_file") : "演示音频.wav";
+
+export const chooseRecordingDestination = async (): Promise<string | null> => isTauriRuntime()
+    ? invoke<string | null>("choose_recording_destination") : "演示录音.wav";
+
+export const audioControl = async (action: AudioAction): Promise<void> => {
+    if (isTauriRuntime()) {
+        await invoke("audio_control", { action });
+        return;
+    }
+    updateMockSnapshot((snapshot) => {
+        const audio = snapshot.inputModes.audio;
+        audio.lastError = null;
+        switch (action.type) {
+            case "loadFile":
+                audio.mode = "file"; audio.state = "paused";
+                audio.fileName = action.path.split(/[\\/]/).at(-1)!;
+                audio.positionMs = 0; audio.durationMs = 60000;
+                break;
+            case "play": audio.state = "playing"; break;
+            case "pause": audio.state = "paused"; break;
+            case "stop": audio.state = "idle"; audio.positionMs = 0; break;
+            case "seek": audio.positionMs = action.positionMs; break;
+            case "startMicrophone":
+            case "startDesktop":
+                audio.mode = action.type === "startDesktop" ? "desktop" : "microphone";
+                audio.state = "capturing"; audio.fileName = null;
+                audio.positionMs = 0; audio.durationMs = 0;
+                break;
+            case "startRecording": audio.mode = "recording"; audio.state = "recording"; audio.positionMs = 0; break;
+            case "stopRecording":
+                audio.mode = "recording"; audio.state = "idle"; audio.hasRecording = true;
+                audio.fileName = "录音回放"; audio.durationMs = 5000;
+                break;
+            case "setPlaybackOptions": audio.loop = action.loop; audio.speakerEnabled = action.speakerEnabled; break;
+            case "saveRecording": prependMockLog(snapshot, "info", "演示录音保存操作已完成"); break;
+        }
+        if (!["capturing", "playing"].includes(audio.state)) {
+            audio.levelLeft = 0; audio.levelRight = 0;
+            audio.peakLeftHz = 0; audio.peakRightHz = 0;
+        }
+    });
+};
+
+export const __getMockTouchInput = (): TouchInput | null => mockTouchInput ? structuredClone(mockTouchInput) : null;
+
 export const __resetMockBridge = (): void => {
     mockSnapshot = createDefaultMockSnapshot();
     mockAppPreferences = {
@@ -893,6 +1005,8 @@ export const __resetMockBridge = (): void => {
         startMinimized: true,
     };
     mockStartOutputCompletion = null;
+    mockTouchInput = null;
+    mockWaveformConfigs.clear();
     emitMockSnapshot();
 };
 

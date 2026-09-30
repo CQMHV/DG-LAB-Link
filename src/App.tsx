@@ -15,6 +15,7 @@ import { WindowChrome } from "./components/WindowChrome";
 import { useHubSnapshot } from "./hooks/useHubSnapshot";
 import {
     adjustIntensity,
+    audioControl,
     connectRelay,
     deleteCustomWaveform,
     getAppPreferences,
@@ -26,6 +27,8 @@ import {
     setAutoStart,
     setDefaultSource,
     setFixedWaveform,
+    setAudioConfig,
+    setTouchConfig,
     setCloseToTray,
     setDeviceChannelSource,
     setDeviceChannelSourceSync,
@@ -614,6 +617,8 @@ export default function App() {
                                 }
                                 onStartOutput={handleStartOutput}
                                 onStopOutput={handleStopOutput}
+                                onAudioControl={(action) => runAction("audio-control", () => audioControl(action))}
+                                onSetAudioConfig={(deviceId, channel, config) => void runAction(`audio-config-${deviceId}-${channel}`, () => setAudioConfig(deviceId, channel, config))}
                                 onSetFixedWaveform={(deviceId, channel, config) =>
                                     void runAction(
                                         `fixed-waveform-${deviceId}-${channel}`,
@@ -632,6 +637,8 @@ export default function App() {
                         )}
                         {!windowContext.detached && page === "sources" && (
                             <SourcesPage
+                                onSetTouchConfig={(config) => void runAction("touch-config", () => setTouchConfig(config))}
+                                onAudioControl={(action) => runAction("audio-control", () => audioControl(action))}
                                 onDeleteCustomWaveform={(presetId) =>
                                     void runAction("delete-custom-waveform", () =>
                                         deleteCustomWaveform(presetId),

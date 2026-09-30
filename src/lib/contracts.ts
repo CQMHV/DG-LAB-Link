@@ -108,6 +108,7 @@ export interface HubSnapshot {
     sources: SourceSnapshot[];
     customWaveforms: CustomWaveformSnapshot[];
     defaultSourceId: string | null;
+    inputModes: InputModesSnapshot;
     output: OutputSnapshot;
     channels: {
         a: ChannelSnapshot;
@@ -118,6 +119,76 @@ export interface HubSnapshot {
 }
 
 export type HubChannel = "a" | "b";
+
+export interface MappingPoint {
+    x: number;
+    y: number;
+}
+
+export interface TouchConfig {
+    mode: "free" | "rhythm";
+    routing: "a" | "b" | "sync" | "separate" | "alternate";
+    gridSize: number;
+    swapAxes: boolean;
+    intensityMode: "classic" | "gradient";
+    gradientDirection: "left" | "right" | "both";
+    intensityCurve: MappingPoint[];
+    periodCurve: MappingPoint[];
+    freeWaveforms: WaveformConfig[];
+    rhythmWaveforms: WaveformConfig[];
+    background: WaveformConfig | null;
+}
+
+export interface TouchInput {
+    deviceId: string;
+    ownerId: string;
+    sequence: number;
+    pointers: { id: number; x: number; y: number; cell: number | null }[];
+}
+
+export interface AudioChannelConfig {
+    enabled: boolean;
+    inputChannel: "left" | "right" | "mix";
+    gain: number;
+    volumeLower: number;
+    volumeUpper: number;
+    adaptive: boolean;
+    adaptiveLower: number;
+    adaptiveUpper: number;
+    hysteresisMs: number;
+    frequencyMin: number;
+    frequencyMax: number;
+    periodCurve: MappingPoint[];
+}
+
+export interface AudioSnapshot {
+    mode: "file" | "microphone" | "recording" | "desktop";
+    state: "idle" | "loading" | "playing" | "paused" | "capturing" | "recording" | "error";
+    fileName: string | null;
+    positionMs: number;
+    durationMs: number;
+    levelLeft: number;
+    levelRight: number;
+    peakLeftHz: number;
+    peakRightHz: number;
+    lastError: string | null;
+    hasRecording: boolean;
+    loop: boolean;
+    speakerEnabled: boolean;
+}
+
+export type AudioAction =
+    | { type: "loadFile"; path: string }
+    | { type: "play" | "pause" | "stop" | "startMicrophone" | "startDesktop" | "startRecording" | "stopRecording" }
+    | { type: "seek"; positionMs: number }
+    | { type: "setPlaybackOptions"; loop: boolean; speakerEnabled: boolean }
+    | { type: "saveRecording"; path: string };
+
+export interface InputModesSnapshot {
+    touchConfig: TouchConfig;
+    audio: AudioSnapshot;
+    audioBindings: { deviceId: string; channel: HubChannel; config: AudioChannelConfig }[];
+}
 
 export interface SafetyUpdate {
     connectionTimeoutEnabled: boolean;

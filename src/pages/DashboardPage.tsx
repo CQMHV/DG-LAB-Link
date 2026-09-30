@@ -16,8 +16,14 @@ import {
     type DeviceViewTab,
 } from "../components/DeviceTabs";
 import { FixedWaveformChannelDashboard } from "../components/FixedWaveformDashboard";
+import { AudioChannelSettings, AudioPlayer } from "../components/AudioSourceControls";
+import { TouchBoard } from "../components/TouchBoard";
+import { audioControl, setAudioConfig } from "../lib/bridge";
+import { defaultAudioConfig } from "../lib/inputModes";
 import type {
     HubChannel,
+    AudioAction,
+    AudioChannelConfig,
     HubSnapshot,
     WaveformConfig,
 } from "../lib/contracts";
@@ -61,6 +67,8 @@ interface DashboardPageProps {
         deviceId: string,
         enabled: boolean,
     ) => void;
+    onSetAudioConfig?: (deviceId: string, channel: HubChannel, config: AudioChannelConfig) => void;
+    onAudioControl?: (action: AudioAction) => Promise<void>;
 }
 
 export const DashboardPage = ({
@@ -87,6 +95,8 @@ export const DashboardPage = ({
     onStopOutput,
     onSetDeviceChannelSource,
     onSetDeviceChannelSourceSync,
+    onSetAudioConfig = (deviceId, channel, config) => { void setAudioConfig(deviceId, channel, config); },
+    onAudioControl = audioControl,
 }: DashboardPageProps) => {
     const device = activeDeviceId
         ? snapshot.devices.find(
@@ -350,10 +360,14 @@ export const DashboardPage = ({
                                                         }
                                                     />
                                                 )}
+                                                {source?.kind === "builtin.touch" && <p className="input-mode-channel-note">触控面板位于下方，{channel.toUpperCase()} 通道基础强度由上方仪表调节。</p>}
+                                                {source?.kind === "builtin.audio" && <AudioChannelSettings channel={channel} config={snapshot.inputModes.audioBindings.find((binding) => binding.deviceId === device.controlId && binding.channel === channel)?.config ?? defaultAudioConfig()} disabled={busy} onSave={(config) => onSetAudioConfig(device.controlId, channel, config)} onCopy={(config) => onSetAudioConfig(device.controlId, channel === "a" ? "b" : "a", config)} />}
                                             </ChannelControl>
                                         );
                                     })}
                                 </div>
+                                {(deviceSources.a?.kind === "builtin.touch" || deviceSources.b?.kind === "builtin.touch") && <TouchBoard key={device.controlId} config={snapshot.inputModes.touchConfig} deviceId={device.controlId} disabled={!isConnected || !device.outputActive} />}
+                                {(deviceSources.a?.kind === "builtin.audio" || deviceSources.b?.kind === "builtin.audio") && <AudioPlayer audio={snapshot.inputModes.audio} disabled={busy} onControl={onAudioControl} />}
                             </div>
                         </>
                     ) : deviceUnavailable ? (
