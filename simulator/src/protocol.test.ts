@@ -2,12 +2,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
     ControlledAppEngine,
     createVirtualDevice,
+    DEFAULT_RELAY_URL,
     resolveControlledEndpoint,
     type SimulatorLog,
     type VirtualDevice,
 } from "./protocol";
 
 describe("resolveControlledEndpoint", () => {
+    it("uses the same official relay path as the controller", () => {
+        expect(resolveControlledEndpoint(DEFAULT_RELAY_URL, "controller-1"))
+            .toBe("wss://trex.dungeon-lab.cn/v4?tid=controller-1");
+    });
+
     it("combines the relay endpoint and controller id", () => {
         expect(resolveControlledEndpoint("wss://trex.dungeon-lab.cn/v4/", "controller-1"))
             .toBe("wss://trex.dungeon-lab.cn/v4/?tid=controller-1");

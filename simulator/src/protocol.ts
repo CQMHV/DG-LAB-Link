@@ -1,4 +1,4 @@
-export const DEFAULT_RELAY_URL = "wss://trex.dungeon-lab.cn/v4/";
+export const DEFAULT_RELAY_URL = "wss://trex.dungeon-lab.cn/v4";
 export const MAX_VIRTUAL_DEVICES = 8;
 
 export type Channel = 0 | 1;
