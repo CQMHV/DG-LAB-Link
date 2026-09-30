@@ -2389,179 +2389,47 @@ code {
     align-items: center;
 }
 
-.setting-control {
-    margin: 30px 0 26px;
-    padding: 22px;
-    background: #151715;
-    border: 1px solid var(--border);
-    border-radius: 9px;
-}
-
-.setting-control label {
+.setting-row {
     display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    margin-bottom: 18px;
-    color: #babbb5;
-    font-size: 13px;
-}
-
-.setting-control label strong {
-    color: var(--gold);
-    font-size: 24px;
-    font-weight: 500;
-}
-
-.setting-control input {
-    width: 100%;
-    accent-color: var(--gold);
-    cursor: pointer;
-}
-
-.range-labels {
-    display: flex;
-    justify-content: space-between;
-    margin-top: 6px;
-    color: #686a65;
-    font-size: 10px;
-}
-
-.duration-setting {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    gap: 13px;
-    align-items: center;
-    margin-bottom: 24px;
-    padding: 17px 20px;
-    color: var(--muted);
-    background: #151715;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-}
-
-.duration-setting svg {
-    color: var(--gold-dark);
-}
-
-.duration-setting div {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-}
-
-.duration-setting span,
-.duration-setting small {
-    color: #747671;
-    font-size: 11px;
-}
-
-.duration-setting strong {
-    color: #c7c8c2;
-    font-size: 13px;
-    font-weight: 520;
-}
-
-.duration-setting label {
-    color: #747671;
-    font-size: 11px;
-}
-
-.duration-setting input {
-    width: 74px;
-    height: 36px;
-    padding: 0 8px;
-    color: #d5d6d0;
-    background: #101210;
-    border: 1px solid #343633;
-    border-radius: 6px;
-}
-
-.duration-setting-editable {
-    grid-template-columns: auto minmax(0, 1fr) auto auto;
-}
-
-.setting-toggle-row {
-    display: flex;
+    min-width: 0;
     gap: 24px;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 24px;
+    margin-top: 16px;
     padding: 17px 20px;
     background: #151715;
     border: 1px solid var(--border);
     border-radius: 8px;
 }
 
-.setting-toggle-row-first {
+.settings-heading + .setting-row {
     margin-top: 28px;
 }
 
-.setting-toggle-row-dependent {
-    margin-left: 18px;
-    background: #131513;
-    border-left-color: rgba(240, 207, 106, 0.32);
-}
-
-.setting-toggle-row-last {
-    margin-bottom: 0;
-}
-
-.setting-toggle-row > div {
+.setting-row-copy {
     display: flex;
     min-width: 0;
     flex-direction: column;
     gap: 5px;
 }
 
-.setting-toggle-row strong {
+.setting-row-copy strong {
     color: #c7c8c2;
     font-size: 13px;
     font-weight: 520;
 }
 
-.setting-toggle-row span {
+.setting-row-copy span {
     max-width: 680px;
     color: #747671;
     font-size: 11px;
     line-height: 1.6;
 }
 
-.setting-select-row {
-    display: flex;
-    gap: 24px;
-    align-items: center;
-    justify-content: space-between;
-    margin-top: 28px;
-    padding: 17px 20px;
-    background: #151715;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-}
-
-.setting-select-row > div {
-    display: flex;
-    min-width: 0;
-    flex-direction: column;
-    gap: 5px;
-}
-
-.setting-select-row strong {
-    color: #c7c8c2;
-    font-size: 13px;
-    font-weight: 520;
-}
-
-.setting-select-row span {
-    color: #747671;
-    font-size: 11px;
-    line-height: 1.6;
-}
-
-.setting-select-row select {
-    width: min(260px, 42%);
-    min-width: 180px;
+.setting-select,
+.setting-input {
+    flex: 0 0 auto;
     height: 36px;
-    padding: 0 32px 0 11px;
     color: #d5d6d0;
     background: #101210;
     border: 1px solid #343633;
@@ -2570,13 +2438,35 @@ code {
     font-size: 12px;
 }
 
-.setting-select-row select:focus-visible {
+.setting-select {
+    width: min(260px, 42%);
+    min-width: 180px;
+    padding: 0 32px 0 11px;
+}
+
+.setting-input {
+    width: 90px;
+    padding: 0 11px;
+}
+
+.setting-input-with-unit {
+    display: flex;
+    flex: 0 0 auto;
+    gap: 10px;
+    align-items: center;
+    color: #747671;
+    font-size: 11px;
+}
+
+.setting-select:focus-visible,
+.setting-input:focus-visible {
     border-color: var(--gold-dark);
     outline: 2px solid rgba(240, 207, 106, 0.16);
     outline-offset: 2px;
 }
 
-.setting-select-row select:disabled {
+.setting-select:disabled,
+.setting-input:disabled {
     cursor: wait;
     opacity: 0.58;
 }
@@ -2639,32 +2529,47 @@ code {
     min-width: 160px;
 }
 
-.relay-card {
-    margin-top: 20px;
+.settings-page .save-button {
+    margin-top: 24px;
 }
 
-.endpoint-field {
-    display: flex;
-    gap: 22px;
-    align-items: center;
-    margin-top: 28px;
-    padding: 16px 18px;
-    background: #151715;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-}
-
-.endpoint-field span {
-    color: #777973;
-    font-size: 11px;
-}
-
-.endpoint-field code {
+.setting-endpoint {
+    min-width: 0;
     overflow: hidden;
     color: #c4c5bf;
     font-size: 12px;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+.relay-connection-status {
+    display: inline-flex;
+    gap: 8px;
+    align-items: center;
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.relay-connection-status::before {
+    width: 7px;
+    height: 7px;
+    flex: 0 0 auto;
+    background: currentColor;
+    border-radius: 50%;
+    content: "";
+}
+
+.relay-connection-status[data-state="waiting"],
+.relay-connection-status[data-state="connected"] {
+    color: var(--green);
+}
+
+.relay-connection-status[data-state="connecting"] {
+    color: var(--gold);
+}
+
+.relay-connection-status[data-state="error"] {
+    color: var(--red);
 }
 
 .relay-note {

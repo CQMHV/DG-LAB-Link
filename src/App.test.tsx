@@ -458,7 +458,7 @@ describe("DG-LAB Link 前端", () => {
             expect(
                 (screen.getByTestId("channel-a-intensity") as HTMLInputElement)
                     .value,
-            ).toBe("20");
+            ).toBe("25");
         });
 
         const numberInput = screen.getByRole("spinbutton", {
@@ -466,7 +466,7 @@ describe("DG-LAB Link 前端", () => {
         }) as HTMLInputElement;
         await waitFor(() => {
             expect(numberInput.disabled).toBe(false);
-            expect(numberInput.value).toBe("20");
+            expect(numberInput.value).toBe("25");
         });
         fireEvent.change(numberInput, { target: { value: "27" } });
         fireEvent.keyDown(numberInput, { key: "Enter" });
@@ -635,6 +635,34 @@ describe("DG-LAB Link 前端", () => {
             expect(snapshot.devices[0].sourceIdA).toBe("source-fixed-waveform");
             expect(snapshot.devices[0].sourceIdB).toBe("source-fixed-waveform");
         });
+    });
+
+    it("设置页面随后端快照更新 Relay 连接状态", async () => {
+        const user = userEvent.setup();
+        const initial = await getHubSnapshot();
+        render(<App />);
+        await user.click(await screen.findByRole("button", { name: "设置" }));
+
+        const states = [
+            ["disconnected", "Relay 未连接"],
+            ["connecting", "正在连接 Relay"],
+            ["waiting", "Relay 已连接"],
+            ["connected", "Relay 已连接"],
+            ["error", "Relay 连接异常"],
+        ] as const;
+
+        for (const [index, [state, label]] of states.entries()) {
+            act(() => {
+                __emitMockSnapshot({
+                    ...initial,
+                    revision: initial.revision + index + 1,
+                    connection: { ...initial.connection, state },
+                });
+            });
+            const status = await screen.findByText(label);
+            expect(status.getAttribute("role")).toBe("status");
+            expect(status.getAttribute("data-state")).toBe(state);
+        }
     });
 
     it("可以在设置页面选择新设备的默认输入源", async () => {
@@ -1286,6 +1314,40 @@ describe("DG-LAB Link 前端", () => {
         });
     });
 
+    it("连接超时默认关闭、时长无数字微调按钮，并在应用设置后启用", async () => {
+        const user = userEvent.setup();
+        render(<App />);
+
+        await user.click(await screen.findByRole("button", { name: "设置" }));
+        const toggle = screen.getByRole("checkbox", {
+            name: "连接超时自动断开",
+        }) as HTMLInputElement;
+        expect(toggle.checked).toBe(false);
+        expect(screen.queryByRole("textbox", { name: "连接超时分钟数" })).toBeNull();
+        expect((await getHubSnapshot()).safety.connectionTimeoutEnabled).toBe(false);
+
+        await user.click(toggle);
+        const minutes = screen.getByRole("textbox", {
+            name: "连接超时分钟数",
+        }) as HTMLInputElement;
+        expect(minutes.value).toBe("60");
+        await user.clear(minutes);
+        await user.type(minutes, "45");
+        expect((await getHubSnapshot()).safety.connectionTimeoutEnabled).toBe(false);
+        await user.click(screen.getByRole("button", { name: "应用安全设置" }));
+        await waitFor(async () => {
+            const safety = (await getHubSnapshot()).safety;
+            expect(safety.connectionTimeoutEnabled).toBe(true);
+            expect(safety.connectionTimeoutMinutes).toBe(45);
+        });
+        await user.click(toggle);
+        expect(screen.queryByRole("textbox", { name: "连接超时分钟数" })).toBeNull();
+        await user.click(toggle);
+        expect((screen.getByRole("textbox", {
+            name: "连接超时分钟数",
+        }) as HTMLInputElement).value).toBe("45");
+    });
+
     it("默认关闭主窗口时保留在托盘并立即保存设置", async () => {
         const user = userEvent.setup();
         render(<App />);
@@ -1312,15 +1374,17 @@ describe("DG-LAB Link 前端", () => {
         const autoStart = screen.getByRole("checkbox", {
             name: "开机自启",
         }) as HTMLInputElement;
-        const startMinimized = screen.getByRole("checkbox", {
-            name: "以最小化形式启动",
-        }) as HTMLInputElement;
-
         expect(autoStart.checked).toBe(false);
-        expect(startMinimized.checked).toBe(true);
-        expect(startMinimized.disabled).toBe(true);
+        expect(screen.queryByRole("checkbox", {
+            name: "以最小化形式启动",
+        })).toBeNull();
+        expect((await getAppPreferences()).startMinimized).toBe(true);
 
         await user.click(autoStart);
+        const startMinimized = await screen.findByRole("checkbox", {
+            name: "以最小化形式启动",
+        }) as HTMLInputElement;
+        expect(startMinimized.checked).toBe(true);
         await waitFor(async () => {
             expect(autoStart.checked).toBe(true);
             expect(startMinimized.disabled).toBe(false);
@@ -1332,6 +1396,17 @@ describe("DG-LAB Link 前端", () => {
             expect(startMinimized.checked).toBe(false);
             expect((await getAppPreferences()).startMinimized).toBe(false);
         });
+        await user.click(autoStart);
+        await waitFor(() => {
+            expect(screen.queryByRole("checkbox", {
+                name: "以最小化形式启动",
+            })).toBeNull();
+        });
+        expect((await getAppPreferences()).startMinimized).toBe(false);
+        await user.click(autoStart);
+        expect((await screen.findByRole("checkbox", {
+            name: "以最小化形式启动",
+        }) as HTMLInputElement).checked).toBe(false);
     });
 
     it("设备页面只展示状态且不提供设备切换入口", async () => {

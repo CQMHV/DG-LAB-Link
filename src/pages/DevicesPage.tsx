@@ -121,18 +121,12 @@ export const DevicesPage = ({
                     const channels = {
                         a: {
                             intensity: device.intensityA,
-                            limit: Math.min(
-                                snapshot.safety.channelLimit,
-                                device.intensityLimitA,
-                            ),
+                            limit: device.intensityLimitA,
                             status: device.channelAStatus,
                         },
                         b: {
                             intensity: device.intensityB,
-                            limit: Math.min(
-                                snapshot.safety.channelLimit,
-                                device.intensityLimitB,
-                            ),
+                            limit: device.intensityLimitB,
                             status: device.channelBStatus,
                         },
                     };

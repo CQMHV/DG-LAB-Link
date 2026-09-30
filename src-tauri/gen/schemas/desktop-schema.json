@@ -255,12 +255,6 @@
           "markdownDescription": "Enables the set_auto_start command without any pre-configured scope."
         },
         {
-          "description": "Enables the set_channel_limit command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-set-channel-limit",
-          "markdownDescription": "Enables the set_channel_limit command without any pre-configured scope."
-        },
-        {
           "description": "Enables the set_close_to_tray command without any pre-configured scope.",
           "type": "string",
           "const": "allow-set-close-to-tray",
@@ -397,12 +391,6 @@
           "type": "string",
           "const": "deny-set-auto-start",
           "markdownDescription": "Denies the set_auto_start command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the set_channel_limit command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-set-channel-limit",
-          "markdownDescription": "Denies the set_channel_limit command without any pre-configured scope."
         },
         {
           "description": "Denies the set_close_to_tray command without any pre-configured scope.",

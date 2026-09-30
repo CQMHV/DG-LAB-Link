@@ -38,7 +38,6 @@
         "allow-reorder-custom-waveforms",
         "allow-select-device",
         "allow-set-sync-all-devices",
-        "allow-set-channel-limit",
         "allow-update-safety"
     ]
 }

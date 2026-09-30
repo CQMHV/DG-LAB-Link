@@ -23,6 +23,9 @@ pub struct AppPreferencesSnapshot {
 struct StoredPreferences {
     close_to_tray: bool,
     start_minimized: bool,
+    connection_timeout_enabled: bool,
+    connection_timeout_minutes: u16,
+    allow_app_intensity_control: bool,
     default_source_id: Option<String>,
     #[serde(alias = "manualWaveform", alias = "defaultWaveform")]
     fixed_waveform: Option<WaveformConfig>,
@@ -36,6 +39,9 @@ impl Default for StoredPreferences {
         Self {
             close_to_tray: true,
             start_minimized: true,
+            connection_timeout_enabled: false,
+            connection_timeout_minutes: 60,
+            allow_app_intensity_control: false,
             default_source_id: None,
             fixed_waveform: Some(WaveformConfig::default()),
             custom_waveforms: Vec::new(),
@@ -76,6 +82,9 @@ impl PreferencesState {
                 .find(|waveform| waveform.preset_id == selected_id)
         {
             snapshot.fixed_waveform = Some(selected.clone());
+        }
+        if !(1..=1440).contains(&snapshot.connection_timeout_minutes) {
+            snapshot.connection_timeout_minutes = 60;
         }
         Ok(Self::new(file_path, snapshot))
     }
@@ -135,6 +144,31 @@ impl PreferencesState {
             .unwrap_or_else(|error| error.into_inner())
             .custom_waveforms
             .clone()
+    }
+
+    pub fn safety_settings(&self) -> (bool, u16, bool) {
+        let stored = self
+            .stored
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        (
+            stored.connection_timeout_enabled,
+            stored.connection_timeout_minutes,
+            stored.allow_app_intensity_control,
+        )
+    }
+
+    pub fn set_safety_settings(
+        &self,
+        connection_timeout_enabled: bool,
+        connection_timeout_minutes: u16,
+        allow_app_intensity_control: bool,
+    ) -> Result<(), PreferencesError> {
+        self.update(|stored| {
+            stored.connection_timeout_enabled = connection_timeout_enabled;
+            stored.connection_timeout_minutes = connection_timeout_minutes;
+            stored.allow_app_intensity_control = allow_app_intensity_control;
+        })
     }
 
     pub fn set_close_to_tray(&self, enabled: bool) -> Result<(), PreferencesError> {
@@ -220,6 +254,17 @@ mod tests {
         let reloaded = PreferencesState::load(config_dir.clone()).unwrap();
         assert!(!reloaded.close_to_tray());
 
+        fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn connection_timeout_and_reverse_control_are_persisted() {
+        let config_dir = temporary_config_dir();
+        let state = PreferencesState::load(config_dir.clone()).unwrap();
+        assert_eq!(state.safety_settings(), (false, 60, false));
+        state.set_safety_settings(true, 90, true).unwrap();
+        let reloaded = PreferencesState::load(config_dir.clone()).unwrap();
+        assert_eq!(reloaded.safety_settings(), (true, 90, true));
         fs::remove_dir_all(config_dir).unwrap();
     }
 

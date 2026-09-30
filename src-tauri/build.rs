@@ -22,7 +22,6 @@ fn main() {
         "reorder_custom_waveforms",
         "select_device",
         "set_sync_all_devices",
-        "set_channel_limit",
         "update_safety",
     ]);
     let attributes = tauri_build::Attributes::new().app_manifest(app_manifest);

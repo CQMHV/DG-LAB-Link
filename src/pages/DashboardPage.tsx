@@ -112,18 +112,12 @@ export const DashboardPage = ({
     const deviceChannels = {
         a: {
             intensity: device?.intensityA ?? 0,
-            limit: Math.min(
-                snapshot.safety.channelLimit,
-                device?.intensityLimitA ?? snapshot.safety.channelLimit,
-            ),
+            limit: device?.intensityLimitA ?? 0,
             status: device?.channelAStatus ?? "disconnected",
         },
         b: {
             intensity: device?.intensityB ?? 0,
-            limit: Math.min(
-                snapshot.safety.channelLimit,
-                device?.intensityLimitB ?? snapshot.safety.channelLimit,
-            ),
+            limit: device?.intensityLimitB ?? 0,
             status: device?.channelBStatus ?? "disconnected",
         },
     } satisfies HubSnapshot["channels"];

@@ -85,8 +85,8 @@ export interface ChannelSnapshot {
 }
 
 export interface SafetySnapshot {
-    channelLimit: number;
-    maxDurationMinutes: number;
+    connectionTimeoutEnabled: boolean;
+    connectionTimeoutMinutes: number;
     allowAppIntensityControl: boolean;
 }
 
@@ -120,8 +120,8 @@ export interface HubSnapshot {
 export type HubChannel = "a" | "b";
 
 export interface SafetyUpdate {
-    channelLimit: number;
-    maxDurationMinutes: number;
+    connectionTimeoutEnabled: boolean;
+    connectionTimeoutMinutes: number;
     allowAppIntensityControl: boolean;
 }
 

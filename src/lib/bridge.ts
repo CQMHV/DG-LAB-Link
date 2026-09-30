@@ -125,18 +125,18 @@ const createDefaultMockSnapshot = (): HubSnapshot => {
     channels: {
         a: {
             intensity: 5,
-            limit: 80,
+            limit: primaryDevice.intensityLimitA,
             status: "ready",
         },
         b: {
             intensity: 11,
-            limit: 80,
+            limit: primaryDevice.intensityLimitB,
             status: "ready",
         },
     },
     safety: {
-        channelLimit: 80,
-        maxDurationMinutes: 30,
+        connectionTimeoutEnabled: false,
+        connectionTimeoutMinutes: 60,
         allowAppIntensityControl: false,
     },
     logs: [
@@ -355,9 +355,8 @@ export const adjustIntensity = async (
             const deviceLimit = channel === "a"
                 ? device.intensityLimitA
                 : device.intensityLimitB;
-            const limit = Math.min(snapshot.safety.channelLimit, deviceLimit);
-            if (targetIntensity < 0 || targetIntensity > limit) {
-                throw new Error("调整后的强度会超过安全上限或低于 0");
+            if (targetIntensity < 0 || targetIntensity > deviceLimit) {
+                throw new Error("调整后的强度会超过设备上报的通道上限或低于 0");
             }
             return { device, target: targetIntensity };
         });
@@ -410,14 +409,8 @@ export const setSyncAllDevices = async (enabled: boolean): Promise<void> => {
         }
         if (enabled && selected) {
             for (const device of snapshot.devices) {
-                const limitA = Math.min(
-                    snapshot.safety.channelLimit,
-                    device.intensityLimitA,
-                );
-                const limitB = Math.min(
-                    snapshot.safety.channelLimit,
-                    device.intensityLimitB,
-                );
+                const limitA = device.intensityLimitA;
+                const limitB = device.intensityLimitB;
                 if (selected.intensityA > limitA || selected.intensityB > limitB) {
                     throw new Error("当前控制设备的强度超过其他设备的安全上限");
                 }
@@ -838,18 +831,12 @@ export const selectDevice = async (deviceId: string): Promise<void> => {
         snapshot.device = { ...device };
         snapshot.channels.a = {
             intensity: device.intensityA,
-            limit: Math.min(
-                snapshot.safety.channelLimit,
-                device.intensityLimitA,
-            ),
+            limit: device.intensityLimitA,
             status: device.channelAStatus,
         };
         snapshot.channels.b = {
             intensity: device.intensityB,
-            limit: Math.min(
-                snapshot.safety.channelLimit,
-                device.intensityLimitB,
-            ),
+            limit: device.intensityLimitB,
             status: device.channelBStatus,
         };
         prependMockLog(snapshot, "info", `已切换当前控制设备：${device.name}`);
@@ -859,43 +846,24 @@ export const selectDevice = async (deviceId: string): Promise<void> => {
 export const updateSafety = async (update: SafetyUpdate): Promise<void> => {
     if (isTauriRuntime()) {
         await invoke("update_safety", {
-            channelLimit: update.channelLimit,
-            maxDurationMinutes: update.maxDurationMinutes,
+            connectionTimeoutEnabled: update.connectionTimeoutEnabled,
+            connectionTimeoutMinutes: update.connectionTimeoutMinutes,
             allowAppIntensityControl: update.allowAppIntensityControl,
         });
         return;
     }
 
     updateMockSnapshot((snapshot) => {
-        const channelLimit = Math.max(1, Math.min(200, update.channelLimit));
-        const maxDurationMinutes = Math.max(
+        const connectionTimeoutMinutes = Math.max(
             1,
-            Math.min(120, update.maxDurationMinutes),
+            Math.min(1440, update.connectionTimeoutMinutes),
         );
         snapshot.safety = {
             ...snapshot.safety,
-            channelLimit,
-            maxDurationMinutes,
+            connectionTimeoutEnabled: update.connectionTimeoutEnabled,
+            connectionTimeoutMinutes,
             allowAppIntensityControl: update.allowAppIntensityControl,
         };
-        snapshot.channels.a.limit = channelLimit;
-        snapshot.channels.b.limit = channelLimit;
-        snapshot.channels.a.intensity = Math.min(
-            snapshot.channels.a.intensity,
-            channelLimit,
-        );
-        snapshot.channels.b.intensity = Math.min(
-            snapshot.channels.b.intensity,
-            channelLimit,
-        );
-        if (snapshot.device) {
-            snapshot.device.intensityA = snapshot.channels.a.intensity;
-            snapshot.device.intensityB = snapshot.channels.b.intensity;
-        }
-        snapshot.devices.forEach((device) => {
-            device.intensityA = Math.min(device.intensityA, channelLimit);
-            device.intensityB = Math.min(device.intensityB, channelLimit);
-        });
         prependMockLog(snapshot, "info", "安全限制已更新");
     });
 };

@@ -352,24 +352,38 @@ pub async fn set_sync_all_devices(
 }
 
 #[tauri::command]
-pub async fn set_channel_limit(hub: State<'_, HubHandle>, limit: i32) -> Result<(), CommandError> {
-    hub.set_channel_limit(limit).await.map_err(Into::into)
-}
-
-#[tauri::command]
 pub async fn update_safety(
     hub: State<'_, HubHandle>,
-    channel_limit: i32,
-    max_duration_minutes: i32,
+    preferences: State<'_, PreferencesState>,
+    connection_timeout_enabled: bool,
+    connection_timeout_minutes: i32,
     allow_app_intensity_control: bool,
 ) -> Result<(), CommandError> {
+    if !(1..=1440).contains(&connection_timeout_minutes) {
+        return Err(HubError::InvalidConnectionTimeout.into());
+    }
+    let previous = hub.snapshot().safety;
     hub.update_safety(
-        channel_limit,
-        max_duration_minutes,
+        connection_timeout_enabled,
+        connection_timeout_minutes,
         allow_app_intensity_control,
     )
-    .await
-    .map_err(Into::into)
+    .await?;
+    if let Err(error) = preferences.set_safety_settings(
+        connection_timeout_enabled,
+        connection_timeout_minutes as u16,
+        allow_app_intensity_control,
+    ) {
+        let _ = hub
+            .update_safety(
+                previous.connection_timeout_enabled,
+                i32::from(previous.connection_timeout_minutes),
+                previous.allow_app_intensity_control,
+            )
+            .await;
+        return Err(error.into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

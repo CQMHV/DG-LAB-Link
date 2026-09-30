@@ -24,8 +24,7 @@ const MAX_OUTPUT_DEVICES: usize = 32;
 const MAX_PENDING_WAVE_OPERATIONS: usize = 256;
 const WAVE_OPERATION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_LOGS: usize = 100;
-const DEFAULT_CHANNEL_LIMIT: u16 = 80;
-const DEFAULT_MAX_DURATION_MINUTES: u16 = 30;
+const DEFAULT_CONNECTION_TIMEOUT_MINUTES: u16 = 60;
 const RELAY_DISCONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const RELAY_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 const RELAY_RECONNECT_MAX_DELAY_SECONDS: u64 = 30;
@@ -154,9 +153,19 @@ pub struct ChannelsSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SafetySnapshot {
-    pub channel_limit: u16,
-    pub max_duration_minutes: u16,
+    pub connection_timeout_enabled: bool,
+    pub connection_timeout_minutes: u16,
     pub allow_app_intensity_control: bool,
+}
+
+impl Default for SafetySnapshot {
+    fn default() -> Self {
+        Self {
+            connection_timeout_enabled: false,
+            connection_timeout_minutes: DEFAULT_CONNECTION_TIMEOUT_MINUTES,
+            allow_app_intensity_control: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -193,6 +202,7 @@ impl HubSnapshot {
         sources: Vec<SourceSnapshot>,
         custom_waveforms: Vec<CustomWaveformSnapshot>,
         default_source_id: Option<String>,
+        safety: SafetySnapshot,
     ) -> Self {
         Self {
             revision: 0,
@@ -220,20 +230,16 @@ impl HubSnapshot {
             channels: ChannelsSnapshot {
                 a: ChannelSnapshot {
                     intensity: 0,
-                    limit: DEFAULT_CHANNEL_LIMIT,
+                    limit: 0,
                     status: ChannelStatus::Disconnected,
                 },
                 b: ChannelSnapshot {
                     intensity: 0,
-                    limit: DEFAULT_CHANNEL_LIMIT,
+                    limit: 0,
                     status: ChannelStatus::Disconnected,
                 },
             },
-            safety: SafetySnapshot {
-                channel_limit: DEFAULT_CHANNEL_LIMIT,
-                max_duration_minutes: DEFAULT_MAX_DURATION_MINUTES,
-                allow_app_intensity_control: false,
-            },
+            safety,
             logs: Vec::new(),
         }
     }
@@ -263,12 +269,10 @@ pub enum HubError {
     CustomWaveformFrameLimit,
     #[error("强度调整值不能为 0，且必须在 -200..=200 范围内")]
     InvalidDelta,
-    #[error("调整后的强度会超过安全上限或低于 0")]
+    #[error("调整后的强度会超过设备上报的通道上限或低于 0")]
     IntensityLimit,
-    #[error("通道安全上限必须在 1..=200 范围内")]
-    InvalidChannelLimit,
-    #[error("最长输出时间必须在 1..=120 分钟范围内")]
-    InvalidMaxDuration,
+    #[error("连接超时断开时间必须在 1..=1440 分钟范围内")]
+    InvalidConnectionTimeout,
     #[error("实时输出队列繁忙，请稍后重试")]
     QueueBusy,
     #[error("Relay 操作失败：{0}")]
@@ -290,8 +294,7 @@ impl HubError {
             Self::CustomWaveformFrameLimit => "custom_waveform_frame_limit",
             Self::InvalidDelta => "invalid_delta",
             Self::IntensityLimit => "intensity_limit",
-            Self::InvalidChannelLimit => "invalid_channel_limit",
-            Self::InvalidMaxDuration => "invalid_max_duration",
+            Self::InvalidConnectionTimeout => "invalid_connection_timeout",
             Self::QueueBusy => "queue_busy",
             Self::Relay(_) => "relay_error",
         }
@@ -356,13 +359,9 @@ enum HubCommand {
         enabled: bool,
         reply: oneshot::Sender<Result<(), HubError>>,
     },
-    SetChannelLimit {
-        limit: i32,
-        reply: oneshot::Sender<Result<(), HubError>>,
-    },
     UpdateSafety {
-        channel_limit: i32,
-        max_duration_minutes: i32,
+        connection_timeout_enabled: bool,
+        connection_timeout_minutes: i32,
         allow_app_intensity_control: bool,
         reply: oneshot::Sender<Result<(), HubError>>,
     },
@@ -554,26 +553,17 @@ impl HubHandle {
         response.await.map_err(|_| HubError::Stopped)?
     }
 
-    pub async fn set_channel_limit(&self, limit: i32) -> Result<(), HubError> {
-        let (reply, response) = oneshot::channel();
-        self.commands
-            .send(HubCommand::SetChannelLimit { limit, reply })
-            .await
-            .map_err(|_| HubError::Stopped)?;
-        response.await.map_err(|_| HubError::Stopped)?
-    }
-
     pub async fn update_safety(
         &self,
-        channel_limit: i32,
-        max_duration_minutes: i32,
+        connection_timeout_enabled: bool,
+        connection_timeout_minutes: i32,
         allow_app_intensity_control: bool,
     ) -> Result<(), HubError> {
         let (reply, response) = oneshot::channel();
         self.commands
             .send(HubCommand::UpdateSafety {
-                channel_limit,
-                max_duration_minutes,
+                connection_timeout_enabled,
+                connection_timeout_minutes,
                 allow_app_intensity_control,
                 reply,
             })
@@ -710,7 +700,7 @@ pub struct HubRuntime {
     intensity_lock_targets: BTreeMap<DeviceKey, IntensityLockTarget>,
     operation_generation: u64,
     safety_epoch: Arc<AtomicU64>,
-    output_started_at: BTreeMap<DeviceKey, Instant>,
+    connection_started_at: Option<Instant>,
     reconnect_at: Option<Instant>,
     reconnect_attempt: u32,
     auto_reconnect_enabled: bool,
@@ -735,6 +725,7 @@ fn create_hub_with_default_source(
             preset_name: "测试自定义波形".to_owned(),
             frames: vec!["0A0A0A0A64646464".to_owned()],
         }],
+        SafetySnapshot::default(),
     );
     let config = serde_json::to_value(WaveformConfig {
         preset_id: "TEST_SECONDARY".to_owned(),
@@ -767,6 +758,7 @@ pub fn create_hub_with_source_preferences(
     requested_default_source_id: Option<String>,
     selected_waveform: Option<WaveformConfig>,
     custom_waveforms: Vec<WaveformConfig>,
+    safety: SafetySnapshot,
 ) -> (HubHandle, HubRuntime) {
     let registry = builtin_registry();
     let selected_waveform = selected_waveform.filter(|waveform| {
@@ -830,6 +822,7 @@ pub fn create_hub_with_source_preferences(
         vec![source_snapshot],
         custom_waveform_snapshots,
         default_source_id.clone(),
+        safety,
     );
     let (snapshot_sender, snapshot_receiver) = watch::channel(snapshot.clone());
     let (command_sender, command_receiver) = mpsc::channel(HUB_COMMAND_CAPACITY);
@@ -872,7 +865,7 @@ pub fn create_hub_with_source_preferences(
             intensity_lock_targets: BTreeMap::new(),
             operation_generation: 0,
             safety_epoch,
-            output_started_at: BTreeMap::new(),
+            connection_started_at: None,
             reconnect_at: None,
             reconnect_attempt: 0,
             auto_reconnect_enabled: true,
@@ -938,6 +931,7 @@ impl HubRuntime {
                     }
                 }
                 _ = ticker.tick() => {
+                    self.disconnect_if_timed_out().await;
                     self.output_tick().await;
                 }
             }
@@ -951,7 +945,7 @@ impl HubRuntime {
 
         self.snapshot.output.state = OutputState::Stopped;
         self.snapshot.output.last_error = None;
-        self.output_started_at.clear();
+        self.connection_started_at = None;
         let mut shutdown_result = self.send_stop_operations(true).await;
         if let Some(relay) = &self.relay {
             let disconnect_result =
@@ -995,6 +989,63 @@ impl HubRuntime {
         }
     }
 
+    fn connection_timed_out(&self) -> bool {
+        self.snapshot.safety.connection_timeout_enabled
+            && self.connection_started_at.is_some_and(|started_at| {
+                started_at.elapsed()
+                    >= Duration::from_secs(
+                        u64::from(self.snapshot.safety.connection_timeout_minutes) * 60,
+                    )
+            })
+    }
+
+    async fn disconnect_if_timed_out(&mut self) {
+        if self.connection_timed_out() {
+            let _ = self.disconnect_all(true).await;
+        }
+    }
+
+    async fn disconnect_all(&mut self, timed_out: bool) -> Result<(), HubError> {
+        self.disable_auto_reconnect();
+        self.connection_started_at = None;
+        self.snapshot.output.state = OutputState::Idle;
+        let stop_result = self.send_stop_operations(false).await;
+        let disconnect_result = if let Some(relay) = &self.relay {
+            tokio::time::timeout(RELAY_DISCONNECT_TIMEOUT, relay.disconnect())
+                .await
+                .map_err(|_| HubError::Relay("断开 Relay 超时".to_owned()))
+                .and_then(|result| result.map_err(Into::into))
+        } else {
+            Err(HubError::Stopped)
+        };
+        let result = stop_result.and(disconnect_result);
+        if result.is_ok() {
+            self.reset_connection_state(ConnectionState::Disconnected);
+            self.snapshot.output.state = OutputState::Idle;
+            self.log(
+                LogLevel::Warning,
+                if timed_out {
+                    "连接时长已到，所有设备输出与 Relay 连接已断开"
+                } else {
+                    "已断开 DG-LAB Relay"
+                },
+            );
+            self.publish();
+        } else if let Err(error) = &result {
+            self.snapshot.connection.state = ConnectionState::Error;
+            self.snapshot.connection.last_error = Some(error.to_string());
+            self.snapshot.output.state = OutputState::Error;
+            self.snapshot.output.last_error = Some(error.to_string());
+            self.refresh_channel_statuses();
+            self.log(
+                LogLevel::Error,
+                format!("断开 Relay 时安全清理失败：{error}"),
+            );
+            self.publish();
+        }
+        result
+    }
+
     async fn handle_command(&mut self, command: HubCommand) {
         match command {
             HubCommand::Connect(reply) => {
@@ -1010,42 +1061,11 @@ impl HubRuntime {
                 let _ = reply.send(Ok(()));
             }
             HubCommand::Disconnect(reply) => {
-                self.disable_auto_reconnect();
-                self.snapshot.output.state = OutputState::Idle;
-                self.output_started_at.clear();
-                let stop_result = self.send_stop_operations(false).await;
-                let disconnect_result = if let Some(relay) = &self.relay {
-                    tokio::time::timeout(RELAY_DISCONNECT_TIMEOUT, relay.disconnect())
-                        .await
-                        .map_err(|_| HubError::Relay("断开 Relay 超时".to_owned()))
-                        .and_then(|result| result.map_err(Into::into))
-                } else {
-                    Err(HubError::Stopped)
-                };
-                let result = stop_result.and(disconnect_result);
-                if result.is_ok() {
-                    self.reset_connection_state(ConnectionState::Disconnected);
-                    self.snapshot.output.state = OutputState::Idle;
-                    self.log(LogLevel::Warning, "已断开 DG-LAB Relay");
-                    self.publish();
-                } else if let Err(error) = &result {
-                    self.snapshot.connection.state = ConnectionState::Error;
-                    self.snapshot.connection.last_error = Some(error.to_string());
-                    self.snapshot.output.state = OutputState::Error;
-                    self.snapshot.output.last_error = Some(error.to_string());
-                    self.refresh_channel_statuses();
-                    self.log(
-                        LogLevel::Error,
-                        format!("断开 Relay 时安全清理失败：{error}"),
-                    );
-                    self.publish();
-                }
-                let _ = reply.send(result);
+                let _ = reply.send(self.disconnect_all(false).await);
             }
             HubCommand::RefreshPairing(reply) => {
                 self.enable_auto_reconnect();
                 self.snapshot.output.state = OutputState::Idle;
-                self.output_started_at.clear();
                 let result = self.send_stop_operations(false).await;
                 if result.is_ok() {
                     self.begin_connect();
@@ -1129,20 +1149,16 @@ impl HubRuntime {
                 let result = self.set_sync_all_devices(enabled);
                 let _ = reply.send(result);
             }
-            HubCommand::SetChannelLimit { limit, reply } => {
-                let result = self.set_channel_limit(limit).await;
-                let _ = reply.send(result);
-            }
             HubCommand::UpdateSafety {
-                channel_limit,
-                max_duration_minutes,
+                connection_timeout_enabled,
+                connection_timeout_minutes,
                 allow_app_intensity_control,
                 reply,
             } => {
                 let result = self
                     .update_safety(
-                        channel_limit,
-                        max_duration_minutes,
+                        connection_timeout_enabled,
+                        connection_timeout_minutes,
                         allow_app_intensity_control,
                     )
                     .await;
@@ -1154,7 +1170,7 @@ impl HubRuntime {
     async fn handle_safety_command(&mut self, command: HubSafetyCommand) {
         match command {
             HubSafetyCommand::StopOutput { device_id, reply } => {
-                let result = self.stop_device_output(&device_id, false).await;
+                let result = self.stop_device_output(&device_id).await;
                 let _ = reply.send(result);
             }
             HubSafetyCommand::EmergencyStop(reply) => {
@@ -1184,6 +1200,7 @@ impl HubRuntime {
                 self.publish();
             }
             RelayEvent::Connected { .. } => {
+                self.connection_started_at = Some(Instant::now());
                 self.snapshot.connection.state = ConnectionState::Waiting;
                 self.snapshot.connection.last_error = None;
                 self.log(LogLevel::Info, "Relay 已连接，正在等待握手");
@@ -1225,6 +1242,7 @@ impl HubRuntime {
                 self.apply_app_message(&client_id, &data).await;
             }
             RelayEvent::IdleTimeout => {
+                self.connection_started_at = None;
                 self.snapshot.connection.state = ConnectionState::Error;
                 self.snapshot.connection.last_error =
                     Some("Relay 因长时间无 APP 接入而断开".to_owned());
@@ -1517,7 +1535,6 @@ impl HubRuntime {
             .collect::<Vec<_>>();
         for device in disconnected {
             self.output_devices.remove(&device);
-            self.output_started_at.remove(&device);
             self.clear_pending_for_device(&device);
             self.log(
                 LogLevel::Warning,
@@ -1631,19 +1648,13 @@ impl HubRuntime {
         if let Some(device) = &self.snapshot.device {
             self.snapshot.channels.a.intensity = device.intensity_a;
             self.snapshot.channels.b.intensity = device.intensity_b;
-            self.snapshot.channels.a.limit = effective_limit(
-                self.snapshot.safety.channel_limit,
-                selected_device_limit(self.selected_device.as_ref(), &self.devices, Channel::A),
-            );
-            self.snapshot.channels.b.limit = effective_limit(
-                self.snapshot.safety.channel_limit,
-                selected_device_limit(self.selected_device.as_ref(), &self.devices, Channel::B),
-            );
+            self.snapshot.channels.a.limit = device.intensity_limit_a;
+            self.snapshot.channels.b.limit = device.intensity_limit_b;
         } else {
             self.snapshot.channels.a.intensity = 0;
             self.snapshot.channels.b.intensity = 0;
-            self.snapshot.channels.a.limit = self.snapshot.safety.channel_limit;
-            self.snapshot.channels.b.limit = self.snapshot.safety.channel_limit;
+            self.snapshot.channels.a.limit = 0;
+            self.snapshot.channels.b.limit = 0;
         }
         self.refresh_channel_statuses();
     }
@@ -1714,8 +1725,6 @@ impl HubRuntime {
         self.snapshot.output.state = OutputState::Running;
         self.snapshot.output.last_error = None;
         self.output_devices.insert(device.clone());
-        self.output_started_at
-            .insert(device.clone(), Instant::now());
         self.refresh_selected_device_snapshot();
         self.log(
             LogLevel::Info,
@@ -1728,22 +1737,6 @@ impl HubRuntime {
     async fn output_tick(&mut self) {
         if self.snapshot.output.state != OutputState::Running {
             return;
-        }
-        let expired_devices = self.expired_output_devices();
-        for device in expired_devices {
-            let device_id = device.control_id();
-            if let Err(error) = self.stop_device_output(&device_id, true).await {
-                self.snapshot.output.last_error = Some(error.to_string());
-                self.log(
-                    LogLevel::Error,
-                    format!("设备 {device_id} 达到最长输出时间，但清空任务失败：{error}"),
-                );
-            } else {
-                self.log(
-                    LogLevel::Warning,
-                    format!("设备 {device_id} 已达到最长输出时间，波形输出已自动停止"),
-                );
-            }
         }
         if self.output_devices.is_empty() {
             return;
@@ -1882,7 +1875,6 @@ impl HubRuntime {
         let primary_message = message.into();
         self.snapshot.output.state = OutputState::Error;
         self.snapshot.output.last_error = Some(primary_message.clone());
-        self.output_started_at.clear();
         self.refresh_channel_statuses();
         self.log(LogLevel::Error, primary_message.clone());
         self.publish();
@@ -2007,10 +1999,7 @@ impl HubRuntime {
             Channel::A => (snapshot.intensity_a, snapshot.intensity_limit_a),
             Channel::B => (snapshot.intensity_b, snapshot.intensity_limit_b),
         };
-        Some((
-            current,
-            effective_limit(self.snapshot.safety.channel_limit, Some(device_limit)),
-        ))
+        Some((current, device_limit))
     }
 
     fn queue_intensity_adjustment(
@@ -2244,7 +2233,6 @@ impl HubRuntime {
         });
         if !has_all_sources {
             self.output_devices.remove(&device);
-            self.output_started_at.remove(&device);
             if self.snapshot.output.state == OutputState::Running && self.output_devices.is_empty()
             {
                 self.snapshot.output.state = OutputState::Idle;
@@ -2469,80 +2457,25 @@ impl HubRuntime {
         Ok(())
     }
 
-    async fn set_channel_limit(&mut self, limit: i32) -> Result<(), HubError> {
-        if !(1..=200).contains(&limit) {
-            return Err(HubError::InvalidChannelLimit);
-        }
-        let limit = limit as u16;
-        let mut resets = Vec::new();
-        for (device, value) in &self.devices {
-            let Some(snapshot) = device_snapshot_from_value(device, value) else {
-                continue;
-            };
-            let mut reset_requests = Vec::new();
-            let mut reset_channels = Vec::new();
-            for channel in Channel::ALL {
-                let device_limit = match channel {
-                    Channel::A => snapshot.intensity_limit_a,
-                    Channel::B => snapshot.intensity_limit_b,
-                };
-                let channel_limit = effective_limit(limit, Some(device_limit));
-                let current = match channel {
-                    Channel::A => snapshot.intensity_a,
-                    Channel::B => snapshot.intensity_b,
-                };
-                let key = IntensityKey {
-                    device: device.clone(),
-                    channel,
-                };
-                let projected = self
-                    .pending_intensity_operations
-                    .get(&key)
-                    .map_or(current, |pending| current.max(pending.projected));
-                if projected > channel_limit {
-                    reset_requests.push(zero_intensity_request(&device.slot_id, channel));
-                    reset_channels.push(channel);
-                }
-            }
-            if !reset_requests.is_empty() {
-                resets.push((device.clone(), reset_requests, reset_channels));
-            }
-        }
-
-        for (device, requests, channels) in resets {
-            self.send_safety_requests(&device, requests).await?;
-            if let Some(lock) = self.intensity_lock_targets.get_mut(&device) {
-                for channel in channels {
-                    match channel {
-                        Channel::A => lock.a = 0,
-                        Channel::B => lock.b = 0,
-                    }
-                }
-            }
-        }
-
-        self.snapshot.safety.channel_limit = limit;
-        self.refresh_selected_device_snapshot();
-        self.log(LogLevel::Info, format!("通道安全上限已更新为 {limit}"));
-        self.publish();
-        Ok(())
-    }
-
     async fn update_safety(
         &mut self,
-        channel_limit: i32,
-        max_duration_minutes: i32,
+        connection_timeout_enabled: bool,
+        connection_timeout_minutes: i32,
         allow_app_intensity_control: bool,
     ) -> Result<(), HubError> {
-        if !(1..=120).contains(&max_duration_minutes) {
-            return Err(HubError::InvalidMaxDuration);
+        if !(1..=1440).contains(&connection_timeout_minutes) {
+            return Err(HubError::InvalidConnectionTimeout);
         }
-        self.set_channel_limit(channel_limit).await?;
-        self.snapshot.safety.max_duration_minutes = max_duration_minutes as u16;
+        self.snapshot.safety.connection_timeout_enabled = connection_timeout_enabled;
+        self.snapshot.safety.connection_timeout_minutes = connection_timeout_minutes as u16;
         self.set_allow_app_intensity_control(allow_app_intensity_control);
         self.log(
             LogLevel::Info,
-            format!("最长输出时间已更新为 {max_duration_minutes} 分钟"),
+            if connection_timeout_enabled {
+                format!("已启用连接超时自动断开：{connection_timeout_minutes} 分钟")
+            } else {
+                "已关闭连接超时自动断开".to_owned()
+            },
         );
         self.publish();
         Ok(())
@@ -2713,22 +2646,7 @@ impl HubRuntime {
             .collect()
     }
 
-    fn expired_output_devices(&self) -> Vec<DeviceKey> {
-        let limit = Duration::from_secs(u64::from(self.snapshot.safety.max_duration_minutes) * 60);
-        self.output_started_at
-            .iter()
-            .filter(|(device, started_at)| {
-                self.output_devices.contains(*device) && started_at.elapsed() >= limit
-            })
-            .map(|(device, _)| device.clone())
-            .collect()
-    }
-
-    async fn stop_device_output(
-        &mut self,
-        device_id: &str,
-        automatic: bool,
-    ) -> Result<(), HubError> {
+    async fn stop_device_output(&mut self, device_id: &str) -> Result<(), HubError> {
         let device = self
             .devices
             .keys()
@@ -2748,7 +2666,6 @@ impl HubRuntime {
         self.send_safety_requests(&device, stop_operation_requests(&device.slot_id, false))
             .await?;
         self.output_devices.remove(&device);
-        self.output_started_at.remove(&device);
         self.pending_wave_operations
             .retain(|_, pending| pending.device != device);
         if self.output_devices.is_empty() {
@@ -2756,12 +2673,10 @@ impl HubRuntime {
         }
         self.snapshot.output.last_error = None;
         self.refresh_selected_device_snapshot();
-        if !automatic {
-            self.log(
-                LogLevel::Info,
-                format!("设备 {device_id} 的波形输出已停止并清空任务"),
-            );
-        }
+        self.log(
+            LogLevel::Info,
+            format!("设备 {device_id} 的波形输出已停止并清空任务"),
+        );
         self.publish();
         Ok(())
     }
@@ -2775,7 +2690,6 @@ impl HubRuntime {
     ) -> Result<(), HubError> {
         self.snapshot.output.state = success_state;
         self.snapshot.output.last_error = None;
-        self.output_started_at.clear();
         self.refresh_channel_statuses();
         self.publish();
 
@@ -2941,6 +2855,7 @@ impl HubRuntime {
     }
 
     fn reset_connection_state(&mut self, state: ConnectionState) {
+        self.connection_started_at = None;
         self.safety_epoch.fetch_add(1, Ordering::AcqRel);
         self.apps.clear();
         self.devices.clear();
@@ -2952,7 +2867,6 @@ impl HubRuntime {
         self.output_devices.clear();
         self.intensity_lock_targets.clear();
         self.advance_operation_generation();
-        self.output_started_at.clear();
         self.snapshot.connection.state = state;
         self.snapshot.connection.controller_id = None;
         self.snapshot.connection.pairing_url = None;
@@ -3150,13 +3064,13 @@ fn device_snapshot_from_value(key: &DeviceKey, device: &Value) -> Option<DeviceS
             .and_then(|channel| channel.get("intensityMax"))
             .and_then(Value::as_u64)
             .and_then(|value| u16::try_from(value).ok())
-            .unwrap_or(200),
+            .unwrap_or(0),
         intensity_limit_b: slot_state
             .and_then(|state| state.get("channelB"))
             .and_then(|channel| channel.get("intensityMax"))
             .and_then(Value::as_u64)
             .and_then(|value| u16::try_from(value).ok())
-            .unwrap_or(200),
+            .unwrap_or(0),
         source_id_a: None,
         source_id_b: None,
         waveform_id_a: None,
@@ -3233,28 +3147,6 @@ fn running_status(status: ChannelStatus, running: bool) -> ChannelStatus {
     } else {
         status
     }
-}
-
-fn selected_device_limit(
-    selected: Option<&DeviceKey>,
-    devices: &BTreeMap<DeviceKey, Value>,
-    channel: Channel,
-) -> Option<u16> {
-    let device = devices.get(selected?)?;
-    let channel_key = match channel {
-        Channel::A => "channelA",
-        Channel::B => "channelB",
-    };
-    device
-        .get("slotState")?
-        .get(channel_key)?
-        .get("intensityMax")?
-        .as_u64()
-        .and_then(|value| u16::try_from(value).ok())
-}
-
-fn effective_limit(configured: u16, device: Option<u16>) -> u16 {
-    device.map_or(configured, |device| configured.min(device))
 }
 
 fn timestamp_now() -> String {
@@ -4487,19 +4379,99 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lowering_limit_only_commits_after_safety_write_ack() {
+    async fn channel_limits_follow_each_reported_device_channel() {
         let (_hub, mut runtime) = create_hub("wss://example.test/v4".to_owned());
         install_test_device(&mut runtime, "app-1", "slot-a", 90);
+        let device = runtime.selected_device.clone().unwrap();
+        runtime.devices.get_mut(&device).unwrap()["slotState"]["channelA"]["intensityMax"] =
+            Value::from(120);
+        runtime.devices.get_mut(&device).unwrap()["slotState"]["channelB"]["intensityMax"] =
+            Value::from(7);
+        runtime.refresh_selected_device_snapshot();
+        assert_eq!(runtime.snapshot.channels.a.limit, 120);
+        assert_eq!(runtime.snapshot.channels.b.limit, 7);
         let (event_sender, _events) = mpsc::channel(8);
         let (relay, relay_task) = spawn_relay_client(event_sender, 8);
         runtime.relay = Some(relay.clone());
 
-        assert!(matches!(
-            runtime.set_channel_limit(50).await,
-            Err(HubError::Relay(_))
-        ));
-        assert_eq!(runtime.snapshot.safety.channel_limit, DEFAULT_CHANNEL_LIMIT);
-        assert_eq!(runtime.snapshot.channels.a.limit, DEFAULT_CHANNEL_LIMIT);
+        assert_eq!(
+            runtime.adjust_device_intensity(None, Channel::A, 31),
+            Err(HubError::IntensityLimit)
+        );
+        assert_eq!(
+            runtime.adjust_device_intensity(None, Channel::B, 8),
+            Err(HubError::IntensityLimit)
+        );
+        assert_eq!(
+            runtime.adjust_device_intensity(None, Channel::A, 15),
+            Ok(())
+        );
+        assert_eq!(runtime.adjust_device_intensity(None, Channel::B, 7), Ok(()));
+
+        relay.shutdown_now();
+        relay_task.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connection_timeout_counts_from_relay_connection_without_output() {
+        let (_hub, mut runtime) = create_hub("wss://example.test/v4".to_owned());
+        assert!(!runtime.snapshot.safety.connection_timeout_enabled);
+        assert_eq!(runtime.snapshot.safety.connection_timeout_minutes, 60);
+        runtime
+            .handle_relay_event(RelayEvent::Connected {
+                endpoint: "wss://example.test/v4".to_owned(),
+            })
+            .await;
+        assert!(runtime.connection_started_at.is_some());
+        assert!(runtime.output_devices.is_empty());
+        tokio::time::advance(Duration::from_secs(61 * 60)).await;
+        assert!(!runtime.connection_timed_out());
+
+        runtime.update_safety(true, 60, false).await.unwrap();
+        assert!(runtime.connection_timed_out());
+        runtime.update_safety(true, 120, false).await.unwrap();
+        assert!(!runtime.connection_timed_out());
+        runtime.update_safety(false, 60, false).await.unwrap();
+        assert!(!runtime.connection_timed_out());
+
+        runtime
+            .handle_relay_event(RelayEvent::Disconnected {
+                reason: "测试断开".to_owned(),
+                retryable: false,
+            })
+            .await;
+        assert!(runtime.connection_started_at.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connection_timeout_disconnects_relay_without_active_output() {
+        let (_hub, mut runtime) = create_hub("wss://example.test/v4".to_owned());
+        let (event_sender, _events) = mpsc::channel(8);
+        let (relay, relay_task) = spawn_relay_client(event_sender, 8);
+        runtime.relay = Some(relay.clone());
+        runtime
+            .handle_relay_event(RelayEvent::Connected {
+                endpoint: "wss://example.test/v4".to_owned(),
+            })
+            .await;
+        runtime.update_safety(true, 60, false).await.unwrap();
+        tokio::time::advance(Duration::from_secs(61 * 60)).await;
+
+        runtime.disconnect_if_timed_out().await;
+
+        assert_eq!(
+            runtime.snapshot.connection.state,
+            ConnectionState::Disconnected
+        );
+        assert!(runtime.connection_started_at.is_none());
+        assert!(!runtime.auto_reconnect_enabled);
+        assert!(
+            runtime
+                .snapshot
+                .logs
+                .iter()
+                .any(|log| log.message.contains("连接时长已到"))
+        );
 
         relay.shutdown_now();
         relay_task.await.unwrap();

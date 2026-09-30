@@ -16,7 +16,7 @@ use tauri::{
 };
 
 use crate::dglab::client::DEFAULT_RELAY_ENDPOINT;
-use crate::hub::{HubHandle, create_hub_with_source_preferences};
+use crate::hub::{HubHandle, SafetySnapshot, create_hub_with_source_preferences};
 use crate::preferences::PreferencesState;
 
 const AUTOSTART_ARG: &str = "--autostart";
@@ -42,6 +42,11 @@ pub fn run() {
             let default_source_id = preferences.default_source_id();
             let fixed_waveform = preferences.fixed_waveform();
             let custom_waveforms = preferences.custom_waveforms();
+            let (
+                connection_timeout_enabled,
+                connection_timeout_minutes,
+                allow_app_intensity_control,
+            ) = preferences.safety_settings();
             app.manage(preferences);
             create_tray(app)?;
             if start_hidden && let Some(window) = app.get_webview_window("main") {
@@ -53,6 +58,11 @@ pub fn run() {
                 default_source_id,
                 fixed_waveform,
                 custom_waveforms,
+                SafetySnapshot {
+                    connection_timeout_enabled,
+                    connection_timeout_minutes,
+                    allow_app_intensity_control,
+                },
             );
             let mut snapshots = hub.subscribe();
             let app_handle = app.handle().clone();
@@ -93,7 +103,6 @@ pub fn run() {
             commands::reorder_custom_waveforms,
             commands::select_device,
             commands::set_sync_all_devices,
-            commands::set_channel_limit,
             commands::update_safety,
         ])
         .build(tauri::generate_context!())
