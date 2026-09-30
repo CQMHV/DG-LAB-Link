@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -14,6 +14,10 @@ use uuid::Uuid;
 use crate::dglab::client::{RelayClientError, RelayClientHandle, RelayEvent, spawn_relay_client};
 use crate::dglab::v4::pairing_url as build_pairing_url;
 use crate::model::{Channel, WaveFrame};
+use crate::sources::audio::{
+    AudioAction, AudioChannelConfig, AudioEngine, AudioMappingRuntime, AudioSnapshot,
+};
+use crate::sources::touch::{TouchConfig, TouchInput, TouchRuntime};
 use crate::sources::{WaveSource, WaveformConfig, builtin_registry};
 
 const HUB_COMMAND_CAPACITY: usize = 64;
@@ -31,6 +35,34 @@ const RELAY_RECONNECT_MAX_DELAY_SECONDS: u64 = 30;
 const MAX_CUSTOM_WAVEFORMS: usize = 128;
 const MAX_CUSTOM_WAVEFORM_FRAMES: usize = 16_384;
 const FIXED_WAVEFORM_SOURCE_ID: &str = "source-fixed-waveform";
+const TOUCH_SOURCE_ID: &str = "source-touch";
+const AUDIO_SOURCE_ID: &str = "source-audio";
+
+struct TouchInputSlot {
+    latest: TouchInput,
+    transitions: VecDeque<(TouchInput, std::time::Instant)>,
+    pending: bool,
+    received_at: std::time::Instant,
+}
+
+type TouchMailbox = Arc<Mutex<BTreeMap<String, TouchInputSlot>>>;
+const MAX_TOUCH_TRANSITIONS: usize = 8;
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioBindingSnapshot {
+    pub device_id: String,
+    pub channel: Channel,
+    pub config: AudioChannelConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InputModesSnapshot {
+    pub touch_config: TouchConfig,
+    pub audio: AudioSnapshot,
+    pub audio_bindings: Vec<AudioBindingSnapshot>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -190,6 +222,7 @@ pub struct HubSnapshot {
     pub sources: Vec<SourceSnapshot>,
     pub custom_waveforms: Vec<CustomWaveformSnapshot>,
     pub default_source_id: Option<String>,
+    pub input_modes: InputModesSnapshot,
     pub output: OutputSnapshot,
     pub channels: ChannelsSnapshot,
     pub safety: SafetySnapshot,
@@ -222,6 +255,11 @@ impl HubSnapshot {
             sources,
             custom_waveforms,
             default_source_id,
+            input_modes: InputModesSnapshot {
+                touch_config: TouchConfig::default(),
+                audio: AudioSnapshot::default(),
+                audio_bindings: Vec::new(),
+            },
             output: OutputSnapshot {
                 state: OutputState::Idle,
                 frames_sent: 0,
@@ -311,6 +349,20 @@ impl From<RelayClientError> for HubError {
 }
 
 enum HubCommand {
+    SetTouchConfig {
+        config: TouchConfig,
+        reply: oneshot::Sender<Result<(), HubError>>,
+    },
+    SetAudioConfig {
+        device_id: String,
+        channel: Channel,
+        config: AudioChannelConfig,
+        reply: oneshot::Sender<Result<(), HubError>>,
+    },
+    AudioControl {
+        action: AudioAction,
+        reply: oneshot::Sender<Result<(), HubError>>,
+    },
     Connect(oneshot::Sender<Result<(), HubError>>),
     Disconnect(oneshot::Sender<Result<(), HubError>>),
     RefreshPairing(oneshot::Sender<Result<(), HubError>>),
@@ -377,6 +429,7 @@ enum HubSafetyCommand {
 
 #[derive(Clone)]
 pub struct HubHandle {
+    touch_mailbox: TouchMailbox,
     commands: mpsc::Sender<HubCommand>,
     safety_commands: mpsc::Sender<HubSafetyCommand>,
     snapshots: watch::Receiver<HubSnapshot>,
@@ -386,6 +439,127 @@ pub struct HubHandle {
 }
 
 impl HubHandle {
+    pub fn update_touch_input(&self, input: TouchInput) -> Result<(), HubError> {
+        let snapshot = self.snapshots.borrow();
+        let device = snapshot
+            .devices
+            .iter()
+            .find(|device| device.control_id == input.device_id)
+            .ok_or(HubError::DeviceUnavailable)?;
+        if snapshot.output.state != OutputState::Running
+            || !device.output_active
+            || (device.source_id_a.as_deref() != Some(TOUCH_SOURCE_ID)
+                && device.source_id_b.as_deref() != Some(TOUCH_SOURCE_ID))
+        {
+            return Err(HubError::SourceUnavailable("请先开始触控源输出".to_owned()));
+        }
+        if input.owner_id.is_empty()
+            || input.owner_id.len() > 128
+            || input.pointers.len() > 2
+            || input.pointers.iter().any(|pointer| {
+                !pointer.x.is_finite()
+                    || !pointer.y.is_finite()
+                    || !(0.0..=1.0).contains(&pointer.x)
+                    || !(0.0..=1.0).contains(&pointer.y)
+                    || pointer.cell.is_some_and(|cell| cell >= 16)
+            })
+        {
+            return Err(HubError::InvalidSourceConfig(
+                "触控坐标或触点数量无效".to_owned(),
+            ));
+        }
+        let mut mailbox = self
+            .touch_mailbox
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if mailbox.len() >= MAX_OUTPUT_DEVICES && !mailbox.contains_key(&input.device_id) {
+            return Err(HubError::QueueBusy);
+        }
+        let now = std::time::Instant::now();
+        if let Some(slot) = mailbox.get_mut(&input.device_id) {
+            if slot.latest.owner_id == input.owner_id && slot.latest.sequence >= input.sequence {
+                return Ok(());
+            }
+            if slot.latest.owner_id != input.owner_id
+                && !slot.latest.pointers.is_empty()
+                && slot.received_at.elapsed() < crate::sources::touch::TOUCH_INPUT_LEASE
+            {
+                return Err(HubError::SourceUnavailable(
+                    "该设备正在由另一个窗口触控".to_owned(),
+                ));
+            }
+            let transition = slot.latest.owner_id != input.owner_id
+                || slot.latest.pointers.len() != input.pointers.len()
+                || slot
+                    .latest
+                    .pointers
+                    .iter()
+                    .zip(&input.pointers)
+                    .any(|(previous, next)| previous.id != next.id || previous.cell != next.cell);
+            if transition {
+                if slot.transitions.len() >= MAX_TOUCH_TRANSITIONS {
+                    if input.pointers.is_empty() {
+                        slot.transitions.clear();
+                    } else {
+                        return Err(HubError::QueueBusy);
+                    }
+                }
+                slot.transitions.push_back((input.clone(), now));
+            }
+            slot.latest = input;
+            slot.pending = true;
+            slot.received_at = now;
+        } else {
+            mailbox.insert(
+                input.device_id.clone(),
+                TouchInputSlot {
+                    transitions: VecDeque::from([(input.clone(), now)]),
+                    latest: input,
+                    pending: true,
+                    received_at: now,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    pub async fn set_touch_config(&self, config: TouchConfig) -> Result<(), HubError> {
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .send(HubCommand::SetTouchConfig { config, reply })
+            .await
+            .map_err(|_| HubError::Stopped)?;
+        response.await.map_err(|_| HubError::Stopped)?
+    }
+
+    pub async fn set_audio_config(
+        &self,
+        device_id: String,
+        channel: Channel,
+        config: AudioChannelConfig,
+    ) -> Result<(), HubError> {
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .send(HubCommand::SetAudioConfig {
+                device_id,
+                channel,
+                config,
+                reply,
+            })
+            .await
+            .map_err(|_| HubError::Stopped)?;
+        response.await.map_err(|_| HubError::Stopped)?
+    }
+
+    pub async fn audio_control(&self, action: AudioAction) -> Result<(), HubError> {
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .send(HubCommand::AudioControl { action, reply })
+            .await
+            .map_err(|_| HubError::Stopped)?;
+        response.await.map_err(|_| HubError::Stopped)?
+    }
+
     pub fn snapshot(&self) -> HubSnapshot {
         self.snapshots.borrow().clone()
     }
@@ -675,6 +849,13 @@ struct IntensityLockTarget {
 }
 
 pub struct HubRuntime {
+    touch_mailbox: TouchMailbox,
+    touch_config: TouchConfig,
+    touch_runtimes: BTreeMap<DeviceKey, TouchRuntime>,
+    touch_active_channels: BTreeMap<DeviceKey, [bool; 2]>,
+    audio_engine: AudioEngine,
+    audio_features_active: bool,
+    audio_bindings: BTreeMap<SourceBindingKey, AudioMappingRuntime>,
     commands: mpsc::Receiver<HubCommand>,
     safety_commands: mpsc::Receiver<HubSafetyCommand>,
     snapshot_sender: watch::Sender<HubSnapshot>,
@@ -808,6 +989,34 @@ pub fn create_hub_with_source_preferences(
         },
     );
 
+    for (id, kind) in [
+        (TOUCH_SOURCE_ID, "builtin.touch"),
+        (AUDIO_SOURCE_ID, "builtin.audio"),
+    ] {
+        let descriptor = registry
+            .list_descriptors()
+            .iter()
+            .find(|descriptor| descriptor.kind == kind)
+            .unwrap();
+        sources.insert(
+            id.to_owned(),
+            SourceRuntime {
+                snapshot: SourceSnapshot {
+                    id: id.to_owned(),
+                    kind: kind.to_owned(),
+                    name: descriptor.display_name.to_owned(),
+                    enabled: true,
+                    assigned_channel_count: 0,
+                    selected_preset_id: None,
+                    selected_preset_name: None,
+                },
+                source: registry
+                    .build(kind, &registry.default_config(kind).unwrap())
+                    .expect("内置动态源配置必须有效"),
+            },
+        );
+    }
+
     let requested_default_source_id = requested_default_source_id.map(|id| match id.as_str() {
         "source-test-pattern"
         | "source-manual"
@@ -819,7 +1028,7 @@ pub fn create_hub_with_source_preferences(
     let custom_waveform_snapshots = custom_waveform_snapshots(&custom_waveforms);
     let snapshot = HubSnapshot::initial(
         endpoint,
-        vec![source_snapshot],
+        ordered_source_snapshots(&sources),
         custom_waveform_snapshots,
         default_source_id.clone(),
         safety,
@@ -830,8 +1039,10 @@ pub fn create_hub_with_source_preferences(
     let shutdown = CancellationToken::new();
     let safety_epoch = Arc::new(AtomicU64::new(0));
     let (completion_sender, completion_receiver) = watch::channel(None);
+    let touch_mailbox = Arc::new(Mutex::new(BTreeMap::new()));
     (
         HubHandle {
+            touch_mailbox: Arc::clone(&touch_mailbox),
             commands: command_sender,
             safety_commands: safety_sender,
             snapshots: snapshot_receiver,
@@ -840,6 +1051,13 @@ pub fn create_hub_with_source_preferences(
             safety_epoch: Arc::clone(&safety_epoch),
         },
         HubRuntime {
+            touch_mailbox,
+            touch_config: TouchConfig::default(),
+            touch_runtimes: BTreeMap::new(),
+            touch_active_channels: BTreeMap::new(),
+            audio_engine: AudioEngine::new(),
+            audio_features_active: false,
+            audio_bindings: BTreeMap::new(),
             commands: command_receiver,
             safety_commands: safety_receiver,
             snapshot_sender,
@@ -885,6 +1103,22 @@ fn custom_waveform_snapshots(waveforms: &[WaveformConfig]) -> Vec<CustomWaveform
         .collect()
 }
 
+fn ordered_source_snapshots(sources: &BTreeMap<String, SourceRuntime>) -> Vec<SourceSnapshot> {
+    let mut snapshots = sources
+        .values()
+        .map(|source| source.snapshot.clone())
+        .collect::<Vec<_>>();
+    let registry = builtin_registry();
+    snapshots.sort_by_key(|source| {
+        registry
+            .list_descriptors()
+            .iter()
+            .position(|descriptor| descriptor.kind == source.kind)
+            .unwrap_or(usize::MAX)
+    });
+    snapshots
+}
+
 fn build_fixed_waveform_runtime(config: WaveformConfig) -> Result<FixedWaveformRuntime, HubError> {
     let value = serde_json::to_value(&config)
         .map_err(|error| HubError::InvalidSourceConfig(error.to_string()))?;
@@ -895,6 +1129,253 @@ fn build_fixed_waveform_runtime(config: WaveformConfig) -> Result<FixedWaveformR
 }
 
 impl HubRuntime {
+    pub fn set_initial_touch_config(&mut self, config: TouchConfig) -> Result<(), HubError> {
+        TouchRuntime::new(config.clone())
+            .map_err(|error| HubError::InvalidSourceConfig(error.to_string()))?;
+        self.touch_config = config;
+        self.refresh_input_modes();
+        self.publish();
+        Ok(())
+    }
+
+    fn refresh_input_modes(&mut self) {
+        self.snapshot.input_modes = InputModesSnapshot {
+            touch_config: self.touch_config.clone(),
+            audio: self.audio_engine.snapshot(),
+            audio_bindings: self
+                .audio_bindings
+                .iter()
+                .filter(|(binding, _)| self.devices.contains_key(&binding.device))
+                .map(|(binding, runtime)| AudioBindingSnapshot {
+                    device_id: binding.device.control_id(),
+                    channel: binding.channel,
+                    config: runtime.config.clone(),
+                })
+                .collect(),
+        };
+    }
+
+    fn reset_device_inputs(&mut self, device: &DeviceKey) {
+        self.touch_mailbox
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&device.control_id());
+        if let Some(runtime) = self.touch_runtimes.get_mut(device) {
+            runtime.reset();
+        }
+        self.touch_active_channels.remove(device);
+        for (binding, runtime) in &mut self.audio_bindings {
+            if binding.device == *device {
+                runtime.reset();
+            }
+        }
+    }
+
+    fn reset_changed_inputs(&mut self, device: &DeviceKey, channels: &[Channel]) {
+        for channel in channels {
+            if let Some(runtime) = self.touch_runtimes.get_mut(device) {
+                runtime.reset_channel(*channel);
+            }
+            if let Some(active) = self.touch_active_channels.get_mut(device) {
+                active[channel.as_v4() as usize] = false;
+            }
+            if let Some(runtime) = self.audio_bindings.get_mut(&SourceBindingKey {
+                device: device.clone(),
+                channel: *channel,
+            }) {
+                runtime.reset();
+            }
+        }
+    }
+
+    async fn clear_input_channel(&mut self, binding: &SourceBindingKey) -> Result<(), HubError> {
+        if !self.output_devices.contains(&binding.device) {
+            return Ok(());
+        }
+        self.relay
+            .as_ref()
+            .ok_or(HubError::Stopped)?
+            .clear_wave_channel(
+                &binding.device.client_id,
+                &binding.device.slot_id,
+                binding.channel,
+                clear_channel_request(&binding.device.slot_id, binding.channel),
+                self.operation_generation,
+            )
+            .await?;
+        self.pending_wave_operations.retain(|_, pending| {
+            pending.device != binding.device || pending.channel != binding.channel
+        });
+        Ok(())
+    }
+
+    async fn clear_audio_output(&mut self) -> Result<(), HubError> {
+        self.audio_features_active = false;
+        let bindings = self
+            .device_source_bindings
+            .iter()
+            .filter(|(_, source)| source.as_str() == AUDIO_SOURCE_ID)
+            .map(|(binding, _)| binding.clone())
+            .collect::<Vec<_>>();
+        for binding in bindings {
+            self.clear_input_channel(&binding).await?;
+        }
+        for runtime in self.audio_bindings.values_mut() {
+            runtime.reset();
+        }
+        Ok(())
+    }
+
+    async fn set_touch_config(&mut self, config: TouchConfig) -> Result<(), HubError> {
+        TouchRuntime::new(config.clone())
+            .map_err(|error| HubError::InvalidSourceConfig(error.to_string()))?;
+        let bindings = self
+            .device_source_bindings
+            .iter()
+            .filter(|(_, source)| source.as_str() == TOUCH_SOURCE_ID)
+            .map(|(binding, _)| binding.clone())
+            .collect::<Vec<_>>();
+        for binding in bindings {
+            self.clear_input_channel(&binding).await?;
+        }
+        self.touch_config = config;
+        self.touch_runtimes.clear();
+        self.touch_active_channels.clear();
+        self.touch_mailbox
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+        self.refresh_input_modes();
+        self.publish();
+        Ok(())
+    }
+
+    async fn set_audio_config(
+        &mut self,
+        device_id: &str,
+        channel: Channel,
+        config: AudioChannelConfig,
+    ) -> Result<(), HubError> {
+        let runtime = AudioMappingRuntime::new(config)
+            .map_err(|error| HubError::InvalidSourceConfig(error.to_string()))?;
+        let device = self
+            .devices
+            .keys()
+            .find(|device| device.control_id() == device_id)
+            .cloned()
+            .ok_or(HubError::DeviceUnavailable)?;
+        let binding = SourceBindingKey { device, channel };
+        if self
+            .device_source_bindings
+            .get(&binding)
+            .is_some_and(|source| source == AUDIO_SOURCE_ID)
+        {
+            self.clear_input_channel(&binding).await?;
+        }
+        self.audio_bindings.insert(binding, runtime);
+        self.refresh_input_modes();
+        self.publish();
+        Ok(())
+    }
+
+    async fn input_tick(&mut self) {
+        let audio_active = self.audio_engine.latest().active;
+        if self.audio_features_active
+            && !audio_active
+            && let Err(error) = self.clear_audio_output().await
+        {
+            self.fail_output(format!("清理过期音频波形失败：{error}"))
+                .await;
+            return;
+        }
+        self.audio_features_active = audio_active;
+        let inputs = {
+            let mut mailbox = self
+                .touch_mailbox
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let mut inputs = Vec::new();
+            for slot in mailbox.values_mut().filter(|slot| slot.pending) {
+                inputs.extend(slot.transitions.drain(..));
+                if inputs.last().is_none_or(|(previous, _)| {
+                    previous.device_id != slot.latest.device_id
+                        || previous.owner_id != slot.latest.owner_id
+                        || previous.sequence != slot.latest.sequence
+                }) {
+                    inputs.push((slot.latest.clone(), slot.received_at));
+                }
+                slot.pending = false;
+            }
+            inputs
+        };
+        let now = std::time::Instant::now();
+        let mut released = BTreeSet::new();
+        for (input, received_at) in inputs {
+            if now.duration_since(received_at) >= crate::sources::touch::TOUCH_INPUT_LEASE {
+                continue;
+            }
+            let Some(device) = self
+                .output_devices
+                .iter()
+                .find(|device| device.control_id() == input.device_id)
+                .cloned()
+            else {
+                continue;
+            };
+            let runtime = self
+                .touch_runtimes
+                .entry(device.clone())
+                .or_insert_with(|| {
+                    TouchRuntime::new(self.touch_config.clone()).expect("已验证的触控配置")
+                });
+            let previous = runtime.touch_intents(now);
+            // 过期序列和另一个窗口的触点不会抢占持有中的触控会话。
+            let _ = runtime.update(&input, received_at);
+            let current = runtime.touch_intents(now);
+            for (index, channel) in Channel::ALL.into_iter().enumerate() {
+                if previous[index].is_some() && previous[index] != current[index] {
+                    released.insert(SourceBindingKey {
+                        device: device.clone(),
+                        channel,
+                    });
+                }
+            }
+        }
+        let devices = self.touch_runtimes.keys().cloned().collect::<Vec<_>>();
+        for device in devices {
+            let active = self.touch_runtimes[&device].active_touch_channels(now);
+            let previous = self
+                .touch_active_channels
+                .insert(device.clone(), active)
+                .unwrap_or([false; 2]);
+            for (index, channel) in Channel::ALL.into_iter().enumerate() {
+                let binding = SourceBindingKey {
+                    device: device.clone(),
+                    channel,
+                };
+                if previous[index] && !active[index] {
+                    released.insert(binding);
+                }
+            }
+        }
+        for binding in released {
+            if self
+                .device_source_bindings
+                .get(&binding)
+                .is_some_and(|source| source == TOUCH_SOURCE_ID)
+                && let Err(error) = self.clear_input_channel(&binding).await
+            {
+                self.fail_output(format!("清理触控通道失败：{error}")).await;
+                return;
+            }
+        }
+        let previous = self.snapshot.input_modes.clone();
+        self.refresh_input_modes();
+        if self.snapshot.input_modes != previous {
+            self.publish();
+        }
+    }
+
     pub async fn run(mut self) {
         let (event_sender, mut events) = mpsc::channel(RELAY_EVENT_CAPACITY);
         let (relay, mut relay_task) = spawn_relay_client(event_sender, RELAY_COMMAND_CAPACITY);
@@ -932,6 +1413,7 @@ impl HubRuntime {
                 }
                 _ = ticker.tick() => {
                     self.disconnect_if_timed_out().await;
+                    self.input_tick().await;
                     self.output_tick().await;
                 }
             }
@@ -944,6 +1426,7 @@ impl HubRuntime {
         }
 
         self.snapshot.output.state = OutputState::Stopped;
+        self.audio_engine.shutdown();
         self.snapshot.output.last_error = None;
         self.connection_started_at = None;
         let mut shutdown_result = self.send_stop_operations(true).await;
@@ -1048,6 +1531,35 @@ impl HubRuntime {
 
     async fn handle_command(&mut self, command: HubCommand) {
         match command {
+            HubCommand::SetTouchConfig { config, reply } => {
+                let _ = reply.send(self.set_touch_config(config).await);
+            }
+            HubCommand::SetAudioConfig {
+                device_id,
+                channel,
+                config,
+                reply,
+            } => {
+                let _ = reply.send(self.set_audio_config(&device_id, channel, config).await);
+            }
+            HubCommand::AudioControl { action, reply } => {
+                let clear_result = if matches!(
+                    &action,
+                    AudioAction::SaveRecording { .. } | AudioAction::SetPlaybackOptions { .. }
+                ) {
+                    Ok(())
+                } else {
+                    self.clear_audio_output().await
+                };
+                let result = clear_result.and_then(|()| {
+                    self.audio_engine
+                        .control(action)
+                        .map_err(|error| HubError::InvalidSourceConfig(error.to_string()))
+                });
+                self.refresh_input_modes();
+                self.publish();
+                let _ = reply.send(result);
+            }
             HubCommand::Connect(reply) => {
                 self.enable_auto_reconnect();
                 if !matches!(
@@ -1543,8 +2055,25 @@ impl HubRuntime {
         }
         self.intensity_lock_targets
             .retain(|device, _| self.devices.contains_key(device));
+        self.touch_runtimes
+            .retain(|device, _| self.devices.contains_key(device));
+        self.touch_active_channels
+            .retain(|device, _| self.devices.contains_key(device));
+        self.audio_bindings
+            .retain(|binding, _| self.devices.contains_key(&binding.device));
         let connected_devices = self.devices.keys().cloned().collect::<Vec<_>>();
         for device in connected_devices {
+            for channel in Channel::ALL {
+                self.audio_bindings
+                    .entry(SourceBindingKey {
+                        device: device.clone(),
+                        channel,
+                    })
+                    .or_insert_with(|| {
+                        AudioMappingRuntime::new(AudioChannelConfig::default())
+                            .expect("音频默认配置")
+                    });
+            }
             if self.initialized_source_devices.insert(device.clone())
                 && let Some(default_source_id) = &self.default_source_id
             {
@@ -1672,11 +2201,7 @@ impl HubRuntime {
                 .copied()
                 .unwrap_or(0);
         }
-        self.snapshot.sources = self
-            .sources
-            .values()
-            .map(|source| source.snapshot.clone())
-            .collect();
+        self.snapshot.sources = ordered_source_snapshots(&self.sources);
     }
 
     fn refresh_channel_statuses(&mut self) {
@@ -1723,6 +2248,7 @@ impl HubRuntime {
             self.sources.get(source_id).ok_or(HubError::NoSource)?;
         }
         self.snapshot.output.state = OutputState::Running;
+        self.reset_device_inputs(&device);
         self.snapshot.output.last_error = None;
         self.output_devices.insert(device.clone());
         self.refresh_selected_device_snapshot();
@@ -1786,7 +2312,45 @@ impl HubRuntime {
         }
         let mut frames_by_source = BTreeMap::<String, String>::new();
         let mut frames_by_binding = BTreeMap::<SourceBindingKey, String>::new();
+        let audio_features = self.audio_engine.latest();
         for (source_id, bindings) in &bindings_by_source {
+            if source_id == TOUCH_SOURCE_ID {
+                let mut touch_frames = BTreeMap::new();
+                for binding in bindings {
+                    let frames = touch_frames
+                        .entry(binding.device.clone())
+                        .or_insert_with(|| {
+                            self.touch_runtimes
+                                .entry(binding.device.clone())
+                                .or_insert_with(|| {
+                                    TouchRuntime::new(self.touch_config.clone())
+                                        .expect("已验证的触控配置")
+                                })
+                                .next_frames(std::time::Instant::now())
+                        });
+                    frames_by_binding.insert(
+                        binding.clone(),
+                        encode_wave_frame(frames[binding.channel.as_v4() as usize]),
+                    );
+                }
+                continue;
+            }
+            if source_id == AUDIO_SOURCE_ID {
+                for binding in bindings {
+                    let runtime = self
+                        .audio_bindings
+                        .entry(binding.clone())
+                        .or_insert_with(|| {
+                            AudioMappingRuntime::new(AudioChannelConfig::default())
+                                .expect("音频默认配置")
+                        });
+                    frames_by_binding.insert(
+                        binding.clone(),
+                        encode_wave_frame(runtime.next_frame(&audio_features)),
+                    );
+                }
+                continue;
+            }
             if source_id == FIXED_WAVEFORM_SOURCE_ID {
                 for binding in bindings {
                     let Some(waveform) = self.fixed_waveform_bindings.get_mut(binding) else {
@@ -1832,7 +2396,10 @@ impl HubRuntime {
         let mut sent = 0_u64;
         for (source_id, bindings) in bindings_by_source {
             for binding in bindings {
-                let frame_hex = if source_id == FIXED_WAVEFORM_SOURCE_ID {
+                let frame_hex = if matches!(
+                    source_id.as_str(),
+                    FIXED_WAVEFORM_SOURCE_ID | TOUCH_SOURCE_ID | AUDIO_SOURCE_ID
+                ) {
                     frames_by_binding.get(&binding)
                 } else {
                     frames_by_source.get(&source_id)
@@ -1847,7 +2414,22 @@ impl HubRuntime {
                     binding.channel,
                     frame_hex,
                 );
-                match self.send_operation(&binding.device.client_id, request) {
+                let send_result = self
+                    .relay
+                    .as_ref()
+                    .ok_or(HubError::Stopped)
+                    .and_then(|relay| {
+                        relay
+                            .try_send_wave_operation(
+                                &binding.device.client_id,
+                                &binding.device.slot_id,
+                                binding.channel,
+                                request,
+                                self.operation_generation,
+                            )
+                            .map_err(Into::into)
+                    });
+                match send_result {
                     Ok(()) => {
                         self.pending_wave_operations.insert(
                             request_id,
@@ -2102,19 +2684,19 @@ impl HubRuntime {
         if self.snapshot.output.state == OutputState::Running
             && self.output_devices.contains(&device)
         {
-            self.send_safety_requests(
-                &device,
-                changed_channels
-                    .iter()
-                    .map(|channel| clear_channel_request(&device.slot_id, *channel))
-                    .collect(),
-            )
-            .await?;
+            for channel in &changed_channels {
+                self.clear_input_channel(&SourceBindingKey {
+                    device: device.clone(),
+                    channel: *channel,
+                })
+                .await?;
+            }
             self.pending_wave_operations.retain(|_, pending| {
                 pending.device != device || !changed_channels.contains(&pending.channel)
             });
         }
         self.initialized_source_devices.insert(device.clone());
+        self.reset_changed_inputs(&device, &changed_channels);
         for channel in &changed_channels {
             let binding = SourceBindingKey {
                 device: device.clone(),
@@ -2191,20 +2773,20 @@ impl HubRuntime {
             && self.output_devices.contains(&device)
             && !changed_channels.is_empty()
         {
-            self.send_safety_requests(
-                &device,
-                changed_channels
-                    .iter()
-                    .map(|channel| clear_channel_request(&device.slot_id, *channel))
-                    .collect(),
-            )
-            .await?;
+            for channel in &changed_channels {
+                self.clear_input_channel(&SourceBindingKey {
+                    device: device.clone(),
+                    channel: *channel,
+                })
+                .await?;
+            }
             self.pending_wave_operations.retain(|_, pending| {
                 pending.device != device || !changed_channels.contains(&pending.channel)
             });
         }
 
         self.initialized_source_devices.insert(device.clone());
+        self.reset_changed_inputs(&device, &changed_channels);
         for channel in Channel::ALL {
             let binding = SourceBindingKey {
                 device: device.clone(),
@@ -2660,12 +3242,14 @@ impl HubRuntime {
             })
             .ok_or(HubError::DeviceUnavailable)?;
         if !self.output_devices.contains(&device) {
+            self.reset_device_inputs(&device);
             return Ok(());
         }
 
         self.send_safety_requests(&device, stop_operation_requests(&device.slot_id, false))
             .await?;
         self.output_devices.remove(&device);
+        self.reset_device_inputs(&device);
         self.pending_wave_operations
             .retain(|_, pending| pending.device != device);
         if self.output_devices.is_empty() {
@@ -2711,6 +3295,18 @@ impl HubRuntime {
     }
 
     async fn send_stop_operations(&mut self, emergency: bool) -> Result<(), HubError> {
+        self.touch_mailbox
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+        self.touch_runtimes.clear();
+        self.touch_active_channels.clear();
+        for runtime in self.audio_bindings.values_mut() {
+            runtime.reset();
+        }
+        if emergency {
+            let _ = self.audio_engine.control(AudioAction::Stop);
+        }
         let generation = self.advance_operation_generation();
         let devices = if emergency {
             self.devices.keys().cloned().collect::<Vec<_>>()
@@ -2861,6 +3457,14 @@ impl HubRuntime {
         self.devices.clear();
         self.device_source_bindings.clear();
         self.fixed_waveform_bindings.clear();
+        self.touch_runtimes.clear();
+        self.touch_active_channels.clear();
+        self.touch_mailbox
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+        self.audio_bindings.clear();
+        let _ = self.audio_engine.control(AudioAction::Stop);
         self.initialized_source_devices.clear();
         self.source_sync_devices.clear();
         self.selected_device = None;
@@ -2894,6 +3498,7 @@ impl HubRuntime {
     }
 
     fn publish(&mut self) {
+        self.refresh_input_modes();
         self.snapshot.revision = self.snapshot.revision.saturating_add(1);
         let _ = self.snapshot_sender.send(self.snapshot.clone());
     }
@@ -3421,6 +4026,162 @@ mod tests {
             device: device.clone(),
             channel,
         }
+    }
+
+    #[tokio::test]
+    async fn input_sources_register_and_touch_mailbox_keeps_latest_active_device_input() {
+        let (hub, mut runtime) = create_hub("wss://example.test/v4".to_owned());
+        install_test_device(&mut runtime, "app-1", "slot-a", 10);
+        let device = runtime.selected_device.clone().unwrap();
+        runtime
+            .set_device_channel_source(device.control_id(), Channel::A, TOUCH_SOURCE_ID.to_owned())
+            .await
+            .unwrap();
+        let mut input = TouchInput {
+            device_id: device.control_id(),
+            owner_id: "test-window".to_owned(),
+            sequence: 1,
+            pointers: vec![crate::sources::touch::TouchPointer {
+                id: 1,
+                x: 0.5,
+                y: 0.5,
+                cell: None,
+            }],
+        };
+        assert!(matches!(
+            hub.update_touch_input(input.clone()),
+            Err(HubError::SourceUnavailable(_))
+        ));
+        runtime.start_output(&device.control_id()).unwrap();
+        hub.update_touch_input(input.clone()).unwrap();
+        input.sequence = 2;
+        input.pointers[0].x = 0.7;
+        hub.update_touch_input(input.clone()).unwrap();
+        input.sequence = 1;
+        hub.update_touch_input(input).unwrap();
+        assert_eq!(runtime.touch_mailbox.lock().unwrap().len(), 1);
+        runtime.input_tick().await;
+        assert!(runtime.touch_runtimes[&device].has_active_input(std::time::Instant::now()));
+        assert_eq!(runtime.snapshot.device.as_ref().unwrap().intensity_a, 10);
+        assert!(runtime.sources.contains_key(AUDIO_SOURCE_ID));
+        runtime.reset_device_inputs(&device);
+        assert!(!runtime.touch_runtimes[&device].has_active_input(std::time::Instant::now()));
+        assert!(runtime.touch_mailbox.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn audio_mapping_configuration_is_independent_per_device_and_channel() {
+        let (_hub, mut runtime) = create_hub("wss://example.test/v4".to_owned());
+        install_test_device(&mut runtime, "app-1", "slot-a", 10);
+        install_test_device(&mut runtime, "app-2", "slot-b", 20);
+        let device = runtime.selected_device.clone().unwrap();
+        let config = AudioChannelConfig {
+            gain: 7.0,
+            enabled: false,
+            ..AudioChannelConfig::default()
+        };
+        runtime
+            .set_audio_config(&device.control_id(), Channel::A, config.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            runtime.audio_bindings[&source_binding(&device, Channel::A)].config,
+            config
+        );
+        assert_eq!(
+            runtime.audio_bindings[&source_binding(&device, Channel::B)]
+                .config
+                .gain,
+            2.5
+        );
+        assert_eq!(
+            runtime
+                .snapshot
+                .input_modes
+                .audio_bindings
+                .iter()
+                .filter(|binding| binding.config.gain == 7.0)
+                .count(),
+            1
+        );
+        let invalid = AudioChannelConfig {
+            gain: f64::NAN,
+            ..AudioChannelConfig::default()
+        };
+        assert!(
+            runtime
+                .set_audio_config(&device.control_id(), Channel::A, invalid)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            runtime.audio_bindings[&source_binding(&device, Channel::A)].config,
+            config
+        );
+    }
+
+    #[tokio::test]
+    async fn touch_mailbox_preserves_edges_rejects_contenders_and_discards_stale_intent() {
+        let (hub, mut runtime) = create_hub("wss://example.test/v4".to_owned());
+        install_test_device(&mut runtime, "app-1", "slot-a", 10);
+        let device = runtime.selected_device.clone().unwrap();
+        runtime
+            .set_device_channel_source(device.control_id(), Channel::A, TOUCH_SOURCE_ID.to_owned())
+            .await
+            .unwrap();
+        runtime.start_output(&device.control_id()).unwrap();
+        let mut input = TouchInput {
+            device_id: device.control_id(),
+            owner_id: "window-1".to_owned(),
+            sequence: 1,
+            pointers: vec![crate::sources::touch::TouchPointer {
+                id: 1,
+                x: 0.5,
+                y: 0.5,
+                cell: None,
+            }],
+        };
+        hub.update_touch_input(input.clone()).unwrap();
+        let mut contender = input.clone();
+        contender.owner_id = "window-2".to_owned();
+        assert!(matches!(
+            hub.update_touch_input(contender),
+            Err(HubError::SourceUnavailable(_))
+        ));
+        input.sequence = 2;
+        input.pointers[0].x = 0.8;
+        hub.update_touch_input(input.clone()).unwrap();
+        input.sequence = 3;
+        input.pointers.clear();
+        hub.update_touch_input(input.clone()).unwrap();
+        input.sequence = 4;
+        input.pointers.push(crate::sources::touch::TouchPointer {
+            id: 2,
+            x: 0.5,
+            y: 0.5,
+            cell: Some(1),
+        });
+        hub.update_touch_input(input).unwrap();
+        {
+            let mut mailbox = runtime.touch_mailbox.lock().unwrap();
+            let slot = mailbox.get_mut(&device.control_id()).unwrap();
+            assert_eq!(slot.latest.owner_id, "window-1");
+            assert_eq!(
+                slot.transitions
+                    .iter()
+                    .map(|(input, _)| input.sequence)
+                    .collect::<Vec<_>>(),
+                [1, 3, 4]
+            );
+            let expired = std::time::Instant::now() - std::time::Duration::from_secs(2);
+            slot.received_at = expired;
+            for (_, received_at) in &mut slot.transitions {
+                *received_at = expired;
+            }
+        }
+        runtime.input_tick().await;
+        assert!(!runtime.touch_runtimes.contains_key(&device));
+        assert_eq!(runtime.snapshot.output.state, OutputState::Running);
     }
 
     #[tokio::test]

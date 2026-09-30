@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::sources::WaveformConfig;
+use crate::sources::touch::TouchConfig;
 
 const PREFERENCES_FILE_NAME: &str = "preferences.json";
 
@@ -18,7 +19,7 @@ pub struct AppPreferencesSnapshot {
     pub start_minimized: bool,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 struct StoredPreferences {
     close_to_tray: bool,
@@ -30,6 +31,7 @@ struct StoredPreferences {
     #[serde(alias = "manualWaveform", alias = "defaultWaveform")]
     fixed_waveform: Option<WaveformConfig>,
     custom_waveforms: Vec<WaveformConfig>,
+    touch_config: TouchConfig,
     #[serde(skip_serializing)]
     selected_custom_waveform_id: Option<String>,
 }
@@ -45,6 +47,7 @@ impl Default for StoredPreferences {
             default_source_id: None,
             fixed_waveform: Some(WaveformConfig::default()),
             custom_waveforms: Vec::new(),
+            touch_config: TouchConfig::default(),
             selected_custom_waveform_id: None,
         }
     }
@@ -68,6 +71,18 @@ pub struct PreferencesState {
 }
 
 impl PreferencesState {
+    pub fn touch_config(&self) -> TouchConfig {
+        self.stored
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .touch_config
+            .clone()
+    }
+
+    pub fn set_touch_config(&self, config: TouchConfig) -> Result<(), PreferencesError> {
+        self.update(|stored| stored.touch_config = config)
+    }
+
     pub fn load(config_dir: PathBuf) -> Result<Self, PreferencesError> {
         let file_path = config_dir.join(PREFERENCES_FILE_NAME);
         let mut snapshot: StoredPreferences = match fs::read_to_string(&file_path) {
@@ -341,6 +356,26 @@ mod tests {
         assert_eq!(reloaded.fixed_waveform(), Some(custom.clone()));
         assert_eq!(reloaded.custom_waveforms(), vec![custom]);
 
+        fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn touch_configuration_is_persisted_and_old_files_receive_defaults() {
+        let config_dir = temporary_config_dir();
+        let state = PreferencesState::load(config_dir.clone()).unwrap();
+        assert_eq!(state.touch_config(), TouchConfig::default());
+        let config = TouchConfig {
+            swap_axes: true,
+            grid_size: 3,
+            ..TouchConfig::default()
+        };
+        state.set_touch_config(config.clone()).unwrap();
+        assert_eq!(
+            PreferencesState::load(config_dir.clone())
+                .unwrap()
+                .touch_config(),
+            config
+        );
         fs::remove_dir_all(config_dir).unwrap();
     }
 

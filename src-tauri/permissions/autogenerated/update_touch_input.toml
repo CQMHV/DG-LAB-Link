@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-update-touch-input"
+description = "Enables the update_touch_input command without any pre-configured scope."
+commands.allow = ["update_touch_input"]
+
+[[permission]]
+identifier = "deny-update-touch-input"
+description = "Denies the update_touch_input command without any pre-configured scope."
+commands.deny = ["update_touch_input"]

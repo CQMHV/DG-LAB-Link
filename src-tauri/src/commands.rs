@@ -6,6 +6,107 @@ use crate::hub::{HubError, HubHandle, HubSnapshot};
 use crate::model::Channel;
 use crate::preferences::{AppPreferencesSnapshot, PreferencesError, PreferencesState};
 use crate::sources::WaveformConfig;
+use crate::sources::audio::{
+    AUDIO_FILE_EXTENSIONS, AudioAction, AudioChannelConfig, VIDEO_FILE_EXTENSIONS,
+};
+use crate::sources::touch::{TouchConfig, TouchInput};
+
+#[tauri::command]
+pub fn update_touch_input(
+    hub: State<'_, HubHandle>,
+    input: TouchInput,
+) -> Result<(), CommandError> {
+    hub.update_touch_input(input).map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn set_touch_config(
+    hub: State<'_, HubHandle>,
+    preferences: State<'_, PreferencesState>,
+    config: TouchConfig,
+) -> Result<(), CommandError> {
+    let previous = hub.snapshot().input_modes.touch_config;
+    hub.set_touch_config(config.clone()).await?;
+    if let Err(error) = preferences.set_touch_config(config) {
+        let _ = hub.set_touch_config(previous).await;
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_audio_config(
+    hub: State<'_, HubHandle>,
+    device_id: String,
+    channel: Channel,
+    config: AudioChannelConfig,
+) -> Result<(), CommandError> {
+    hub.set_audio_config(device_id, channel, config)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn audio_control(
+    hub: State<'_, HubHandle>,
+    action: AudioAction,
+) -> Result<(), CommandError> {
+    hub.audio_control(action).await.map_err(Into::into)
+}
+
+#[tauri::command]
+pub fn get_custom_waveform(
+    preferences: State<'_, PreferencesState>,
+    preset_id: String,
+) -> Result<WaveformConfig, CommandError> {
+    preferences
+        .custom_waveforms()
+        .into_iter()
+        .find(|config| config.preset_id == preset_id)
+        .ok_or_else(|| HubError::InvalidSourceConfig("自定义波形不存在".to_owned()).into())
+}
+
+#[tauri::command]
+pub async fn choose_audio_file() -> Result<Option<String>, CommandError> {
+    tauri::async_runtime::spawn_blocking(|| {
+        rfd::FileDialog::new()
+            .set_title("选择音频或视频文件")
+            .add_filter(
+                "音频或视频",
+                &AUDIO_FILE_EXTENSIONS
+                    .iter()
+                    .chain(VIDEO_FILE_EXTENSIONS.iter())
+                    .copied()
+                    .collect::<Vec<_>>(),
+            )
+            .add_filter("音频", AUDIO_FILE_EXTENSIONS)
+            .add_filter("视频（使用音轨）", VIDEO_FILE_EXTENSIONS)
+            .pick_file()
+            .map(|path| path.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|error| CommandError {
+        code: "dialog_error",
+        message: error.to_string(),
+    })
+}
+
+#[tauri::command]
+pub async fn choose_recording_destination() -> Result<Option<String>, CommandError> {
+    tauri::async_runtime::spawn_blocking(|| {
+        rfd::FileDialog::new()
+            .set_title("保存录音")
+            .set_file_name("DG-LAB录音.wav")
+            .add_filter("WAV 音频", &["wav"])
+            .save_file()
+            .map(|path| path.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|error| CommandError {
+        code: "dialog_error",
+        message: error.to_string(),
+    })
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

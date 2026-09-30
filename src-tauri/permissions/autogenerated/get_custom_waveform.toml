@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-custom-waveform"
+description = "Enables the get_custom_waveform command without any pre-configured scope."
+commands.allow = ["get_custom_waveform"]
+
+[[permission]]
+identifier = "deny-get-custom-waveform"
+description = "Denies the get_custom_waveform command without any pre-configured scope."
+commands.deny = ["get_custom_waveform"]

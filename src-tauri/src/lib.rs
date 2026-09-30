@@ -42,6 +42,7 @@ pub fn run() {
             let default_source_id = preferences.default_source_id();
             let fixed_waveform = preferences.fixed_waveform();
             let custom_waveforms = preferences.custom_waveforms();
+            let touch_config = preferences.touch_config();
             let (
                 connection_timeout_enabled,
                 connection_timeout_minutes,
@@ -53,7 +54,7 @@ pub fn run() {
                 window.hide()?;
             }
 
-            let (hub, runtime) = create_hub_with_source_preferences(
+            let (hub, mut runtime) = create_hub_with_source_preferences(
                 DEFAULT_RELAY_ENDPOINT.to_owned(),
                 default_source_id,
                 fixed_waveform,
@@ -64,6 +65,9 @@ pub fn run() {
                     allow_app_intensity_control,
                 },
             );
+            if let Err(error) = runtime.set_initial_touch_config(touch_config) {
+                eprintln!("{error}；本次运行使用默认触控配置");
+            }
             let mut snapshots = hub.subscribe();
             let app_handle = app.handle().clone();
 
@@ -86,6 +90,13 @@ pub fn run() {
             commands::set_auto_start,
             commands::set_start_minimized,
             commands::get_hub_snapshot,
+            commands::update_touch_input,
+            commands::set_touch_config,
+            commands::set_audio_config,
+            commands::audio_control,
+            commands::get_custom_waveform,
+            commands::choose_audio_file,
+            commands::choose_recording_destination,
             commands::connect_relay,
             commands::disconnect_relay,
             commands::refresh_pairing,

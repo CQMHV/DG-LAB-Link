@@ -1,5 +1,6 @@
-use std::sync::Arc;
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -13,6 +14,12 @@ use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 use tokio_util::sync::CancellationToken;
 use url::Url;
+
+use crate::model::Channel;
+
+type WaveScope = (String, String, Channel);
+type WaveFloors = Arc<RwLock<BTreeMap<WaveScope, u64>>>;
+const MAX_WAVE_SCOPES: usize = 256;
 
 pub const DEFAULT_RELAY_ENDPOINT: &str = "wss://trex.dungeon-lab.cn/v4";
 
@@ -89,6 +96,7 @@ enum RelayCommand {
         client_id: String,
         data: Value,
         operation_generation: Option<u64>,
+        wave_scope: Option<(WaveScope, u64)>,
         reply: Option<oneshot::Sender<Result<(), RelayClientError>>>,
     },
     SafetyStop {
@@ -105,6 +113,7 @@ pub struct RelayClientHandle {
     safety_commands: mpsc::Sender<RelayCommand>,
     shutdown: CancellationToken,
     operation_floor: Arc<AtomicU64>,
+    wave_floors: WaveFloors,
 }
 
 impl RelayClientHandle {
@@ -140,6 +149,7 @@ impl RelayClientHandle {
                 client_id: client_id.into(),
                 data,
                 operation_generation: None,
+                wave_scope: None,
                 reply: Some(reply),
             })
             .await
@@ -157,6 +167,7 @@ impl RelayClientHandle {
                 client_id: client_id.into(),
                 data,
                 operation_generation: None,
+                wave_scope: None,
                 reply: None,
             })
             .map_err(|error| match error {
@@ -183,6 +194,7 @@ impl RelayClientHandle {
                 client_id: client_id.into(),
                 data,
                 operation_generation: Some(operation_generation),
+                wave_scope: None,
                 reply: None,
             })
             .map_err(|error| match error {
@@ -192,6 +204,61 @@ impl RelayClientHandle {
     }
 
     /// 安全停止使用独立有界队列，并等待所有 clear / 归零帧实际写入 WebSocket。
+    pub fn try_send_wave_operation(
+        &self,
+        client_id: &str,
+        slot_id: &str,
+        channel: Channel,
+        data: Value,
+        operation_generation: u64,
+    ) -> Result<(), RelayClientError> {
+        let scope = (client_id.to_owned(), slot_id.to_owned(), channel);
+        let floor = self
+            .wave_floors
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&scope)
+            .copied()
+            .unwrap_or(0);
+        self.commands
+            .try_send(RelayCommand::SendMessage {
+                client_id: client_id.to_owned(),
+                data,
+                operation_generation: Some(operation_generation),
+                wave_scope: Some((scope, floor)),
+                reply: None,
+            })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => RelayClientError::QueueFull,
+                mpsc::error::TrySendError::Closed(_) => RelayClientError::Stopped,
+            })
+    }
+
+    /// 触控释放只使目标通道的旧波形失效，保留其他通道和强度调整。
+    pub async fn clear_wave_channel(
+        &self,
+        client_id: &str,
+        slot_id: &str,
+        channel: Channel,
+        request: Value,
+        operation_generation: u64,
+    ) -> Result<(), RelayClientError> {
+        {
+            let mut floors = self
+                .wave_floors
+                .write()
+                .unwrap_or_else(|error| error.into_inner());
+            let scope = (client_id.to_owned(), slot_id.to_owned(), channel);
+            if !floors.contains_key(&scope) && floors.len() >= MAX_WAVE_SCOPES {
+                return Err(RelayClientError::QueueFull);
+            }
+            let floor = floors.entry(scope).or_default();
+            *floor = floor.saturating_add(1);
+        }
+        self.safety_stop(client_id, vec![request], operation_generation)
+            .await
+    }
+
     pub async fn safety_stop(
         &self,
         client_id: impl Into<String>,
@@ -223,8 +290,15 @@ impl RelayClientHandle {
     }
 
     pub fn invalidate_operations(&self, operation_generation: u64) {
-        self.operation_floor
+        let previous = self
+            .operation_floor
             .fetch_max(operation_generation, Ordering::AcqRel);
+        if operation_generation > previous {
+            self.wave_floors
+                .write()
+                .unwrap_or_else(|error| error.into_inner())
+                .clear();
+        }
     }
 }
 
@@ -236,11 +310,13 @@ pub fn spawn_relay_client(
     let (safety_sender, safety_receiver) = mpsc::channel(SAFETY_COMMAND_CAPACITY);
     let shutdown = CancellationToken::new();
     let operation_floor = Arc::new(AtomicU64::new(0));
+    let wave_floors = Arc::new(RwLock::new(BTreeMap::new()));
     let handle = RelayClientHandle {
         commands: command_sender,
         safety_commands: safety_sender,
         shutdown: shutdown.clone(),
         operation_floor: Arc::clone(&operation_floor),
+        wave_floors: Arc::clone(&wave_floors),
     };
     let task = tokio::spawn(run_relay_client(
         command_receiver,
@@ -248,6 +324,7 @@ pub fn spawn_relay_client(
         event_sender,
         shutdown,
         operation_floor,
+        wave_floors,
     ));
     (handle, task)
 }
@@ -267,6 +344,7 @@ async fn run_relay_client(
     events: mpsc::Sender<RelayEvent>,
     shutdown: CancellationToken,
     operation_floor: Arc<AtomicU64>,
+    wave_floors: WaveFloors,
 ) {
     let mut pending_connect: Option<(String, oneshot::Sender<Result<(), RelayClientError>>)> = None;
     let mut minimum_operation_generation = 0_u64;
@@ -388,6 +466,7 @@ async fn run_relay_client(
             &shutdown,
             &mut minimum_operation_generation,
             &operation_floor,
+            &wave_floors,
         )
         .await
         {
@@ -400,6 +479,7 @@ async fn run_relay_client(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_session(
     mut socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
     safety_commands: &mut mpsc::Receiver<RelayCommand>,
@@ -408,6 +488,7 @@ async fn run_session(
     shutdown: &CancellationToken,
     minimum_operation_generation: &mut u64,
     operation_floor: &AtomicU64,
+    wave_floors: &WaveFloors,
 ) -> SessionExit {
     let mut disconnect_reason = "Relay 连接已关闭".to_owned();
     let mut retryable = true;
@@ -425,12 +506,17 @@ async fn run_session(
                         client_id,
                         data,
                         operation_generation,
+                        wave_scope,
                         reply,
                     }) => {
                         let current_floor = (*minimum_operation_generation)
                             .max(operation_floor.load(Ordering::Acquire));
                         if operation_generation
                             .is_some_and(|generation| generation < current_floor)
+                            || wave_scope.as_ref().is_some_and(|(scope, generation)| {
+                                *generation < wave_floors.read().unwrap_or_else(|error| error.into_inner())
+                                    .get(scope).copied().unwrap_or(0)
+                            })
                         {
                             if let Some(reply) = reply {
                                 let _ = reply.send(Err(RelayClientError::Transport(
@@ -855,6 +941,61 @@ mod tests {
             )
             .unwrap();
 
+        timeout(Duration::from_secs(2), verification)
+            .await
+            .unwrap()
+            .unwrap();
+        server.await.unwrap();
+        client.shutdown_now();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn touch_release_discards_only_target_channel_waves() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (verified, verification) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            let mut clear_seen = false;
+            let mut other_seen = false;
+            let mut intensity_seen = false;
+            while let Some(Ok(Message::Text(text))) = socket.next().await {
+                let frame: Value = serde_json::from_str(text.as_ref()).unwrap();
+                match frame["data"]["reqId"].as_str() {
+                    Some("clear-a") => clear_seen = true,
+                    Some("old-a") => assert!(!clear_seen, "释放后不能发送目标通道的旧波形"),
+                    Some("other-b") => other_seen = true,
+                    Some("intensity-b") => intensity_seen = true,
+                    Some("new-a") => {
+                        assert!(clear_seen && other_seen && intensity_seen);
+                        verified.send(()).unwrap();
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let (event_sender, _events) = mpsc::channel(16);
+        let (client, task) = spawn_relay_client(event_sender, 8);
+        client.connect(format!("ws://{address}/v4")).await.unwrap();
+        client
+            .try_send_wave_operation("app-1", "slot-a", Channel::A, json!({"reqId":"old-a"}), 0)
+            .unwrap();
+        client
+            .try_send_wave_operation("app-1", "slot-a", Channel::B, json!({"reqId":"other-b"}), 0)
+            .unwrap();
+        client
+            .try_send_operation("app-1", json!({"reqId":"intensity-b"}), 0)
+            .unwrap();
+        client
+            .clear_wave_channel("app-1", "slot-a", Channel::A, json!({"reqId":"clear-a"}), 0)
+            .await
+            .unwrap();
+        client
+            .try_send_wave_operation("app-1", "slot-a", Channel::A, json!({"reqId":"new-a"}), 0)
+            .unwrap();
         timeout(Duration::from_secs(2), verification)
             .await
             .unwrap()
