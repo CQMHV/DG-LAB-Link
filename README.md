@@ -1,14 +1,16 @@
 # DG-LAB Link
 
-可扩展的 DG-LAB 波形连接中枢。桌面端使用 Tauri 2、React 与 TypeScript；Rust 后端连接 DG-LAB Socket V4 Relay，并把编译进应用的波形输入分别路由到 DG-LAB 4 App 的 A、B 通道。
+可扩展的 DG-LAB 波形连接中枢。桌面 GUI、CLI 和本机 MCP 共用一个独立 Rust 核心进程、一条 DG-LAB Socket V4 Relay 连接和相同设备会话。桌面端使用 Tauri 2、React 与 TypeScript；CLI 与核心可独立运行，无需 WebView 或 Node.js。
 
 > 当前为首个可运行版本。自动化测试覆盖协议编码、Hub、安全停止与浏览器交互，但仍需按照真机清单完成手机、蓝牙和设备验证后再用于实际输出。
 
 ## 当前能力
 
+- GUI、`dg-lab-link-cli` 和 Streamable HTTP MCP 使用同一 `ControlService`、Hub、波形库、配置校验和安全停止链路。MCP 仅监听本机，使用随机 Bearer 令牌。
+- GUI 进程、常驻 CLI 与一次性 CLI 持有核心；最后一个持有者退出后安全清理并关闭核心。缩到托盘继续持有，独立设备窗口不增加持有者；MCP 请求本身不持有核心。
 - 对接官方 Socket V4 Relay，生成 DG-LAB 4 App 配对二维码。
 - 同步多个 APP 下的全部设备槽位、强度和通道状态；按设备独立开始和停止输出，同时输出最多 32 台。
-- 可选开启“同步所有设备”，立即按当前控制设备对齐所有在线设备的 A/B 强度，并在后续调整中保持相同目标值；默认关闭。
+- 可选开启“同步所有设备”，立即按显式基准设备（GUI 为当前仪表盘设备）对齐所有在线设备的 A/B 强度，并在后续调整中保持相同目标值；默认关闭。
 - 内置固定波形、触控模式和音频模式三个输入源；通过 `SourceFactory` 编译期注册。
 - 触控模式支持自由坐标面板、八个波形快捷格、2×2 / 3×3 / 4×4 律动网格，A / B / 同步 / 分离 / 交替路由，坐标轴交换、经典曲线、渐变强度和背景波形。鼠标、触屏和笔共用 Pointer Events；松手或触控租期到期会清理目标通道旧波形，基础强度保留。配置保存在本地。
 - 音频模式支持本地音频与视频音轨播放、循环、扬声器开关、实时麦克风、录音回放与 WAV 保存。视频支持 MP4、M4V、MOV、MKV、WebM，自动选择默认的可解码音轨；默认编码不受支持时选择第一条可解码音轨。支持 AAC、MP3、FLAC、ALAC、PCM、Vorbis 等音轨，暂不支持 Opus、AC-3/E-AC-3；无音轨或不支持的编码会显示错误。音量映射相对波形强度，指定频段的频谱峰值映射输出周期；每台设备的 A/B 可独立选择音频声道、增益、固定或自适应阈值、迟滞、频段和映射曲线。录音期间只保存声音，回放时产生波形。导入音轨最多一小时，视频文件上限 2 GB，压缩音频文件上限 200 MB；WAV 允许一小时录音对应的有界 PCM 容量。音频采集、播放、分析在 Rust 工作线程运行。浏览器开发预览只演示界面状态，实际声音功能在桌面端运行。
@@ -34,6 +36,30 @@ npm run dev
 ```powershell
 npm run tauri -- dev
 ```
+
+桌面开发和生产构建会同时构建 core 和 CLI。可执行文件分别为 `dg-lab-link-core`、`dg-lab-link-cli`、`dg-lab-link-gui`；GUI 和 CLI 从自身目录寻找 core。只开发无界面入口时只需 Rust 工具链：
+
+```powershell
+cargo build -p dg-lab-link-core-server -p dg-lab-link-cli
+& .\src-tauri\target\debug\dg-lab-link-cli.exe --help
+```
+
+## CLI 与 MCP
+
+先创建一个后台持有者，再执行跨命令操作；保留返回的 `holderId`，任务结束时只释放自己的持有者：
+
+```powershell
+$cli = ".\src-tauri\target\debug\dg-lab-link-cli.exe"
+$holder = & $cli serve --background --json | ConvertFrom-Json
+& $cli relay connect --json
+& $cli watch
+# Ctrl+C 结束 watch，后台持有者仍保持核心
+& $cli holders release $holder.holderId --json
+```
+
+MCP 作为协议适配模块运行在 `dg-lab-link-core` 进程中，地址默认为 `http://127.0.0.1:17846/mcp`，当前不单独分发 MCP 程序。`mcp config` 显示地址；`mcp config --show-token --json` 显式导出客户端所需的 Authorization 头。AI 使用 MCP 之前同样须有 GUI 或常驻 CLI 持有核心。后台持有者不会跟随外部 AI 客户端自动退出。
+
+完整业务命令、参数文件、AI 客户端连接与生命周期见 [CLI 与 MCP 使用文档](docs/CLI_MCP.md)。
 
 ## 被控端模拟器
 
@@ -70,11 +96,12 @@ npm test
 npm run test:simulator
 npm run build:client
 npm run build:simulator
-cargo test --manifest-path src-tauri/Cargo.toml
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+npm run check:waveforms
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-`npm run build` 是 `build:client` 的别名。
+`npm run build` 是 `build:client` 的别名。`npm run build:headless` 联合构建调试 core 和 CLI，`npm run build:headless:release` 构建生产 core 和 CLI；`build:cli`、`build:cli:release` 分别是上述命令的别名。内置波形提交在 `shared/official-waveforms.json` 中；只有更新波形依赖时才需要运行 `npm run generate:waveforms`，Rust 构建不需要 Node.js。
 
 当前 `bundle.active` 为 `false`，因此以下命令只生成裸可执行文件，不会产出安装包、更新包或签名 bundle：
 
@@ -82,7 +109,11 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 npm run tauri -- build
 ```
 
+产物为 `src-tauri/target/release/dg-lab-link-core.exe`、`dg-lab-link-cli.exe`、`dg-lab-link-gui.exe`；分发时将所需客户端与 core 放在同一目录，并保留许可证和第三方声明。仅使用 GUI 时可分发 core + GUI，仅使用 CLI/MCP 时可分发 core + CLI。
+
 架构边界见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，连接真实设备前请逐项执行 [docs/REAL_DEVICE_CHECKLIST.md](docs/REAL_DEVICE_CHECKLIST.md)。
+
+本次共享核心改造的自动化结果、构建产物与未验证项目见 [CLI/MCP 验证记录](docs/CLI_MCP_TEST_REPORT.md)。
 
 ## 协议说明
 

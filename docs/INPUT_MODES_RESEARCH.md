@@ -137,6 +137,6 @@ Android 当前导入白名单为 MP3、FLAC、WAV、M4A、AAC、OGG；文件上�
 - `static/js/async/6729.370f0f5768.js`：音频映射图、增益、阈值、自适应与观察频段设置。
 - `static/js/async/6859.12e21d1609.js`：本地 / 实时 / 录音入口、文件限制、声道选择与回放。
 
-项目复核入口：`src-tauri/src/sources/{mod,registry,preset}.rs`、`src-tauri/src/model.rs`、`src-tauri/src/hub.rs`、`src/pages/SourcesPage.tsx`、`src/pages/DashboardPage.tsx`、`src/lib/contracts.ts`。
+项目复核入口：`crates/core/src/sources/{mod,registry,preset}.rs`、`crates/core/src/model.rs`、`crates/core/src/hub.rs`、`src/pages/SourcesPage.tsx`、`src/pages/DashboardPage.tsx`、`src/lib/contracts.ts`。
 
 README 与架构文档部分描述已经落后于实现：当前来源只有固定波形，启动输出按指定设备执行。本次没有顺带更新这些旧描述，后续实现应以源码和相应测试为依据。
