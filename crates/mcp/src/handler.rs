@@ -1,7 +1,6 @@
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
-
+use dg_lab_link_core::hub::HubSnapshot;
 use dg_lab_link_core::{ControlCommand, ControlError};
+use dg_lab_link_runtime::{AcceptedCommandEpoch, Client};
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, Implementation, ListResourcesResult,
     ListToolsResult, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse,
@@ -9,39 +8,55 @@ use rmcp::model::{
     ToolAnnotations,
 };
 use rmcp::service::RequestContext;
-use rmcp::transport::streamable_http_server::{
-    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
-};
 use rmcp::{ErrorData, RoleServer, ServerHandler};
 use serde_json::{Value, json};
 
-use crate::MAX_REQUEST_BYTES;
-use crate::server::{CommandEpoch, Shared};
-
-pub(crate) fn mcp_service(
-    state: Arc<Shared>,
-) -> StreamableHttpService<McpServer, LocalSessionManager> {
-    let mut config = StreamableHttpServerConfig::default();
-    config.legacy_session_mode = false;
-    config.json_response = true;
-    config.max_request_body_bytes = MAX_REQUEST_BYTES;
-    config.cancellation_token = state.terminated.clone();
-    // Header authentication and the exact local Host/Origin allowlist are also
-    // enforced before entering the SDK. Stateless HTTP requests are not holders.
-    StreamableHttpService::new(
-        move || {
-            Ok(McpServer {
-                state: state.clone(),
-            })
-        },
-        Arc::new(LocalSessionManager::default()),
-        config,
-    )
-}
+#[derive(Clone, Copy)]
+pub(crate) struct CommandEpoch(pub AcceptedCommandEpoch);
 
 #[derive(Clone)]
 pub(crate) struct McpServer {
-    state: Arc<Shared>,
+    client: Client,
+    transport: TransportKind,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum TransportKind {
+    Http,
+    Stdio,
+}
+
+impl McpServer {
+    pub(crate) fn new(client: Client, transport: TransportKind) -> Self {
+        Self { client, transport }
+    }
+
+    async fn snapshot(&self) -> Result<HubSnapshot, ErrorData> {
+        let value = self
+            .client
+            .call(ControlCommand::GetHubSnapshot)
+            .await
+            .map_err(resource_error)?;
+        serde_json::from_value(value).map_err(|error| {
+            resource_error(ControlError::new(
+                "runtime_protocol_error",
+                error.to_string(),
+            ))
+        })
+    }
+
+    async fn official_waveforms(&self) -> Result<Value, ErrorData> {
+        let value = self
+            .client
+            .call(ControlCommand::ListWaveforms)
+            .await
+            .map_err(resource_error)?;
+        Ok(value["official"].clone())
+    }
+}
+
+fn resource_error(error: ControlError) -> ErrorData {
+    ErrorData::internal_error(error.message.clone(), Some(json!(error)))
 }
 
 fn tools() -> Vec<Tool> {
@@ -61,9 +76,17 @@ fn tools() -> Vec<Tool> {
 
 impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerConfig {
+        let lifecycle = match self.transport {
+            TransportKind::Http => {
+                "HTTP 请求不持续持有核心。先通过 GUI 或 CLI serve --background 建立持有者；任务结束释放自己创建的 CLI holderId。"
+            }
+            TransportKind::Stdio => {
+                "stdio 进程已自动连接或启动核心并持有它。关闭 stdio 会释放本进程的持有者；无需另行启动后台 CLI。"
+            }
+        };
         ServerConfig::new(ServerCapabilities::builder().enable_tools().enable_resources().build())
             .with_server_info(Implementation::new("dg-lab-link", env!("CARGO_PKG_VERSION")))
-            .with_instructions("DG-LAB Link 本机共享核心。先通过 CLI serve --background 建立持有者；MCP 请求不保持核心运行。设备写操作显式提供 deviceId（快照的 controlId），先读取状态和安全设置。触控必须按租期续传；任务结束调用 CLI holders release <id>。写操作超时后先读取状态，不自动重试。GUI、CLI 和 MCP 共享同一设备会话。")
+            .with_instructions(format!("DG-LAB Link 本机共享核心。{lifecycle}设备写操作显式提供 deviceId（快照的 controlId），先读取状态和安全设置。触控必须按租期续传。写操作超时后先读取状态，不自动重试。GUI、CLI 和两种 MCP 接入共享同一设备会话。"))
     }
 
     async fn list_tools(
@@ -108,11 +131,24 @@ impl ServerHandler for McpServer {
         };
         let epoch = context
             .extensions
-            .get::<axum::http::request::Parts>()
-            .and_then(|parts| parts.extensions.get::<CommandEpoch>())
+            .get::<CommandEpoch>()
             .copied()
-            .unwrap_or_else(|| self.state.accept_command(command.is_safety()));
-        let result = match self.state.execute_received(command, epoch).await {
+            .or_else(|| {
+                context
+                    .extensions
+                    .get::<axum::http::request::Parts>()
+                    .and_then(|parts| parts.extensions.get::<CommandEpoch>())
+                    .copied()
+            });
+        let executed = match epoch {
+            Some(epoch) => self.client.call_received(command, epoch.0).await,
+            None if command.is_safety() => self.client.call(command).await,
+            None => Err(ControlError::new(
+                "runtime_protocol_error",
+                "MCP 请求缺少停止代次",
+            )),
+        };
+        let result = match executed {
             Ok(value) => CallToolResult::structured(if value.is_object() {
                 value
             } else {
@@ -150,21 +186,12 @@ impl ServerHandler for McpServer {
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, ErrorData> {
-        if self.state.stopping.load(Ordering::Acquire) {
-            return Err(ErrorData::internal_error(
-                "共享核心正在安全关闭",
-                Some(json!(ControlError::new(
-                    "runtime_stopping",
-                    "共享核心正在安全关闭"
-                ))),
-            ));
-        }
-        let snapshot = self.state.service.snapshot();
+        let snapshot = self.snapshot().await?;
         let value = match request.uri.as_str() {
             "dglab://status" => json!(snapshot),
             "dglab://devices" => json!(snapshot.devices),
             "dglab://sources" => {
-                json!({ "sources": snapshot.sources, "officialWaveforms": dg_lab_link_core::waveforms::official_waveforms(), "customWaveforms": snapshot.custom_waveforms, "defaultSourceId": snapshot.default_source_id })
+                json!({ "sources": snapshot.sources, "officialWaveforms": self.official_waveforms().await?, "customWaveforms": snapshot.custom_waveforms, "defaultSourceId": snapshot.default_source_id })
             }
             "dglab://logs" => json!(snapshot.logs),
             _ => {

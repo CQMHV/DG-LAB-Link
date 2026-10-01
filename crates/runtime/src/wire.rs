@@ -25,12 +25,15 @@ pub struct RuntimeInfo {
 pub(crate) struct Request {
     pub id: u64,
     pub operation: Operation,
+    #[serde(default)]
+    pub command_epoch: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", content = "params", rename_all = "snake_case")]
 pub(crate) enum Operation {
     Hello(HolderInfo),
+    Observe(HolderInfo),
     Call(ControlCommand),
     RuntimeInfo,
     Holders,
@@ -46,14 +49,21 @@ pub(crate) enum Response {
         holder: HolderInfo,
         runtime: RuntimeInfo,
         snapshot: Box<HubSnapshot>,
+        #[serde(rename = "commandEpoch")]
+        command_epoch: u64,
     },
     Result {
         id: u64,
         result: Option<Value>,
         error: Option<ControlError>,
+        #[serde(rename = "commandEpoch")]
+        command_epoch: u64,
     },
     Snapshot {
         snapshot: Box<HubSnapshot>,
+    },
+    CommandEpoch {
+        epoch: u64,
     },
 }
 
@@ -64,11 +74,13 @@ impl Response {
                 id,
                 result: Some(value),
                 error: None,
+                command_epoch: 0,
             },
             Err(error) => Self::Result {
                 id,
                 result: None,
                 error: Some(error),
+                command_epoch: 0,
             },
         }
     }

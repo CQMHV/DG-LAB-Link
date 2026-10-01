@@ -9,7 +9,7 @@ use dg_lab_link_runtime::{config_dir, run_core};
 #[command(
     name = "dg-lab-link-core",
     version,
-    about = "DG-LAB Link 共享核心与本机 MCP 服务"
+    about = "DG-LAB Link 共享业务核心与本机控制接口"
 )]
 struct CoreArgs {
     /// 输出机器可读错误，供 GUI 和 CLI 启动器使用

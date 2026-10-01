@@ -1,11 +1,10 @@
 mod client;
 mod config;
-mod mcp;
 mod server;
 mod wire;
 
-pub use client::{Client, connect_or_spawn, core_executable};
-pub use config::{DEFAULT_PORT, LocalConfig, config_dir};
+pub use client::{AcceptedCommandEpoch, Client, connect_or_spawn, core_executable};
+pub use config::{DEFAULT_MCP_PORT, DEFAULT_PORT, LocalConfig, config_dir};
 pub use server::run_core;
 pub use wire::{HolderInfo, RuntimeInfo};
 

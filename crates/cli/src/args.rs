@@ -272,13 +272,23 @@ pub enum SafetyCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum McpCommand {
-    /// 查看 MCP URL；修改端口须先释放所有持有者；令牌仅在 --show-token 时输出
+    /// 查看 HTTP 或 stdio MCP 连接配置；HTTP 令牌仅在 --show-token 时输出
     Config {
+        #[arg(long, value_enum, default_value = "http")]
+        transport: McpTransport,
+        /// 仅 HTTP：显示本机 Bearer 令牌
         #[arg(long)]
         show_token: bool,
+        /// 仅 HTTP：MCP HTTP 服务停止后修改其监听端口，核心可继续运行
         #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
         port: Option<u16>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum McpTransport {
+    Http,
+    Stdio,
 }
 
 #[derive(Debug, Args)]

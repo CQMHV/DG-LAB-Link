@@ -1,12 +1,11 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use dg_lab_link_core::hub::{ConnectionState, HubSnapshot};
-use dg_lab_link_core::model::Channel;
+use dg_lab_link_core::hub::HubSnapshot;
 use dg_lab_link_core::{ControlCommand, ControlError};
 use dg_lab_link_runtime::{Client, LocalConfig, MAX_REQUEST_BYTES, run_core};
 use futures_util::{SinkExt, StreamExt};
-use serde_json::{Value, json};
+use serde_json::json;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
@@ -55,20 +54,6 @@ impl Core {
             .expect("core terminated")
             .unwrap()
             .unwrap();
-    }
-
-    async fn mcp(&self, body: Value) -> Value {
-        let response = reqwest::Client::new()
-            .post(self.config.mcp_url())
-            .bearer_auth(&self.config.token)
-            .header("Accept", "application/json, text/event-stream")
-            .header("MCP-Protocol-Version", "2025-06-18")
-            .json(&body)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), 200, "{}", response.text().await.unwrap());
-        response.json().await.unwrap()
     }
 }
 
@@ -138,83 +123,119 @@ async fn explicit_release_closes_only_the_named_holder() {
 }
 
 #[tokio::test]
-async fn mcp_negotiates_and_uses_the_same_service_and_error_codes() {
+async fn observers_share_control_and_follow_the_last_holder_without_holding_core() {
     let (core, gui) = Core::start(None).await;
-    let initialized = core.mcp(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
-        "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "runtime-test", "version": "1" }
-    }})).await;
-    assert_eq!(initialized["result"]["protocolVersion"], "2025-06-18");
-    let listed = core
-        .mcp(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}))
-        .await;
-    let tools = listed["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), ControlCommand::descriptors().len());
-    assert!(!tools.iter().any(|tool| tool["name"] == "set_close_to_tray"));
-    let adjust = tools
-        .iter()
-        .find(|tool| tool["name"] == "adjust_intensity")
+    let observer = Client::connect_observer(&core.directory).await.unwrap();
+    assert_eq!(observer.runtime_info().await.unwrap().holder_count, 1);
+    observer
+        .call(ControlCommand::SetDefaultSource {
+            source_id: Some("source-fixed-waveform".to_owned()),
+        })
+        .await
         .unwrap();
-    assert!(
-        adjust["inputSchema"]["required"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("deviceId"))
-    );
-    assert!(adjust["inputSchema"]["properties"]["channel"].is_object());
-    let called = core
-        .mcp(
-            json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
-                "name": "set_default_source", "arguments": {"sourceId": "source-fixed-waveform"}
-            }}),
-        )
-        .await;
-    assert_eq!(called["result"]["isError"], false, "{called}");
-    let snapshot: HubSnapshot =
-        serde_json::from_value(gui.call(ControlCommand::GetHubSnapshot).await.unwrap()).unwrap();
     assert_eq!(
-        snapshot.default_source_id.as_deref(),
-        Some("source-fixed-waveform")
+        gui.call(ControlCommand::GetHubSnapshot).await.unwrap()["defaultSourceId"],
+        "source-fixed-waveform"
     );
-    let params = json!({"deviceId": "missing-device", "channel": "a", "delta": 1});
-    let gui_error = gui
-        .call(ControlCommand::from_call("adjust_intensity", params.clone()).unwrap())
+    observer.release().await.unwrap();
+    assert_eq!(gui.runtime_info().await.unwrap().holder_count, 1);
+    let observer = Client::connect_observer(&core.directory).await.unwrap();
+    let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    LocalConfig::save_mcp_port(&core.directory, port).unwrap();
+    assert_eq!(
+        gui.runtime_info().await.unwrap().mcp_url,
+        format!("http://127.0.0.1:{port}/mcp")
+    );
+    assert_eq!(
+        LocalConfig::load(&core.directory).unwrap().port,
+        core.config.port
+    );
+    gui.release().await.unwrap();
+    timeout(Duration::from_secs(12), observer.closed())
+        .await
+        .unwrap();
+    core.finish().await;
+}
+
+#[tokio::test]
+async fn stops_from_other_clients_invalidate_output_accepted_before_forwarding() {
+    let (core, gui) = Core::start(None).await;
+    let observer = Client::connect_observer(&core.directory).await.unwrap();
+    let cli = Client::connect(&core.directory, "cli", None).await.unwrap();
+    let old_http_command = observer.accept_command(false);
+    let old_gui_command = gui.accept_command(false);
+    cli.call(ControlCommand::EmergencyStop).await.unwrap();
+    for (client, epoch) in [(&observer, old_http_command), (&gui, old_gui_command)] {
+        let error = client
+            .call_received(
+                ControlCommand::StartOutput {
+                    device_id: "missing-device".to_owned(),
+                },
+                epoch,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "queue_busy");
+    }
+    // A response carries the latest core epoch even if its broadcast is pending.
+    observer.runtime_info().await.unwrap();
+    let fresh = observer.accept_command(false);
+    let error = observer
+        .call_received(
+            ControlCommand::StartOutput {
+                device_id: "missing-device".to_owned(),
+            },
+            fresh,
+        )
         .await
         .unwrap_err();
-    let mcp_error = core
-        .mcp(
-            json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {
-                "name": "adjust_intensity", "arguments": params
-            }}),
-        )
-        .await;
-    assert_eq!(mcp_error["result"]["isError"], true);
-    assert_eq!(mcp_error["result"]["structuredContent"], json!(gui_error));
-    let resources = core
-        .mcp(json!({"jsonrpc": "2.0", "id": 5, "method": "resources/list", "params": {}}))
-        .await;
-    assert_eq!(
-        resources["result"]["resources"].as_array().unwrap().len(),
-        4
-    );
-    let status = core.mcp(json!({"jsonrpc": "2.0", "id": 6, "method": "resources/read", "params": {"uri": "dglab://status"}})).await;
-    let resource_snapshot: HubSnapshot =
-        serde_json::from_str(status["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
-    assert_eq!(resource_snapshot, snapshot);
-    assert_eq!(
-        gui.runtime_info().await.unwrap().holder_count,
-        1,
-        "MCP calls are not holders"
-    );
+    assert_eq!(error.code, "not_connected");
+    observer.release().await.unwrap();
+    cli.release().await.unwrap();
     gui.release().await.unwrap();
     core.finish().await;
 }
 
 #[tokio::test]
-async fn rejects_unauthenticated_nonlocal_origin_and_oversized_mcp_requests() {
+async fn oversized_observer_ws_frame_closes_only_that_connection() {
+    let (core, holder) = Core::start(None).await;
+    let mut request = format!("ws://127.0.0.1:{}/control", core.config.port)
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        "Authorization",
+        format!("Bearer {}", core.config.token).parse().unwrap(),
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    socket.send(Message::Text(json!({"id":1,"operation":{"type":"observe","params":{"id":"raw-observer","label":"test","pid":1}}}).to_string().into())).await.unwrap();
+    socket.next().await.unwrap().unwrap();
+    assert_eq!(holder.runtime_info().await.unwrap().holder_count, 1);
+    let _ = socket
+        .send(Message::Text("x".repeat(MAX_REQUEST_BYTES + 1).into()))
+        .await;
+    timeout(Duration::from_secs(3), async {
+        loop {
+            match socket.next().await {
+                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
+                Some(Ok(_)) => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(holder.runtime_info().await.unwrap().holder_count, 1);
+    holder.call(ControlCommand::GetHubSnapshot).await.unwrap();
+    holder.release().await.unwrap();
+    core.finish().await;
+}
+
+#[tokio::test]
+async fn control_endpoint_rejects_bad_auth_origin_host_and_has_no_mcp_route() {
     let (core, holder) = Core::start(None).await;
     let http = reqwest::Client::new();
     assert_eq!(
-        http.post(core.config.mcp_url())
+        http.get(format!("http://127.0.0.1:{}/control", core.config.port))
             .body("{}")
             .send()
             .await
@@ -223,7 +244,7 @@ async fn rejects_unauthenticated_nonlocal_origin_and_oversized_mcp_requests() {
         401
     );
     assert_eq!(
-        http.post(core.config.mcp_url())
+        http.get(format!("http://127.0.0.1:{}/control", core.config.port))
             .bearer_auth(&core.config.token)
             .header("Origin", "https://evil.example")
             .body("{}")
@@ -234,7 +255,7 @@ async fn rejects_unauthenticated_nonlocal_origin_and_oversized_mcp_requests() {
         403
     );
     assert_eq!(
-        http.post(core.config.mcp_url())
+        http.get(format!("http://127.0.0.1:{}/control", core.config.port))
             .bearer_auth(&core.config.token)
             .header("Host", "evil.example")
             .body("{}")
@@ -245,14 +266,14 @@ async fn rejects_unauthenticated_nonlocal_origin_and_oversized_mcp_requests() {
         403
     );
     assert_eq!(
-        http.post(core.config.mcp_url())
+        http.post(format!("http://127.0.0.1:{}/mcp", core.config.port))
             .bearer_auth(&core.config.token)
-            .body("x".repeat(MAX_REQUEST_BYTES + 1))
+            .body("{}")
             .send()
             .await
             .unwrap()
             .status(),
-        413
+        404
     );
     let request = format!("ws://127.0.0.1:{}/control", core.config.port)
         .into_client_request()
@@ -311,210 +332,20 @@ async fn silent_tcp_connections_cannot_monopolize_all_capacity() {
         futures_util::future::join_all((0..127).map(|_| tokio::net::TcpStream::connect(&address)))
             .await;
     assert!(connections.iter().all(Result::is_ok));
-    timeout(Duration::from_secs(8), core.mcp(json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {"name": "emergency_stop", "arguments": {}}}))).await.unwrap();
-    assert_eq!(holder.runtime_info().await.unwrap().holder_count, 1);
-    drop(connections);
-    holder.release().await.unwrap();
-    core.finish().await;
-}
-
-#[tokio::test]
-async fn simulated_relay_is_one_shared_controller_for_gui_cli_and_mcp() {
-    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-        .await
-        .unwrap();
-    let endpoint = format!("ws://{}/v4", listener.local_addr().unwrap());
-    let relay = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
-        socket
-            .send(Message::Text(
-                json!({"type": "hello", "clientId": "shared-controller"})
-                    .to_string()
-                    .into(),
-            ))
-            .await
-            .unwrap();
-        socket
-            .send(Message::Text(
-                json!({"type": "client_attached", "clientId": "app-1"})
-                    .to_string()
-                    .into(),
-            ))
-            .await
-            .unwrap();
-        let mut intensity_a = 5i64;
-        let mut intensity_b = 6i64;
-        let mut deltas = Vec::new();
-        let mut cleared = false;
-        let mut pulse_seen = false;
-        let mut zeroed = std::collections::BTreeSet::new();
-        while let Some(Ok(message)) = socket.next().await {
-            if matches!(message, Message::Close(_)) {
-                break;
-            }
-            let Message::Text(text) = message else {
-                continue;
-            };
-            let frame: Value = serde_json::from_str(&text).unwrap();
-            let request = &frame["data"];
-            let operation = &request["data"];
-            let mut result = Value::Null;
-            if request["m"] == "devices.get" {
-                result = json!({"devices": [{
-                    "id": 0, "slotId": "slot-a", "name": "本机模拟设备", "type": "COYOTE_030",
-                    "props": {"power": 90, "intensityA": intensity_a, "intensityB": intensity_b, "channelAStatus": 2, "channelBStatus": 2},
-                    "slotState": {"channelA": {"intensityMax": 100}, "channelB": {"intensityMax": 100}}
-                }]});
-            }
-            if request["m"] == "device.op" {
-                assert_eq!(frame["clientId"], "app-1");
-                assert_eq!(operation["s"], "slot-a");
-                match operation["t"].as_u64().unwrap() {
-                    0 => pulse_seen = true,
-                    3 => {
-                        assert_eq!(operation["c"], 0);
-                        let delta = operation["v"].as_i64().unwrap();
-                        intensity_a += delta;
-                        deltas.push(delta);
-                    }
-                    7 => {
-                        assert!(cleared, "last-holder cleanup clears before zeroing");
-                        assert_eq!(operation["v"], 0);
-                        let channel = operation["c"].as_u64().unwrap();
-                        zeroed.insert(channel);
-                        if channel == 0 {
-                            intensity_a = 0;
-                        } else {
-                            intensity_b = 0;
-                        }
-                    }
-                    other => panic!("unexpected operation {other}"),
-                }
-            }
-            if request["m"] == "device.op.clear" {
-                cleared = true;
-            }
-            // Shutdown waits for the safety frames to reach the socket, not
-            // for an application RPC reply. The controller may already have
-            // sent Close while this fake application consumes those frames.
-            if !(request["m"] == "device.op" && operation["t"] == 7)
-                && request["m"] != "device.op.clear"
-            {
-                let _ = socket
-                    .send(Message::Text(
-                        json!({"type": "message", "clientId": "app-1", "data": {
-                            "t": "resp", "reqId": request["reqId"], "result": result
-                        }})
-                        .to_string()
-                        .into(),
-                    ))
-                    .await;
-            }
-            if request["m"] == "device.op" && operation["t"] == 3 {
-                socket.send(Message::Text(json!({"type": "message", "clientId": "app-1", "data": {
-                    "t": "ev", "ev": "slots.patch", "slots": [{"slotId": "slot-a", "props": {"intensityA": intensity_a, "intensityB": intensity_b}}]
-                }}).to_string().into())).await.unwrap();
-            }
-        }
-        assert_eq!(deltas, vec![1, 2, 3]);
-        assert!(pulse_seen, "the shared session streamed output");
-        assert!(cleared);
-        assert_eq!(zeroed, std::collections::BTreeSet::from([0, 1]));
-    });
-    let (core, gui) = Core::start(Some(endpoint)).await;
-    let cli = Client::connect(&core.directory, "cli", None).await.unwrap();
-    assert_eq!(
-        gui.snapshot().connection.state,
-        ConnectionState::Disconnected
-    );
-    assert!(gui.snapshot().connection.controller_id.is_none());
-    gui.call(ControlCommand::SetDefaultSource {
-        source_id: Some("source-fixed-waveform".to_owned()),
-    })
-    .await
-    .unwrap();
-    gui.call(ControlCommand::ConnectRelay).await.unwrap();
-    timeout(Duration::from_secs(5), async {
+    let observer = timeout(Duration::from_secs(8), async {
         loop {
-            let snapshot: HubSnapshot =
-                serde_json::from_value(cli.call(ControlCommand::GetHubSnapshot).await.unwrap())
-                    .unwrap();
-            if snapshot.devices.len() == 1 {
-                break;
+            if let Ok(client) = Client::connect_observer(&core.directory).await {
+                break client;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await
     .unwrap();
-    let snapshot: HubSnapshot =
-        serde_json::from_value(cli.call(ControlCommand::GetHubSnapshot).await.unwrap()).unwrap();
-    let id = snapshot.devices[0].control_id.clone();
-    gui.call(ControlCommand::AdjustIntensity {
-        device_id: id.clone(),
-        channel: Channel::A,
-        delta: 1,
-    })
-    .await
-    .unwrap();
-    wait_intensity(&cli, 6).await;
-    cli.call(ControlCommand::AdjustIntensity {
-        device_id: id.clone(),
-        channel: Channel::A,
-        delta: 2,
-    })
-    .await
-    .unwrap();
-    wait_intensity(&gui, 8).await;
-    let adjustment = core.mcp(json!({"jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": {"name": "adjust_intensity", "arguments": {"deviceId": id, "channel": "a", "delta": 3}}})).await;
-    assert_eq!(adjustment["result"]["isError"], false, "{adjustment}");
-    wait_intensity(&gui, 11).await;
-    let gui_state = gui.call(ControlCommand::GetHubSnapshot).await.unwrap();
-    let mcp_state = core.mcp(json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "get_hub_snapshot", "arguments": {}}})).await;
-    assert_eq!(
-        gui_state["connection"]["controllerId"],
-        mcp_state["result"]["structuredContent"]["connection"]["controllerId"]
-    );
-    assert_eq!(
-        gui_state["devices"],
-        mcp_state["result"]["structuredContent"]["devices"]
-    );
-    assert_ne!(
-        gui.snapshot().connection.state,
-        ConnectionState::Disconnected
-    );
-    cli.call(ControlCommand::StartOutput { device_id: id })
-        .await
-        .unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    cli.release().await.unwrap();
-    let running: HubSnapshot =
-        serde_json::from_value(gui.call(ControlCommand::GetHubSnapshot).await.unwrap()).unwrap();
-    assert!(
-        running.devices[0].output_active,
-        "releasing one holder preserves another holder's session"
-    );
-    gui.release().await.unwrap();
+    observer.call(ControlCommand::EmergencyStop).await.unwrap();
+    assert_eq!(holder.runtime_info().await.unwrap().holder_count, 1);
+    drop(connections);
+    observer.release().await.unwrap();
+    holder.release().await.unwrap();
     core.finish().await;
-    timeout(Duration::from_secs(2), relay)
-        .await
-        .unwrap()
-        .unwrap();
-}
-
-async fn wait_intensity(client: &Client, expected: u16) {
-    timeout(Duration::from_secs(2), async {
-        loop {
-            let snapshot: HubSnapshot =
-                serde_json::from_value(client.call(ControlCommand::GetHubSnapshot).await.unwrap())
-                    .unwrap();
-            if snapshot.devices[0].intensity_a == expected {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
 }

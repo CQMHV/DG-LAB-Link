@@ -1,6 +1,6 @@
 [workspace]
-members = ["crates/core", "crates/runtime", "crates/core-server", "crates/cli", "src-tauri"]
-default-members = ["crates/core", "crates/runtime", "crates/core-server", "crates/cli"]
+members = ["crates/core", "crates/runtime", "crates/core-server", "crates/cli", "crates/mcp", "src-tauri"]
+default-members = ["crates/core", "crates/runtime", "crates/core-server", "crates/cli", "crates/mcp"]
 resolver = "3"
 
 [workspace.package]

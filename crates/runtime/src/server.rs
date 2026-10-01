@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use axum::Router;
-use axum::body::{Body, to_bytes};
+use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
 use axum::http::{HeaderMap, Request as HttpRequest, StatusCode};
@@ -17,13 +17,12 @@ use dg_lab_link_core::{ControlCommand, ControlError, ControlService};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, Semaphore, mpsc};
+use tokio::sync::{Mutex, Semaphore, mpsc, watch};
 use tokio::time::{Instant, timeout};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::config::LocalConfig;
-use crate::mcp::mcp_service;
 use crate::wire::{HolderInfo, Operation, Request, Response, RuntimeInfo};
 use crate::{HEARTBEAT_TIMEOUT, MAX_REQUEST_BYTES, REQUEST_TIMEOUT, SOCKET_WRITE_TIMEOUT};
 
@@ -40,6 +39,7 @@ struct Holders {
 pub(crate) struct Shared {
     pub service: ControlService,
     config: LocalConfig,
+    directory: PathBuf,
     instance_id: String,
     holders: Mutex<Holders>,
     pub stopping: AtomicBool,
@@ -48,8 +48,8 @@ pub(crate) struct Shared {
     pub normal_requests: Arc<Semaphore>,
     pub safety_requests: Arc<Semaphore>,
     websocket_clients: Arc<Semaphore>,
-    http_requests: Arc<Semaphore>,
     stop_epoch: AtomicU64,
+    epoch_updates: watch::Sender<u64>,
     enqueue_gate: std::sync::Mutex<()>,
 }
 
@@ -70,10 +70,11 @@ pub(crate) fn may_resume_output(command: &ControlCommand) -> bool {
 }
 
 impl Shared {
-    fn new(service: ControlService, config: LocalConfig) -> Arc<Self> {
+    fn new(service: ControlService, config: LocalConfig, directory: PathBuf) -> Arc<Self> {
         Arc::new(Self {
             service,
             config,
+            directory,
             instance_id: Uuid::new_v4().to_string(),
             holders: Mutex::new(Holders {
                 entries: BTreeMap::new(),
@@ -85,8 +86,8 @@ impl Shared {
             normal_requests: Arc::new(Semaphore::new(32)),
             safety_requests: Arc::new(Semaphore::new(16)),
             websocket_clients: Arc::new(Semaphore::new(32)),
-            http_requests: Arc::new(Semaphore::new(64)),
             stop_epoch: AtomicU64::new(0),
+            epoch_updates: watch::channel(0).0,
             enqueue_gate: std::sync::Mutex::new(()),
         })
     }
@@ -97,7 +98,9 @@ impl Shared {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         CommandEpoch(if safety {
-            self.stop_epoch.fetch_add(1, Ordering::AcqRel) + 1
+            let epoch = self.stop_epoch.fetch_add(1, Ordering::AcqRel) + 1;
+            self.epoch_updates.send_replace(epoch);
+            epoch
         } else {
             self.stop_epoch.load(Ordering::Acquire)
         })
@@ -175,7 +178,8 @@ impl Shared {
             instance_id: self.instance_id.clone(),
             pid: std::process::id(),
             holder_count: self.holders.lock().await.entries.len(),
-            mcp_url: self.config.mcp_url(),
+            mcp_url: LocalConfig::saved_mcp_url(&self.directory)
+                .unwrap_or_else(|_| self.config.mcp_url()),
         }
     }
 
@@ -184,16 +188,7 @@ impl Shared {
         holder: HolderInfo,
         cancelled: CancellationToken,
     ) -> Result<(), ControlError> {
-        if holder.id.len() > 128
-            || holder.id.is_empty()
-            || holder.label.len() > 256
-            || holder.pid == 0
-        {
-            return Err(ControlError::new(
-                "invalid_holder",
-                "持有者 ID、标签或 PID 无效",
-            ));
-        }
+        validate_holder(&holder)?;
         let mut holders = self.holders.lock().await;
         if self.stopping.load(Ordering::Acquire) {
             return Err(ControlError::new(
@@ -241,6 +236,9 @@ pub async fn run_core(
     relay_endpoint: Option<String>,
 ) -> Result<(), ControlError> {
     std::fs::create_dir_all(&directory)?;
+    // Migrate a legacy shared HTTP/control port before acquiring our own core
+    // lock; migration must not disturb an already running legacy process.
+    let mut config = LocalConfig::load(&directory)?;
     let lock = OpenOptions::new()
         .read(true)
         .write(true)
@@ -253,13 +251,13 @@ pub async fn run_core(
             format!("当前配置目录已有共享核心：{error}"),
         )
     })?;
-    let mut config = LocalConfig::load(&directory)?;
     if let Some(port) = port {
         if port == 0 {
             return Err(ControlError::new("invalid_port", "本机端口必须大于零"));
         }
         config.port = port;
     }
+    config.validate()?;
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, config.port))
         .await
         .map_err(|error| {
@@ -273,16 +271,15 @@ pub async fn run_core(
         })?;
     // Persist only after successfully binding; a failed launch does not break clients.
     if port.is_some() {
-        config.save(&directory)?;
+        config = LocalConfig::save_core_port(&directory, config.port)?;
     }
     let endpoint = relay_endpoint
         .unwrap_or_else(|| dg_lab_link_core::dglab::client::DEFAULT_RELAY_ENDPOINT.to_owned());
-    let (service, runtime) = ControlService::create(directory, endpoint)?;
-    let state = Shared::new(service, config);
+    let (service, runtime) = ControlService::create(directory.clone(), endpoint)?;
+    let state = Shared::new(service, config, directory);
     let mut hub_task = tokio::spawn(runtime.run());
     let app = Router::new()
         .route("/control", get(websocket_upgrade))
-        .nest_service("/mcp", mcp_service(state.clone()))
         .layer(middleware::from_fn_with_state(state.clone(), authenticate))
         .with_state(state.clone());
     let terminated = state.terminated.clone();
@@ -360,43 +357,18 @@ async fn authenticate(
     if state.stopping.load(Ordering::Acquire) {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
-    if request.uri().path().starts_with("/mcp") {
-        let (mut parts, body) = request.into_parts();
-        let bytes = match timeout(Duration::from_secs(3), to_bytes(body, MAX_REQUEST_BYTES)).await {
-            Ok(Ok(bytes)) => bytes,
-            Ok(Err(_)) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
-            Err(_) => return StatusCode::REQUEST_TIMEOUT.into_response(),
-        };
-        let safety = serde_json::from_slice::<Value>(&bytes)
-            .ok()
-            .is_some_and(|request| {
-                request["method"] == "tools/call"
-                    && matches!(
-                        request["params"]["name"].as_str(),
-                        Some("emergency_stop" | "stop_output" | "disconnect_relay")
-                    )
-            });
-        parts.extensions.insert(state.accept_command(safety));
-        // Ordinary MCP HTTP load cannot consume the separately reserved stop lane.
-        let _permit = if safety {
-            None
-        } else {
-            match state.http_requests.try_acquire() {
-                Ok(permit) => Some(permit),
-                Err(_) => return StatusCode::TOO_MANY_REQUESTS.into_response(),
-            }
-        };
-        return match timeout(
-            REQUEST_TIMEOUT + Duration::from_secs(1),
-            next.run(HttpRequest::from_parts(parts, Body::from(bytes))),
-        )
-        .await
-        {
-            Ok(response) => response,
-            Err(_) => StatusCode::GATEWAY_TIMEOUT.into_response(),
-        };
-    }
     next.run(request).await
+}
+
+fn validate_holder(holder: &HolderInfo) -> Result<(), ControlError> {
+    if holder.id.len() > 128 || holder.id.is_empty() || holder.label.len() > 256 || holder.pid == 0
+    {
+        return Err(ControlError::new(
+            "invalid_holder",
+            "持有者 ID、标签或 PID 无效",
+        ));
+    }
+    Ok(())
 }
 
 fn valid_headers(headers: &HeaderMap, config: &LocalConfig) -> bool {
@@ -463,15 +435,21 @@ async fn websocket(mut socket: WebSocket, state: Arc<Shared>) {
     let Some(Ok(Message::Text(text))) = hello.ok().flatten() else {
         return;
     };
-    let Ok(Request {
-        id,
-        operation: Operation::Hello(holder),
-    }) = serde_json::from_str::<Request>(&text)
-    else {
+    let Ok(Request { id, operation, .. }) = serde_json::from_str::<Request>(&text) else {
         return;
     };
+    let (holder, holding) = match operation {
+        Operation::Hello(holder) => (holder, true),
+        Operation::Observe(holder) => (holder, false),
+        _ => return,
+    };
     let cancelled = CancellationToken::new();
-    if let Err(error) = state.register(holder.clone(), cancelled.clone()).await {
+    let registration = if holding {
+        state.register(holder.clone(), cancelled.clone()).await
+    } else {
+        validate_holder(&holder)
+    };
+    if let Err(error) = registration {
         let _ = timeout(
             SOCKET_WRITE_TIMEOUT,
             socket.send(Message::Text(
@@ -487,6 +465,7 @@ async fn websocket(mut socket: WebSocket, state: Arc<Shared>) {
         holder: holder.clone(),
         runtime: state.runtime_info().await,
         snapshot: Box::new(state.service.snapshot()),
+        command_epoch: state.stop_epoch.load(Ordering::Acquire),
     };
     if !matches!(
         timeout(
@@ -498,7 +477,9 @@ async fn websocket(mut socket: WebSocket, state: Arc<Shared>) {
         .await,
         Ok(Ok(()))
     ) {
-        let _ = state.release_holder(&holder.id, false).await;
+        if holding {
+            let _ = state.release_holder(&holder.id, false).await;
+        }
         return;
     }
     let (writer, mut reader) = socket.split();
@@ -555,10 +536,14 @@ async fn websocket(mut socket: WebSocket, state: Arc<Shared>) {
                 }
             }
             Operation::Release => {
-                let result = state
-                    .release_holder(&holder.id, false)
-                    .await
-                    .map(|_| Value::Null);
+                let result = if holding {
+                    state
+                        .release_holder(&holder.id, false)
+                        .await
+                        .map(|_| Value::Null)
+                } else {
+                    Ok(Value::Null)
+                };
                 if safety_responses
                     .try_send((Response::result(id, result), true))
                     .is_err()
@@ -567,7 +552,7 @@ async fn websocket(mut socket: WebSocket, state: Arc<Shared>) {
                 }
             }
             Operation::ReleaseHolder { id: target } => {
-                let self_release = target == holder.id;
+                let self_release = holding && target == holder.id;
                 let result = state
                     .release_holder(&target, !self_release)
                     .await
@@ -606,7 +591,7 @@ async fn websocket(mut socket: WebSocket, state: Arc<Shared>) {
                     break;
                 }
             }
-            Operation::Hello(_) => {
+            Operation::Hello(_) | Operation::Observe(_) => {
                 if responses
                     .try_send((
                         Response::result(
@@ -627,6 +612,29 @@ async fn websocket(mut socket: WebSocket, state: Arc<Shared>) {
                     safety_responses.clone()
                 } else {
                     responses.clone()
+                };
+                let epoch = if !safety && may_resume_output(&command) {
+                    let Some(epoch) = request.command_epoch else {
+                        if queue
+                            .try_send((
+                                Response::result(
+                                    id,
+                                    Err(ControlError::new(
+                                        "invalid_request",
+                                        "输出请求缺少核心命令代次",
+                                    )),
+                                ),
+                                false,
+                            ))
+                            .is_err()
+                        {
+                            break;
+                        }
+                        continue;
+                    };
+                    CommandEpoch(epoch)
+                } else {
+                    epoch
                 };
                 let semaphore = if safety {
                     per_client_safety.clone()
@@ -659,7 +667,9 @@ async fn websocket(mut socket: WebSocket, state: Arc<Shared>) {
     }
     cancelled.cancel();
     tasks.abort_all();
-    let _ = state.release_holder(&holder.id, false).await;
+    if holding {
+        let _ = state.release_holder(&holder.id, false).await;
+    }
     let _ = timeout(Duration::from_secs(1), write_task).await;
 }
 
@@ -671,18 +681,27 @@ async fn write_socket(
     cancelled: CancellationToken,
 ) {
     let mut snapshots = state.service.subscribe();
+    let mut epochs = state.epoch_updates.subscribe();
+    epochs.mark_changed();
     loop {
-        let (response, close_after) = tokio::select! {
+        let (mut response, close_after) = tokio::select! {
             biased;
             outgoing = safety_responses.recv() => match outgoing { Some(outgoing) => outgoing, None => break },
             _ = cancelled.cancelled() => break,
             _ = state.terminated.cancelled() => break,
+            result = epochs.changed() => {
+                if result.is_err() { break; }
+                (Response::CommandEpoch { epoch: *epochs.borrow_and_update() }, false)
+            },
             outgoing = responses.recv() => match outgoing { Some(outgoing) => outgoing, None => break },
             result = snapshots.changed() => {
                 if result.is_err() { break; }
                 (Response::Snapshot { snapshot: Box::new(snapshots.borrow_and_update().clone()) }, false)
             },
         };
+        if let Response::Result { command_epoch, .. } = &mut response {
+            *command_epoch = state.stop_epoch.load(Ordering::Acquire);
+        }
         let Ok(text) = serde_json::to_string(&response) else {
             break;
         };
@@ -855,7 +874,11 @@ mod tests {
         let config = LocalConfig::load(&directory).unwrap();
         let (service, runtime) =
             ControlService::create(directory.clone(), "ws://127.0.0.1:1/v4".to_owned()).unwrap();
-        (Shared::new(service, config), runtime, directory)
+        (
+            Shared::new(service, config, directory.clone()),
+            runtime,
+            directory,
+        )
     }
 
     #[tokio::test]

@@ -20,7 +20,8 @@ copyright and permission notice is distributed at `docs/licenses/dg-kit-MIT.txt`
 
 ## Model Context Protocol Rust SDK
 
-The local Streamable HTTP MCP endpoint uses `rmcp`, the official
+The dedicated MCP program's local Streamable HTTP and stdio transports use
+`rmcp`, the official
 [Model Context Protocol Rust SDK](https://github.com/modelcontextprotocol/rust-sdk),
 published as `rmcp` 3.4.0 under the Apache License, Version 2.0. The upstream
 license also retains MIT terms for older contributions awaiting relicensing;
@@ -28,7 +29,7 @@ the complete upstream notice is distributed at `docs/licenses/rmcp-LICENSE.txt`.
 
 ## clap
 
-The CLI and core argument parsers use [clap](https://github.com/clap-rs/clap), dual-licensed
+The CLI, core and MCP argument parsers use [clap](https://github.com/clap-rs/clap), dual-licensed
 under the MIT License or the Apache License, Version 2.0.
 The license texts are distributed at `docs/licenses/clap-MIT.txt` and
 `docs/licenses/clap-APACHE-2.0.txt`.

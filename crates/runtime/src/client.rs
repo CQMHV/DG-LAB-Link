@@ -39,7 +39,15 @@ impl Drop for PendingRequest {
 
 struct ClientRequest {
     request: Request,
-    epoch: u64,
+    epoch: AcceptedCommandEpoch,
+}
+
+/// A transport acceptance token bound to the local queue and the last observed
+/// core stop generation. Preserve it until forwarding the same command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AcceptedCommandEpoch {
+    local: u64,
+    core: u64,
 }
 
 #[derive(Clone)]
@@ -56,6 +64,7 @@ struct ClientInner {
     snapshot: watch::Sender<HubSnapshot>,
     closed: CancellationToken,
     stop_epoch: Arc<AtomicU64>,
+    core_epoch: Arc<AtomicU64>,
 }
 
 impl Drop for ClientInner {
@@ -71,6 +80,21 @@ impl Client {
         directory: &Path,
         label: &str,
         holder_id: Option<&str>,
+    ) -> Result<Self, ControlError> {
+        Self::connect_mode(directory, label, holder_id, true).await
+    }
+
+    /// Connect without holding the core alive. HTTP MCP uses one observer
+    /// connection and terminates when the existing GUI/CLI holders leave.
+    pub async fn connect_observer(directory: &Path) -> Result<Self, ControlError> {
+        Self::connect_mode(directory, "MCP HTTP", None, false).await
+    }
+
+    async fn connect_mode(
+        directory: &Path,
+        label: &str,
+        holder_id: Option<&str>,
+        holding: bool,
     ) -> Result<Self, ControlError> {
         let config = LocalConfig::load(directory)?;
         let mut request = format!("ws://127.0.0.1:{}/control", config.port)
@@ -118,7 +142,12 @@ impl Client {
         };
         let hello = Request {
             id: 1,
-            operation: Operation::Hello(holder),
+            operation: if holding {
+                Operation::Hello(holder)
+            } else {
+                Operation::Observe(holder)
+            },
+            command_epoch: None,
         };
         socket
             .send(Message::Text(
@@ -133,28 +162,33 @@ impl Client {
             .map_err(|_| unavailable())?
             .ok_or_else(unavailable)?
             .map_err(|_| unavailable())?;
-        let (holder, snapshot) = match serde_json::from_slice::<Response>(&first.into_data())
-            .map_err(invalid_response)?
-        {
-            Response::Hello {
-                holder, snapshot, ..
-            } => (holder, *snapshot),
-            Response::Result {
-                error: Some(error), ..
-            } => return Err(error),
-            _ => {
-                return Err(ControlError::new(
-                    "runtime_protocol_error",
-                    "共享核心未返回持有者握手",
-                ));
-            }
-        };
+        let (holder, snapshot, core_epoch) =
+            match serde_json::from_slice::<Response>(&first.into_data())
+                .map_err(invalid_response)?
+            {
+                Response::Hello {
+                    holder,
+                    snapshot,
+                    command_epoch,
+                    ..
+                } => (holder, *snapshot, command_epoch),
+                Response::Result {
+                    error: Some(error), ..
+                } => return Err(error),
+                _ => {
+                    return Err(ControlError::new(
+                        "runtime_protocol_error",
+                        "共享核心未返回持有者握手",
+                    ));
+                }
+            };
         let (requests, mut requests_rx) = mpsc::channel::<ClientRequest>(32);
         let (safety_requests, mut safety_rx) = mpsc::channel::<ClientRequest>(8);
         let (snapshot, _) = watch::channel(snapshot);
         let pending: Pending = Arc::new(std::sync::Mutex::new(BTreeMap::new()));
         let closed = CancellationToken::new();
         let stop_epoch = Arc::new(AtomicU64::new(0));
+        let core_epoch = Arc::new(AtomicU64::new(core_epoch));
         let inner = Arc::new(ClientInner {
             holder_id: holder.id,
             requests,
@@ -164,6 +198,7 @@ impl Client {
             snapshot: snapshot.clone(),
             closed: closed.clone(),
             stop_epoch: stop_epoch.clone(),
+            core_epoch: core_epoch.clone(),
         });
         let (mut writer, mut reader) = socket.split();
         let write_closed = closed.clone();
@@ -176,11 +211,14 @@ impl Client {
                     biased;
                     _ = write_closed.cancelled() => break,
                     request = safety_rx.recv() => match request { Some(request) => request, None => break },
-                    _ = heartbeat.tick() => ClientRequest { request: Request { id: 0, operation: Operation::Heartbeat }, epoch: stop_epoch.load(Ordering::Acquire) },
+                    _ = heartbeat.tick() => ClientRequest {
+                        request: Request { id: 0, operation: Operation::Heartbeat, command_epoch: None },
+                        epoch: AcceptedCommandEpoch { local: stop_epoch.load(Ordering::Acquire), core: 0 },
+                    },
                     request = requests_rx.recv() => match request { Some(request) => request, None => break },
                 };
                 if matches!(&request.request.operation, Operation::Call(command) if crate::server::may_resume_output(command))
-                    && request.epoch != stop_epoch.load(Ordering::Acquire)
+                    && request.epoch.local != stop_epoch.load(Ordering::Acquire)
                 {
                     if let Some(sender) = write_pending
                         .lock()
@@ -230,10 +268,19 @@ impl Client {
                     break;
                 };
                 match response {
+                    Response::CommandEpoch { epoch } => {
+                        core_epoch.fetch_max(epoch, Ordering::AcqRel);
+                    }
                     Response::Snapshot { snapshot: update } => {
                         snapshot.send_replace(*update);
                     }
-                    Response::Result { id, result, error } if id != 0 => {
+                    Response::Result {
+                        id,
+                        result,
+                        error,
+                        command_epoch,
+                    } => {
+                        core_epoch.fetch_max(command_epoch, Ordering::AcqRel);
                         if let Some(sender) = pending
                             .lock()
                             .unwrap_or_else(|error| error.into_inner())
@@ -288,6 +335,32 @@ impl Client {
         self.request(Operation::Call(command), safety).await
     }
 
+    /// Capture local and core stop epochs before a transport schedules its
+    /// handler. Stops from any connected entry point invalidate older output.
+    pub fn accept_command(&self, safety: bool) -> AcceptedCommandEpoch {
+        let local = if safety {
+            self.inner.stop_epoch.fetch_add(1, Ordering::AcqRel) + 1
+        } else {
+            self.inner.stop_epoch.load(Ordering::Acquire)
+        };
+        AcceptedCommandEpoch {
+            local,
+            core: self.inner.core_epoch.load(Ordering::Acquire),
+        }
+    }
+
+    /// Forward a previously accepted command without changing its captured
+    /// epoch. Callers must obtain the epoch from this same client's accept_command.
+    pub async fn call_received(
+        &self,
+        command: ControlCommand,
+        epoch: AcceptedCommandEpoch,
+    ) -> Result<Value, ControlError> {
+        let safety = command.is_safety();
+        self.request_with_epoch(Operation::Call(command), safety, Some(epoch))
+            .await
+    }
+
     pub fn snapshot(&self) -> HubSnapshot {
         self.inner.snapshot.borrow().clone()
     }
@@ -330,17 +403,25 @@ impl Client {
     }
 
     async fn request(&self, operation: Operation, safety: bool) -> Result<Value, ControlError> {
+        self.request_with_epoch(operation, safety, None).await
+    }
+
+    async fn request_with_epoch(
+        &self,
+        operation: Operation,
+        safety: bool,
+        received_epoch: Option<AcceptedCommandEpoch>,
+    ) -> Result<Value, ControlError> {
         if self.inner.closed.is_cancelled() {
             return Err(unavailable());
         }
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
-        let epoch = if matches!(&operation, Operation::Call(command) if command.is_safety())
-            || matches!(&operation, Operation::Release)
-        {
-            self.inner.stop_epoch.fetch_add(1, Ordering::AcqRel) + 1
-        } else {
-            self.inner.stop_epoch.load(Ordering::Acquire)
-        };
+        let epoch = received_epoch.unwrap_or_else(|| {
+            self.accept_command(
+                matches!(&operation, Operation::Call(command) if command.is_safety())
+                    || matches!(&operation, Operation::Release),
+            )
+        });
         let (sender, receiver) = oneshot::channel();
         {
             let mut pending = self
@@ -362,7 +443,11 @@ impl Client {
         } else {
             &self.inner.requests
         };
-        let request = Request { id, operation };
+        let request = Request {
+            id,
+            operation,
+            command_epoch: Some(epoch.core),
+        };
         let size = serde_json::to_vec(&request)
             .map_err(invalid_response)?
             .len();
@@ -539,6 +624,7 @@ mod tests {
                 snapshot,
                 closed: CancellationToken::new(),
                 stop_epoch: Arc::new(AtomicU64::new(0)),
+                core_epoch: Arc::new(AtomicU64::new(0)),
             }),
         };
         let request =

@@ -94,23 +94,52 @@ async fn run(cli: Cli) -> Result<(), ControlError> {
             result.and(release)
         }
         Command::Mcp {
-            command: McpCommand::Config { show_token, port },
+            command:
+                McpCommand::Config {
+                    transport,
+                    show_token,
+                    port,
+                },
         } => {
-            if port.is_some()
-                && let Ok(client) = Client::connect(&directory, "CLI 配置检查", None).await
-            {
-                let _ = client.release().await;
-                return Err(ControlError::new(
-                    "core_running",
-                    "修改端口前须释放所有持有者并等待核心退出",
-                ));
+            let executable = std::env::current_exe()?;
+            let directory_of_executable = executable
+                .parent()
+                .ok_or_else(|| ControlError::new("invalid_path", "无法确定 MCP 可执行文件目录"))?;
+            let mcp_executable = directory_of_executable.join(if cfg!(windows) {
+                "dg-lab-link-mcp.exe"
+            } else {
+                "dg-lab-link-mcp"
+            });
+            if transport == McpTransport::Stdio {
+                if show_token || port.is_some() {
+                    return Err(ControlError::new(
+                        "invalid_arguments",
+                        "--show-token 和 --port 仅适用于 --transport http",
+                    ));
+                }
+                return print_value(
+                    &json!({
+                        "transport": "stdio",
+                        "command": mcp_executable,
+                        "args": ["--config-dir", directory],
+                    }),
+                    cli.json,
+                );
             }
-            let mut config = LocalConfig::load(&directory)?;
             if let Some(port) = port {
-                config.port = port;
-                config.save(&directory)?;
+                LocalConfig::save_mcp_port(&directory, port)?;
             }
-            let mut value = json!({"url":format!("http://127.0.0.1:{}/mcp",config.port),"transport":"streamable-http","configDir":directory,"authorization":"Bearer <使用 --show-token 查看本机令牌>"});
+            let config = LocalConfig::load(&directory)?;
+            let mut value = json!({
+                "url": config.mcp_url(),
+                "transport": "streamable-http",
+                "configDir": directory,
+                "server": {
+                    "command": mcp_executable,
+                    "args": ["--transport", "http", "--config-dir", directory],
+                },
+                "authorization": "Bearer <使用 --show-token 查看本机令牌>",
+            });
             if show_token {
                 value["headers"] = json!({"Authorization":format!("Bearer {}",config.token)});
                 value.as_object_mut().unwrap().remove("authorization");
