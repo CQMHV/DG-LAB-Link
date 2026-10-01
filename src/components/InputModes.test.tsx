@@ -22,6 +22,71 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("动态输入源", () => {
+    it.each([
+        ["source-touch", "source-audio", "触控面板", "音频控制"],
+        ["source-audio", "source-touch", "音频控制", "触控面板"],
+    ])("控制面板放在各自通道内：A %s / B %s", async (sourceA, sourceB, panelA, panelB) => {
+        const user = userEvent.setup();
+        render(<App />);
+        await user.selectOptions(await screen.findByRole("combobox", { name: "选择 郊狼 3.0 A 通道的输入源" }), sourceA);
+        await user.selectOptions(screen.getByRole("combobox", { name: "选择 郊狼 3.0 B 通道的输入源" }), sourceB);
+        const channelA = screen.getByRole("region", { name: "A 通道控制" });
+        const channelB = screen.getByRole("region", { name: "B 通道控制" });
+        expect(within(channelA).getByRole("region", { name: `A 通道${panelA}` })).toBeTruthy();
+        expect(within(channelB).getByRole("region", { name: `B 通道${panelB}` })).toBeTruthy();
+        expect(within(channelA).queryByRole("region", { name: `B 通道${panelB}` })).toBeNull();
+        expect(within(channelB).queryByRole("region", { name: `A 通道${panelA}` })).toBeNull();
+    });
+
+    it("两路音频各有控制面板并同步共享输入状态", async () => {
+        const user = userEvent.setup();
+        render(<App />);
+        await user.selectOptions(await screen.findByRole("combobox", { name: "选择 郊狼 3.0 A 通道的输入源" }), "source-audio");
+        await user.selectOptions(screen.getByRole("combobox", { name: "选择 郊狼 3.0 B 通道的输入源" }), "source-audio");
+        const channelA = within(screen.getByRole("region", { name: "A 通道控制" }));
+        const channelB = within(screen.getByRole("region", { name: "B 通道控制" }));
+        const playerA = within(channelA.getByRole("region", { name: "A 通道音频控制" }));
+        const playerB = within(channelB.getByRole("region", { name: "B 通道音频控制" }));
+        await user.click(playerB.getByRole("button", { name: "桌面音频" }));
+        await waitFor(() => {
+            expect(playerA.getByRole("button", { name: "停止桌面监听" }).getAttribute("aria-pressed")).toBe("true");
+            expect(playerB.getByRole("button", { name: "停止桌面监听" }).getAttribute("aria-pressed")).toBe("true");
+        });
+        expect(channelA.getByRole("region", { name: "A 通道音频映射" })).toBeTruthy();
+        expect(channelB.getByRole("region", { name: "B 通道音频映射" })).toBeTruthy();
+        await user.click(playerA.getByRole("button", { name: "停止桌面监听" }));
+        await waitFor(() => expect(playerB.getByRole("button", { name: "桌面音频" }).getAttribute("aria-pressed")).toBe("false"));
+    });
+
+    it("双通道分别触控，先按 B 不串到 A，撤下 A 只释放其触点", async () => {
+        const user = userEvent.setup();
+        render(<App />);
+        await user.selectOptions(await screen.findByRole("combobox", { name: "选择 郊狼 3.0 A 通道的输入源" }), "source-touch");
+        await user.selectOptions(screen.getByRole("combobox", { name: "选择 郊狼 3.0 B 通道的输入源" }), "source-touch");
+        await user.click(screen.getByRole("button", { name: "开始 郊狼 3.0 的波形输出" }));
+        const boardA = within(screen.getByRole("region", { name: "A 通道控制" })).getByLabelText("触控区域");
+        const boardB = within(screen.getByRole("region", { name: "B 通道控制" })).getByLabelText("触控区域");
+        fireEvent.pointerDown(boardB, { pointerId: 12, button: 0, clientX: 300, clientY: 100 });
+        await waitFor(() => expect(__getMockTouchInput()?.pointers).toEqual([{ id: 12, x: 0.75, y: 0.5, cell: null, channel: "b" }]));
+        expect(boardA.querySelectorAll(".touch-pointer")).toHaveLength(0);
+        expect(boardB.querySelectorAll(".touch-pointer")).toHaveLength(1);
+        const firstInput = __getMockTouchInput()!;
+        fireEvent.pointerDown(boardB, { pointerId: 13, button: 0, clientX: 200, clientY: 100 });
+        expect(__getMockTouchInput()?.pointers).toHaveLength(1);
+        fireEvent.pointerDown(boardA, { pointerId: 11, button: 0, clientX: 100, clientY: 100 });
+        await waitFor(() => expect(__getMockTouchInput()?.pointers.map(({ id, channel }) => ({ id, channel }))).toEqual([{ id: 12, channel: "b" }, { id: 11, channel: "a" }]));
+        expect(boardA.querySelectorAll(".touch-pointer")).toHaveLength(1);
+        expect(boardB.querySelectorAll(".touch-pointer")).toHaveLength(1);
+        expect(__getMockTouchInput()?.ownerId).toBe(firstInput.ownerId);
+        expect(__getMockTouchInput()!.sequence).toBeGreaterThan(firstInput.sequence);
+        await user.selectOptions(screen.getByRole("combobox", { name: "选择 郊狼 3.0 A 通道的输入源" }), "source-audio");
+        await waitFor(() => expect(__getMockTouchInput()?.pointers.map(({ id }) => id)).toEqual([12]));
+        expect(within(screen.getByRole("region", { name: "B 通道控制" })).getByLabelText("触控区域")).toBe(boardB);
+        expect(__getMockTouchInput()?.ownerId).toBe(firstInput.ownerId);
+        fireEvent.pointerUp(boardB, { pointerId: 12 });
+        await waitFor(() => expect(__getMockTouchInput()?.pointers).toHaveLength(0));
+    });
+
     it("注册两源并允许保存触控面板与路由配置", async () => {
         const user = userEvent.setup();
         render(<App />);

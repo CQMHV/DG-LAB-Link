@@ -11,10 +11,11 @@ const stateNames: Record<AudioSnapshot["state"], string> = {
     idle: "未运行", loading: "正在加载", playing: "播放中", paused: "已暂停", capturing: "实时收音", recording: "录音中", error: "运行异常",
 };
 
-export const AudioPlayer = ({ audio, disabled, onControl }: {
+export const AudioPlayer = ({ audio, disabled, onControl, channel }: {
     audio: AudioSnapshot;
     disabled: boolean;
     onControl: (action: AudioAction) => Promise<void>;
+    channel?: HubChannel;
 }) => {
     const [error, setError] = useState<string | null>(null);
     const [seekPosition, setSeekPosition] = useState(audio.positionMs);
@@ -43,8 +44,8 @@ export const AudioPlayer = ({ audio, disabled, onControl }: {
     const desktop = audio.mode === "desktop" && capturing;
     const filePlayback = audio.mode === "file" || (audio.mode === "recording" && !recording);
     return (
-        <section aria-label="共享音频控制" className="audio-player">
-            <header className="input-mode-heading"><FileAudio aria-hidden="true" size={21} /><h3>音频输入</h3><span className={recording || capturing || audio.state === "playing" ? "input-mode-running" : ""}>{desktop ? "桌面监听中" : stateNames[audio.state]}</span></header>
+        <section aria-label={channel ? `${channel.toUpperCase()} 通道音频控制` : "共享音频控制"} className="audio-player">
+            <header className="input-mode-heading"><FileAudio aria-hidden="true" size={21} /><h3>{channel ? `${channel.toUpperCase()} 通道 · 音频输入` : "音频输入"}</h3><span className={recording || capturing || audio.state === "playing" ? "input-mode-running" : ""}>{desktop ? "桌面监听中" : stateNames[audio.state]}</span></header>
             <p className="input-mode-note">各设备共用声音输入与播放进度，通道映射独立配置。设备开始输出后才发送波形。</p>
             <p className="input-mode-note">支持 MP4 / M4V / MOV / MKV / WebM 视频，自动使用其中的音轨。视频上限 2 GB，音轨最长一小时；暂不支持 Opus、AC-3 / E-AC-3 音轨。</p>
             {audio.mode === "desktop" && <p className="input-mode-note">桌面音频监听 Windows 默认播放设备的声音。静音时保持监听；更换默认播放设备后请重新开启。</p>}

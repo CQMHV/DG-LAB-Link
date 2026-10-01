@@ -17,7 +17,7 @@ import {
 } from "../components/DeviceTabs";
 import { FixedWaveformChannelDashboard } from "../components/FixedWaveformDashboard";
 import { AudioChannelSettings, AudioPlayer } from "../components/AudioSourceControls";
-import { TouchBoard } from "../components/TouchBoard";
+import { TouchBoard, TouchInputProvider } from "../components/TouchBoard";
 import { audioControl, setAudioConfig } from "../lib/bridge";
 import { defaultAudioConfig } from "../lib/inputModes";
 import { displayChannelStatus, transportName } from "../lib/transports";
@@ -308,73 +308,102 @@ export const DashboardPage = ({
                                 </button>
                             </header>
                             <div className="device-dashboard-content">
-                                <div className="realtime-stage" aria-label="双通道实时控制">
-                                    {(["a", "b"] as const).map((channel) => {
-                                        const source = deviceSources[channel];
-                                        const selectedWaveformId =
-                                            channel === "a"
-                                                ? device.waveformIdA
-                                                : device.waveformIdB;
-                                        const selectedWaveformName =
-                                            channel === "a"
-                                                ? device.waveformNameA
-                                                : device.waveformNameB;
-                                        return (
-                                            <ChannelControl
-                                                channel={channel}
-                                                disabled={!isConnected}
-                                                key={channel}
-                                                onAdjust={(targetChannel, delta) =>
-                                                    onAdjust(
-                                                        targetChannel,
-                                                        delta,
-                                                        device.controlId,
-                                                    )
-                                                }
-                                                pending={
-                                                    pendingAction ===
-                                                    `intensity-${device.controlId}-${channel}`
-                                                }
-                                                snapshot={deviceChannels[channel]}
-                                            >
-                                                {source?.kind ===
-                                                    "builtin.fixed_waveform" && (
-                                                    <FixedWaveformChannelDashboard
-                                                        channel={channel}
-                                                        customWaveforms={
-                                                            snapshot.customWaveforms
-                                                        }
-                                                        disabled={busy}
-                                                        onSelectCustomWaveform={(
-                                                            presetId,
-                                                        ) =>
-                                                            onSelectCustomWaveform(
-                                                                device.controlId,
-                                                                channel,
+                                <TouchInputProvider
+                                    active={deviceSources.a?.kind === "builtin.touch" || deviceSources.b?.kind === "builtin.touch"}
+                                    config={snapshot.inputModes.touchConfig}
+                                    deviceId={device.controlId}
+                                    disabled={!isConnected || !device.outputActive}
+                                    key={device.controlId}
+                                >
+                                    <div className="realtime-stage" aria-label="双通道实时控制">
+                                        {(["a", "b"] as const).map((channel) => {
+                                            const source = deviceSources[channel];
+                                            const selectedWaveformId =
+                                                channel === "a"
+                                                    ? device.waveformIdA
+                                                    : device.waveformIdB;
+                                            const selectedWaveformName =
+                                                channel === "a"
+                                                    ? device.waveformNameA
+                                                    : device.waveformNameB;
+                                            return (
+                                                <ChannelControl
+                                                    channel={channel}
+                                                    disabled={!isConnected}
+                                                    key={channel}
+                                                    onAdjust={(targetChannel, delta) =>
+                                                        onAdjust(
+                                                            targetChannel,
+                                                            delta,
+                                                            device.controlId,
+                                                        )
+                                                    }
+                                                    pending={
+                                                        pendingAction ===
+                                                        `intensity-${device.controlId}-${channel}`
+                                                    }
+                                                    snapshot={deviceChannels[channel]}
+                                                >
+                                                    {source?.kind ===
+                                                        "builtin.fixed_waveform" && (
+                                                        <FixedWaveformChannelDashboard
+                                                            channel={channel}
+                                                            customWaveforms={
+                                                                snapshot.customWaveforms
+                                                            }
+                                                            disabled={busy}
+                                                            onSelectCustomWaveform={(
                                                                 presetId,
-                                                            )
-                                                        }
-                                                        onSetFixedWaveform={(config) =>
-                                                            onSetFixedWaveform(
-                                                                device.controlId,
-                                                                channel,
-                                                                config,
-                                                            )
-                                                        }
-                                                        selectedId={selectedWaveformId}
-                                                        selectedName={
-                                                            selectedWaveformName
-                                                        }
-                                                    />
-                                                )}
-                                                {source?.kind === "builtin.touch" && <p className="input-mode-channel-note">触控面板位于下方，{channel.toUpperCase()} 通道基础强度由上方仪表调节。</p>}
-                                                {source?.kind === "builtin.audio" && <AudioChannelSettings channel={channel} config={snapshot.inputModes.audioBindings.find((binding) => binding.deviceId === device.controlId && binding.channel === channel)?.config ?? defaultAudioConfig()} disabled={busy} onSave={(config) => onSetAudioConfig(device.controlId, channel, config)} onCopy={(config) => onSetAudioConfig(device.controlId, channel === "a" ? "b" : "a", config)} />}
-                                            </ChannelControl>
-                                        );
-                                    })}
-                                </div>
-                                {(deviceSources.a?.kind === "builtin.touch" || deviceSources.b?.kind === "builtin.touch") && <TouchBoard key={device.controlId} config={snapshot.inputModes.touchConfig} deviceId={device.controlId} disabled={!isConnected || !device.outputActive} />}
-                                {(deviceSources.a?.kind === "builtin.audio" || deviceSources.b?.kind === "builtin.audio") && <AudioPlayer audio={snapshot.inputModes.audio} disabled={busy} onControl={onAudioControl} />}
+                                                            ) =>
+                                                                onSelectCustomWaveform(
+                                                                    device.controlId,
+                                                                    channel,
+                                                                    presetId,
+                                                                )
+                                                            }
+                                                            onSetFixedWaveform={(config) =>
+                                                                onSetFixedWaveform(
+                                                                    device.controlId,
+                                                                    channel,
+                                                                    config,
+                                                                )
+                                                            }
+                                                            selectedId={selectedWaveformId}
+                                                            selectedName={
+                                                                selectedWaveformName
+                                                            }
+                                                        />
+                                                    )}
+                                                    {source?.kind === "builtin.touch" && (
+                                                        <TouchBoard
+                                                            channel={channel}
+                                                            config={snapshot.inputModes.touchConfig}
+                                                            deviceId={device.controlId}
+                                                            disabled={!isConnected || !device.outputActive}
+                                                        />
+                                                    )}
+                                                    {source?.kind === "builtin.audio" && (
+                                                        <>
+                                                            <AudioPlayer
+                                                                audio={snapshot.inputModes.audio}
+                                                                channel={channel}
+                                                                disabled={busy}
+                                                                onControl={onAudioControl}
+                                                            />
+                                                            <AudioChannelSettings
+                                                                channel={channel}
+                                                                config={snapshot.inputModes.audioBindings.find((binding) => binding.deviceId === device.controlId && binding.channel === channel)?.config ?? defaultAudioConfig()}
+                                                                disabled={busy}
+                                                                onSave={(config) => onSetAudioConfig(device.controlId, channel, config)}
+                                                                onCopy={(config) => onSetAudioConfig(device.controlId, channel === "a" ? "b" : "a", config)}
+                                                            />
+                                                        </>
+                                                    )}
+                                                </ChannelControl>
+                                            );
+                                        })}
+                                    </div>
+                                </TouchInputProvider>
                             </div>
                         </>
                     ) : deviceUnavailable ? (

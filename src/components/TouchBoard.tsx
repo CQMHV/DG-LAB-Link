@@ -1,13 +1,14 @@
 import { HandTap } from "@phosphor-icons/react";
-import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type PointerEvent, type ReactNode } from "react";
 import { updateTouchInput } from "../lib/bridge";
-import type { TouchConfig, TouchInput } from "../lib/contracts";
+import type { HubChannel, TouchConfig, TouchInput } from "../lib/contracts";
 import { getErrorMessage } from "../lib/errors";
 
 interface TouchBoardProps {
     config: TouchConfig;
     deviceId: string;
     disabled: boolean;
+    channel?: HubChannel;
     onInput?: (input: TouchInput) => Promise<void>;
 }
 
@@ -16,9 +17,7 @@ const routeNames: Record<TouchConfig["routing"], string> = {
 };
 const clamp = (value: number) => Math.max(0, Math.min(1, value));
 
-export const TouchBoard = ({ config, deviceId, disabled, onInput = updateTouchInput }: TouchBoardProps) => {
-    const board = useRef<HTMLDivElement>(null);
-    const pad = useRef<HTMLDivElement>(null);
+const useTouchController = ({ config, deviceId, disabled, onInput = updateTouchInput }: TouchBoardProps, active = true) => {
     const pointers = useRef(new Map<number, TouchInput["pointers"][number]>());
     const ownerId = useRef(`touch-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`}`);
     const sequence = useRef(0);
@@ -52,6 +51,7 @@ export const TouchBoard = ({ config, deviceId, disabled, onInput = updateTouchIn
         sending.current = false;
     }, []);
     const publish = useCallback((isCritical = false, immediate = false) => {
+        if (!active) return;
         const input = { deviceId, ownerId: ownerId.current, sequence: ++sequence.current, pointers: [...pointers.current.values()] };
         if (isCritical) {
             latest.current = null;
@@ -70,7 +70,7 @@ export const TouchBoard = ({ config, deviceId, disabled, onInput = updateTouchIn
             latest.current = input;
         }
         if (isCritical || immediate) void flush();
-    }, [deviceId, flush]);
+    }, [active, deviceId, flush]);
     const cancel = useCallback(() => {
         pointers.current.clear();
         setVisiblePointers([]);
@@ -78,6 +78,7 @@ export const TouchBoard = ({ config, deviceId, disabled, onInput = updateTouchIn
     }, [publish]);
     useEffect(() => {
         alive.current = true;
+        if (!active) return () => { alive.current = false; };
         const coalesce = window.setInterval(() => { void flush(); }, 40);
         const heartbeat = window.setInterval(() => {
             if (pointers.current.size > 0) publish(false, true);
@@ -94,9 +95,68 @@ export const TouchBoard = ({ config, deviceId, disabled, onInput = updateTouchIn
             window.removeEventListener("blur", cancel);
             document.removeEventListener("visibilitychange", visibility);
         };
-    }, [cancel, flush, publish]);
+    }, [active, cancel, flush, publish]);
     const configIdentity = JSON.stringify(config);
     useEffect(() => { cancel(); }, [disabled, configIdentity, cancel]);
+    const move = (event: PointerEvent<HTMLDivElement>, current: TouchInput["pointers"][number]) => {
+        if (disabled || !pointers.current.has(event.pointerId)) return;
+        const previous = pointers.current.get(event.pointerId)!;
+        pointers.current.set(event.pointerId, current);
+        setVisiblePointers([...pointers.current.values()]);
+        publish(previous.cell !== current.cell);
+    };
+    const down = (event: PointerEvent<HTMLDivElement>, pointer: TouchInput["pointers"][number]) => {
+        const current = [...pointers.current.values()];
+        const full = pointer.channel
+            ? current.length >= 2 || current.some((existing) => !existing.channel || existing.channel === pointer.channel)
+            : current.length >= (config.routing === "separate" ? 2 : 1) || current.some((existing) => existing.channel);
+        if (disabled || event.button !== 0 || full) return false;
+        event.preventDefault();
+        setError(null);
+        event.currentTarget.setPointerCapture?.(event.pointerId);
+        pointers.current.set(event.pointerId, pointer);
+        setVisiblePointers([...pointers.current.values()]);
+        publish(true);
+        return true;
+    };
+    const release = useCallback((ids: number[]) => {
+        let changed = false;
+        for (const id of ids) changed = pointers.current.delete(id) || changed;
+        if (!changed) return;
+        if (alive.current) setVisiblePointers([...pointers.current.values()]);
+        publish(true);
+    }, [publish]);
+    return { visiblePointers, error, move, down, release };
+};
+
+type TouchController = ReturnType<typeof useTouchController>;
+const TouchContext = createContext<TouchController | null>(null);
+
+// Both channel panels must use one device lease and one ordered input queue.
+export const TouchInputProvider = ({ children, active, ...props }: TouchBoardProps & { active: boolean; children: ReactNode }) => {
+    const controller = useTouchController(props, active);
+    return <TouchContext.Provider value={controller}>{children}</TouchContext.Provider>;
+};
+
+export const TouchBoard = (props: TouchBoardProps) => {
+    const controller = useContext(TouchContext);
+    return controller
+        ? <TouchBoardView {...props} controller={controller} />
+        : <StandaloneTouchBoard {...props} />;
+};
+
+const StandaloneTouchBoard = (props: TouchBoardProps) => {
+    const controller = useTouchController(props);
+    return <TouchBoardView {...props} controller={controller} />;
+};
+
+const TouchBoardView = ({ config, disabled, channel, controller }: TouchBoardProps & { controller: TouchController }) => {
+    const board = useRef<HTMLDivElement>(null);
+    const pad = useRef<HTMLDivElement>(null);
+    const ownedPointers = useRef(new Set<number>());
+    const { error, release } = controller;
+    const visiblePointers = controller.visiblePointers.filter((pointer) => !channel || pointer.channel === channel);
+    useEffect(() => () => { release([...ownedPointers.current]); }, [release]);
     const location = (event: PointerEvent<HTMLDivElement>) => {
         const freeRect = pad.current?.getBoundingClientRect();
         const boardRect = board.current!.getBoundingClientRect();
@@ -112,41 +172,29 @@ export const TouchBoard = ({ config, deviceId, disabled, onInput = updateTouchIn
             x: clamp((event.clientX - rect.left) / Math.max(1, rect.width)),
             y: clamp((event.clientY - rect.top) / Math.max(1, rect.height)),
             cell,
+            ...(channel ? { channel } : {}),
         };
     };
     const move = (event: PointerEvent<HTMLDivElement>) => {
-        if (disabled || !pointers.current.has(event.pointerId)) return;
-        const previous = pointers.current.get(event.pointerId)!;
-        const current = location(event);
-        pointers.current.set(event.pointerId, current);
-        setVisiblePointers([...pointers.current.values()]);
-        publish(previous.cell !== current.cell);
+        if (ownedPointers.current.has(event.pointerId)) controller.move(event, location(event));
     };
     const down = (event: PointerEvent<HTMLDivElement>) => {
-        if (disabled || event.button !== 0 || pointers.current.size >= (config.routing === "separate" ? 2 : 1)) return;
-        event.preventDefault();
-        setError(null);
-        event.currentTarget.setPointerCapture?.(event.pointerId);
-        pointers.current.set(event.pointerId, location(event));
-        setVisiblePointers([...pointers.current.values()]);
-        publish(true);
+        if (controller.down(event, location(event))) ownedPointers.current.add(event.pointerId);
     };
     const up = (event: PointerEvent<HTMLDivElement>) => {
-        if (!pointers.current.delete(event.pointerId)) return;
-        setVisiblePointers([...pointers.current.values()]);
-        publish(true);
+        if (ownedPointers.current.delete(event.pointerId)) release([event.pointerId]);
     };
     const waveforms = config.mode === "free" ? config.freeWaveforms : config.rhythmWaveforms.slice(0, config.gridSize ** 2);
     return (
-        <section aria-label="设备触控面板" className="touch-console">
-            <header className="input-mode-heading"><HandTap aria-hidden="true" size={21} /><h3>{config.mode === "free" ? "自由触控" : "律动触控"}</h3><span>{routeNames[config.routing]}</span></header>
+        <section aria-label={channel ? `${channel.toUpperCase()} 通道触控面板` : "设备触控面板"} className="touch-console">
+            <header className="input-mode-heading"><HandTap aria-hidden="true" size={21} /><h3>{config.mode === "free" ? "自由触控" : "律动触控"}</h3><span>{channel ? `${channel.toUpperCase()} 单通道` : routeNames[config.routing]}</span></header>
             <p className="input-mode-note">{disabled ? "先开始此设备的输出，再按住面板控制。" : "按住持续输出，滑动切换区域；松手结束触控。"} {config.background ? `背景：${config.background.presetName}` : "无背景波形"}</p>
             <div aria-label="触控区域" aria-disabled={disabled} className={`touch-board ${disabled ? "is-disabled" : ""}`} onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up} onLostPointerCapture={up} ref={board}>
                 {config.mode === "free" && <div className="touch-free-pad" ref={pad}>
                     <span className="touch-axis-x">{config.swapAxes ? "周期 ms" : "相对强度"} →</span>
                     <span className="touch-axis-y">{config.swapAxes ? "相对强度" : "周期 ms"} ↓</span>
                     <HandTap aria-hidden="true" size={32} weight="light" />
-                    {visiblePointers.filter((pointer) => pointer.cell === null).map((pointer, index) => <span aria-hidden="true" className="touch-pointer" key={pointer.id} style={{ left: `${pointer.x * 100}%`, top: `${pointer.y * 100}%` }}>{index === 0 ? "A" : "B"}</span>)}
+                    {visiblePointers.filter((pointer) => pointer.cell === null).map((pointer, index) => <span aria-hidden="true" className="touch-pointer" key={pointer.id} style={{ left: `${pointer.x * 100}%`, top: `${pointer.y * 100}%` }}>{pointer.channel?.toUpperCase() ?? (index === 0 ? "A" : "B")}</span>)}
                 </div>}
                 <div className="touch-live-grid" style={{ gridTemplateColumns: `repeat(${config.mode === "free" ? 4 : config.gridSize}, minmax(0, 1fr))` }}>
                     {waveforms.map((waveform, index) => <div className={`touch-live-cell ${visiblePointers.some((pointer) => pointer.cell === index) ? "is-held" : ""}`} data-touch-cell={index} key={index}><small>{String(index + 1).padStart(2, "0")}</small><strong>{waveform.presetName}</strong></div>)}

@@ -63,11 +63,6 @@
     margin-top: 24px;
 }
 
-.touch-console,
-.device-dashboard-content > .audio-player {
-    margin-top: 20px;
-}
-
 .audio-channel-settings {
     margin-top: 18px;
     padding: 16px;
@@ -98,8 +93,7 @@
 }
 
 .input-mode-note,
-.input-mode-help p,
-.input-mode-channel-note {
+.input-mode-help p {
     color: var(--muted);
     font-size: 12px;
     line-height: 1.8;
@@ -1587,6 +1581,29 @@ code {
     min-width: 0;
     margin-top: 24px;
     padding: 0 16px 18px;
+}
+
+.channel-feature-slot .touch-console,
+.channel-feature-slot .audio-player,
+.channel-feature-slot .audio-channel-settings {
+    padding: 16px;
+}
+
+.channel-feature-slot .audio-input-options {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.channel-feature-slot .audio-input-options > button {
+    justify-content: center;
+    padding: 9px;
+    white-space: normal;
+}
+
+.channel-feature-slot .touch-live-cell {
+    min-width: 0;
+    padding: 10px 8px;
+    overflow-wrap: anywhere;
 }
 
 .channel-title {
