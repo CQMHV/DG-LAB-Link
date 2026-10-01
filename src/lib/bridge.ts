@@ -9,12 +9,15 @@ import type {
     HubChannel,
     HubSnapshot,
     LogSnapshot,
+    McpConfig,
+    RuntimeInfo,
     SafetyUpdate,
     TouchConfig,
     TouchInput,
     WaveformConfig,
 } from "./contracts";
 import { defaultAudioConfig, defaultTouchConfig } from "./inputModes";
+import { isTauriRuntime } from "./tauri";
 
 const SNAPSHOT_EVENT = "hub://snapshot";
 
@@ -172,15 +175,29 @@ const mockWaveformConfigs = new Map<string, WaveformConfig>();
 const cloneSnapshot = (snapshot: HubSnapshot): HubSnapshot =>
     structuredClone(snapshot);
 
-const isTauriRuntime = (): boolean => {
-    if (typeof window === "undefined") {
-        return false;
-    }
+export const isBrowserDemo = (): boolean => !isTauriRuntime();
 
-    return "__TAURI_INTERNALS__" in window || "__TAURI__" in window;
+export const getRuntimeInfo = async (): Promise<RuntimeInfo | null> => {
+    return isTauriRuntime() ? invoke<RuntimeInfo>("get_runtime_info") : null;
 };
 
-export const isBrowserDemo = (): boolean => !isTauriRuntime();
+export const getMcpConfig = async (): Promise<McpConfig> => {
+    if (!isTauriRuntime()) {
+        throw new Error("浏览器演示模式不提供 MCP 连接令牌");
+    }
+    return invoke<McpConfig>("get_mcp_config");
+};
+
+export const listenRuntimeError = async (
+    listener: (message: string) => void,
+): Promise<UnlistenFn> => {
+    if (!isTauriRuntime()) {
+        return () => {};
+    }
+    return listen<{ code: string; message: string }>("hub://runtime-error", (event) => {
+        listener(event.payload.message);
+    });
+};
 
 const emitMockSnapshot = (): void => {
     const snapshot = cloneSnapshot(mockSnapshot);

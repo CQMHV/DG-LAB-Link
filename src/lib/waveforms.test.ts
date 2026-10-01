@@ -1,6 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { invoke } from "@tauri-apps/api/core";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import waveformImportFixtures from "../../shared/waveform-import-fixtures.json";
 
 import { parseWaveformFiles } from "./waveforms";
+
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+
+afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+});
 
 const textFile = (name: string, content: string): File =>
     ({
@@ -10,6 +19,24 @@ const textFile = (name: string, content: string): File =>
     }) as File;
 
 describe("自定义波形导入", () => {
+    it.each(waveformImportFixtures)("浏览器与核心共享 pulse 用例：$name", async (fixture) => {
+        const [waveform] = await parseWaveformFiles([textFile(fixture.name, fixture.content)]);
+        expect(waveform.presetName).toBe(fixture.presetName);
+        expect(waveform.frames).toEqual(fixture.frames);
+    });
+
+    it("桌面端把文本交给共享核心解析并使用核心返回的 ID", async () => {
+        vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
+        const config = { presetId: "custom-core-id", presetName: "核心波形", frames: ["0A0A0A0A00643200"] };
+        vi.mocked(invoke).mockResolvedValue([config]);
+        const content = JSON.stringify({ name: "核心波形", frames: config.frames });
+
+        expect(await parseWaveformFiles([textFile("核心.json", content)])).toEqual([config]);
+        expect(invoke).toHaveBeenCalledWith("parse_waveform_files", {
+            files: [{ name: "核心.json", content }],
+        });
+    });
+
     it("把 APP pulse 的 25ms 采样合并为 V3 100ms 帧", async () => {
         const [waveform] = await parseWaveformFiles([
             textFile(

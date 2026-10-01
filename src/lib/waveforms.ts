@@ -1,6 +1,8 @@
 import { parsePulseText } from "@dg-kit/waveforms";
-import { COYOTE_WAVEFORM, COYOTE_WAVEFORMS } from "dglab-kit";
+import { invoke } from "@tauri-apps/api/core";
+import officialWaveforms from "../../shared/official-waveforms.json";
 
+import { isTauriRuntime } from "./tauri";
 import type { WaveformConfig } from "./contracts";
 
 export interface OfficialWaveform extends WaveformConfig {
@@ -8,20 +10,9 @@ export interface OfficialWaveform extends WaveformConfig {
     durationMs: number;
 }
 
-export const OFFICIAL_WAVEFORMS: OfficialWaveform[] = Object.values(
-    COYOTE_WAVEFORM,
-).map((presetId) => {
-    const preset = COYOTE_WAVEFORMS[presetId];
-    return {
-        presetId,
-        presetName: preset.label.cn,
-        englishName: preset.label.en,
-        frames: [...preset.raw],
-        durationMs: preset.raw.length * 100,
-    };
-});
+export const OFFICIAL_WAVEFORMS: OfficialWaveform[] = officialWaveforms;
 
-export const DEFAULT_WAVEFORM_ID = COYOTE_WAVEFORM.BREATHING;
+export const DEFAULT_WAVEFORM_ID = "BREATHING";
 
 export const findOfficialWaveform = (presetId: string | null): OfficialWaveform =>
     OFFICIAL_WAVEFORMS.find((waveform) => waveform.presetId === presetId) ??
@@ -41,6 +32,15 @@ interface ImportedWaveformData {
 export const parseWaveformFiles = async (
     files: readonly File[],
 ): Promise<WaveformConfig[]> => {
+    if (isTauriRuntime()) {
+        const payload = await Promise.all(files.map(async (file) => {
+            if (file.size > MAX_IMPORT_FILE_BYTES) {
+                throw new Error(`${file.name} 超过 2 MB，无法导入`);
+            }
+            return { name: file.name, content: await file.text() };
+        }));
+        return invoke<WaveformConfig[]>("parse_waveform_files", { files: payload });
+    }
     const parsed = await Promise.all(files.map(parseWaveformFile));
     return parsed.flat();
 };

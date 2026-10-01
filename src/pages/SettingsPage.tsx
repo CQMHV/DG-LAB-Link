@@ -1,7 +1,9 @@
 import {
     Check,
+    Copy,
     Globe,
     ShieldCheck,
+    PlugsConnected,
     SpinnerGap,
     Tray,
     Waveform,
@@ -12,8 +14,106 @@ import { PageHeader } from "../components/PageHeader";
 import type {
     AppPreferences,
     HubSnapshot,
+    RuntimeInfo,
     SafetyUpdate,
 } from "../lib/contracts";
+import { getMcpConfig, getRuntimeInfo } from "../lib/bridge";
+import { getErrorMessage } from "../lib/errors";
+
+const RuntimeSettingsCard = () => {
+    const [info, setInfo] = useState<RuntimeInfo | null>(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+    const [copying, setCopying] = useState(false);
+    const [copyMessage, setCopyMessage] = useState<string | null>(null);
+
+    useEffect(() => {
+        let active = true;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const refresh = async () => {
+            try {
+                const current = await getRuntimeInfo();
+                if (active) {
+                    setInfo(current);
+                    setError(null);
+                }
+            } catch (refreshError) {
+                if (active) {
+                    setInfo(null);
+                    setError(getErrorMessage(refreshError, "无法读取共享核心状态"));
+                }
+            } finally {
+                if (active) {
+                    setLoading(false);
+                    timer = setTimeout(() => void refresh(), 3000);
+                }
+            }
+        };
+        void refresh();
+        return () => {
+            active = false;
+            clearTimeout(timer);
+        };
+    }, []);
+
+    const copyToken = async () => {
+        setCopying(true);
+        setCopyMessage(null);
+        try {
+            const config = await getMcpConfig();
+            await navigator.clipboard.writeText(config.token);
+            setCopyMessage("连接令牌已复制");
+        } catch (copyError) {
+            setCopyMessage(getErrorMessage(copyError, "无法复制连接令牌"));
+        } finally {
+            setCopying(false);
+        }
+    };
+
+    return (
+        <section className="settings-card">
+            <div className="settings-heading">
+                <div className="settings-icon">
+                    <PlugsConnected aria-hidden="true" size={25} weight="light" />
+                </div>
+                <div>
+                    <h2>共享核心与 MCP</h2>
+                    <p>GUI、CLI 和 MCP 共用设备会话；持有者全部退出后核心停止。</p>
+                </div>
+            </div>
+            <div className="setting-row">
+                <div className="setting-row-copy"><strong>核心状态</strong></div>
+                <span role="status">
+                    {loading ? "正在读取" : error ? "核心已断开" : info ? "运行中" : "浏览器演示"}
+                </span>
+            </div>
+            {info && (
+                <>
+                    <div className="setting-row">
+                        <div className="setting-row-copy"><strong>当前持有者</strong></div>
+                        <span>{info.holderCount} 个</span>
+                    </div>
+                    <div className="setting-row">
+                        <div className="setting-row-copy"><strong>MCP 地址</strong></div>
+                        <code className="setting-endpoint">{info.mcpUrl}</code>
+                    </div>
+                </>
+            )}
+            <div className="setting-row">
+                <div className="setting-row-copy">
+                    <strong>连接令牌</strong>
+                    <span>客户端使用 Bearer 令牌连接本机 Streamable HTTP MCP。</span>
+                </div>
+                <button className="secondary-button" disabled={!info || copying} onClick={() => void copyToken()} type="button">
+                    <Copy aria-hidden="true" size={18} />
+                    {copying ? "正在复制" : "复制连接令牌"}
+                </button>
+            </div>
+            {error && <p className="relay-note" role="alert">{error}</p>}
+            {copyMessage && <p className="relay-note" role="status">{copyMessage}</p>}
+        </section>
+    );
+};
 
 interface SettingsPageProps {
     appPreferences: AppPreferences;
@@ -370,6 +470,7 @@ export const SettingsPage = ({
                     后端中的会话。
                 </div>
             </section>
+            <RuntimeSettingsCard />
         </div>
     );
 };

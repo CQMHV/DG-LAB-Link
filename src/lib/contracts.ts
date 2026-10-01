@@ -17,6 +17,18 @@ export type ChannelStatus =
 
 export type LogLevel = "info" | "warning" | "error";
 
+export interface RuntimeInfo {
+    instanceId: string;
+    pid: number;
+    holderCount: number;
+    mcpUrl: string;
+}
+
+export interface McpConfig {
+    url: string;
+    token: string;
+}
+
 export interface ConnectionSnapshot {
     state: ConnectionState;
     endpoint: string;
