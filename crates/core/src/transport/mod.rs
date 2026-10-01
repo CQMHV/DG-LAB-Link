@@ -27,15 +27,8 @@ pub mod ble {
         super::spawn_disabled()
     }
 }
-
-pub mod v3 {
-    use super::*;
-    pub fn spawn(
-        _events: mpsc::Sender<SessionEvent>,
-    ) -> (SessionHandle, tokio::task::JoinHandle<()>) {
-        super::spawn_disabled()
-    }
-}
+pub(crate) mod event_delivery;
+pub mod v3;
 pub mod v4;
 
 #[derive(Clone)]
