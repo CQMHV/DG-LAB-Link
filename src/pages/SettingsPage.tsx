@@ -62,7 +62,7 @@ const RuntimeSettingsCard = () => {
         try {
             const config = await getMcpConfig();
             await navigator.clipboard.writeText(config.token);
-            setCopyMessage("连接令牌已复制");
+            setCopyMessage("HTTP 连接令牌已复制");
         } catch (copyError) {
             setCopyMessage(getErrorMessage(copyError, "无法复制连接令牌"));
         } finally {
@@ -78,7 +78,7 @@ const RuntimeSettingsCard = () => {
                 </div>
                 <div>
                     <h2>共享核心与 MCP</h2>
-                    <p>GUI、CLI 和 MCP 共用设备会话；持有者全部退出后核心停止。</p>
+                    <p>GUI、CLI 和独立 MCP 程序共用设备会话；持有者全部退出后核心停止。</p>
                 </div>
             </div>
             <div className="setting-row">
@@ -94,19 +94,34 @@ const RuntimeSettingsCard = () => {
                         <span>{info.holderCount} 个</span>
                     </div>
                     <div className="setting-row">
-                        <div className="setting-row-copy"><strong>MCP 地址</strong></div>
+                        <div className="setting-row-copy"><strong>HTTP MCP 配置地址</strong></div>
                         <code className="setting-endpoint">{info.mcpUrl}</code>
                     </div>
                 </>
             )}
             <div className="setting-row">
                 <div className="setting-row-copy">
-                    <strong>连接令牌</strong>
-                    <span>客户端使用 Bearer 令牌连接本机 Streamable HTTP MCP。</span>
+                    <strong>stdio</strong>
+                    <code className="setting-endpoint">dg-lab-link-mcp</code>
+                    <span>在客户端填写 MCP 程序的完整路径，参数留空；客户端启动程序后，会自动连接或唤起核心，并在会话期间持有核心。</span>
+                </div>
+            </div>
+            <div className="setting-row">
+                <div className="setting-row-copy">
+                    <strong>Streamable HTTP</strong>
+                    <code className="setting-endpoint">dg-lab-link-mcp --transport http</code>
+                    <span>先保持 GUI 或 CLI serve 运行，再单独启动 HTTP MCP 程序；它不增加持有者，核心结束时也会退出。</span>
+                </div>
+            </div>
+            <p className="relay-note">HTTP MCP 配置地址不代表服务已启动；核心运行状态与 HTTP MCP 服务状态相互独立。</p>
+            <div className="setting-row">
+                <div className="setting-row-copy">
+                    <strong>HTTP 连接令牌</strong>
+                    <span>Streamable HTTP 客户端使用 Bearer 令牌连接本机 MCP 服务；stdio 无需配置令牌。</span>
                 </div>
                 <button className="secondary-button" disabled={!info || copying} onClick={() => void copyToken()} type="button">
                     <Copy aria-hidden="true" size={18} />
-                    {copying ? "正在复制" : "复制连接令牌"}
+                    {copying ? "正在复制" : "复制 HTTP 连接令牌"}
                 </button>
             </div>
             {error && <p className="relay-note" role="alert">{error}</p>}
