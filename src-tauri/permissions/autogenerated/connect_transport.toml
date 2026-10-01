@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-connect-transport"
+description = "Enables the connect_transport command without any pre-configured scope."
+commands.allow = ["connect_transport"]
+
+[[permission]]
+identifier = "deny-connect-transport"
+description = "Denies the connect_transport command without any pre-configured scope."
+commands.deny = ["connect_transport"]

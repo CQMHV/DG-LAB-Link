@@ -170,12 +170,32 @@ async fn mcp_negotiates_and_uses_the_same_service_and_error_codes() {
         .await;
     assert_eq!(
         resources["result"]["resources"].as_array().unwrap().len(),
-        4
+        6
     );
     let status = core.mcp(json!({"jsonrpc": "2.0", "id": 6, "method": "resources/read", "params": {"uri": "dglab://status"}})).await;
     let resource_snapshot: HubSnapshot =
         serde_json::from_str(status["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(resource_snapshot, snapshot);
+    for (id, uri, expected) in [
+        (7, "dglab://connections", json!(snapshot.connections)),
+        (8, "dglab://bluetooth", json!(snapshot.bluetooth)),
+    ] {
+        assert!(
+            resources["result"]["resources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|resource| resource["uri"] == uri)
+        );
+        let result = core
+            .mcp(json!({"jsonrpc":"2.0","id":id,"method":"resources/read","params":{"uri":uri}}))
+            .await;
+        let actual: Value =
+            serde_json::from_str(result["result"]["contents"][0]["text"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(actual, expected);
+        assert!(actual.is_array());
+    }
     assert_eq!(
         gui.runtime_info().await.unwrap().holder_count,
         1,

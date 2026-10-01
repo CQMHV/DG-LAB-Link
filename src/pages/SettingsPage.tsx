@@ -399,7 +399,7 @@ export const SettingsPage = ({
                     <div className="setting-row-copy">
                         <strong>允许手机端反向控制</strong>
                         <span>
-                            关闭时锁定电脑端认可的 A/B 强度；开启后，手机调整会同步到电脑端。
+                            仅作用于 Socket V4／V3：关闭时锁定电脑端认可的 A/B 强度；开启后，手机调整会同步到电脑端。蓝牙直连始终接纳实体旋钮的强度反馈。
                         </span>
                     </div>
                     <label className="toggle-switch">
@@ -459,15 +459,24 @@ export const SettingsPage = ({
                     </div>
                     <div>
                         <h2>Relay 端点</h2>
-                        <p>中枢通过 Socket V4 Relay 与 DG-LAB APP 建立配对和消息通道。</p>
+                        <p>中枢通过 Socket V4／V3 Relay 与 APP 配对，也可直接连接郊狼 3.0 蓝牙设备。端点和设备连接在“设备”页面管理。</p>
                     </div>
                 </div>
                 <div className="setting-row">
                     <div className="setting-row-copy">
-                        <strong>当前端点</strong>
+                        <strong>Socket V4 端点</strong>
                     </div>
                     <code className="setting-endpoint">{snapshot.connection.endpoint}</code>
                 </div>
+                {snapshot.connections.filter((connection) => connection.transport === "ws_v3").map((connection) => (
+                    <div className="setting-row" key={connection.connectionId}>
+                        <div className="setting-row-copy">
+                            <strong>Socket V3 端点</strong>
+                            <span>V3 · {relayStateLabels[connection.state]}</span>
+                        </div>
+                        <code className="setting-endpoint">{connection.endpoint}</code>
+                    </div>
+                ))}
                 <div className="setting-row">
                     <div className="setting-row-copy">
                         <strong>连接状态</strong>

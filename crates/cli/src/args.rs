@@ -41,6 +41,16 @@ pub enum Command {
         #[command(subcommand)]
         command: RelayCommand,
     },
+    /// 管理并行运行的 V4、V3 与蓝牙连接
+    Connections {
+        #[command(subcommand)]
+        command: ConnectionCommand,
+    },
+    /// 扫描、连接及配置郊狼 3.0 蓝牙设备
+    Bluetooth {
+        #[command(subcommand)]
+        command: BluetoothCommand,
+    },
     /// 读取配对信息；--refresh 重新生成配对
     Pairing {
         #[arg(long)]
@@ -129,6 +139,59 @@ pub enum HolderCommand {
 pub enum RelayCommand {
     Connect,
     Disconnect,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum WsTransport {
+    V4,
+    V3,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConnectionCommand {
+    List,
+    Connect {
+        #[arg(long, value_enum, default_value = "v4")]
+        transport: WsTransport,
+        #[arg(long)]
+        endpoint: Option<String>,
+    },
+    Disconnect {
+        connection_id: String,
+    },
+    Pairing {
+        connection_id: String,
+        #[arg(long)]
+        refresh: bool,
+    },
+    /// 保存端点；连接运行时须先断开
+    Endpoint {
+        #[arg(long, value_enum, default_value = "v4")]
+        transport: WsTransport,
+        endpoint: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BluetoothCommand {
+    Scan {
+        #[arg(long, default_value_t = 3000)]
+        duration_ms: u64,
+    },
+    /// 使用 scan 返回的 deviceId
+    Connect { device_id: String },
+    /// 使用快照中的 controlId
+    Disconnect {
+        #[arg(long)]
+        device: String,
+    },
+    /// 无输入时读取配置；--params 或 --file 更新持久参数
+    Config {
+        #[arg(long)]
+        device: String,
+        #[command(flatten)]
+        input: JsonInput,
+    },
 }
 
 #[derive(Debug, Subcommand)]

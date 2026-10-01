@@ -35,6 +35,9 @@ const statusLabel = (status: ChannelSnapshot["status"]): string => {
     if (status === "disconnected") {
         return "未连接";
     }
+    if (status === "unknown") {
+        return "回路状态未知";
+    }
     return "待机";
 };
 

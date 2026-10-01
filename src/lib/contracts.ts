@@ -13,7 +13,43 @@ export type ChannelStatus =
     | "active"
     | "disabled"
     | "disconnected"
-    | "fault";
+    | "fault"
+    | "unknown";
+
+export type TransportKind = "ws_v4" | "ws_v3" | "ble";
+export type InitializationState = "initializing" | "ready" | "fault";
+
+export interface TransportConnectionSnapshot extends ConnectionSnapshot {
+    connectionId: string;
+    transport: TransportKind;
+}
+
+export interface DeviceCapabilities {
+    battery: boolean;
+    loadStatus: boolean;
+    softLimits: boolean;
+    balance: boolean;
+    wheelProtection: boolean;
+    standardMode: boolean;
+    operationConfirmation: boolean;
+}
+
+export interface BleParameters {
+    maxStrengthA: number;
+    maxStrengthB: number;
+    frequencyBalanceA: number;
+    frequencyBalanceB: number;
+    strengthBalanceA: number;
+    strengthBalanceB: number;
+    wheelProtectionEnabled: boolean;
+    wheelProtectionValue: number;
+}
+
+export interface BluetoothDevice {
+    deviceId: string;
+    name: string;
+    rssi: number | null;
+}
 
 export type LogLevel = "info" | "warning" | "error";
 
@@ -40,11 +76,17 @@ export interface ConnectionSnapshot {
 
 export interface DeviceSnapshot {
     controlId: string;
+    connectionId: string;
+    transport: TransportKind;
+    initialization: InitializationState;
+    capabilities: DeviceCapabilities;
+    bleParameters: BleParameters | null;
+    configurationStatus: string | null;
     id: string | number;
     name: string;
     type: string;
     slotId: string;
-    power: number;
+    power: number | null;
     intensityA: number;
     intensityB: number;
     intensityLimitA: number;
@@ -112,6 +154,8 @@ export interface LogSnapshot {
 export interface HubSnapshot {
     revision: number;
     connection: ConnectionSnapshot;
+    connections: TransportConnectionSnapshot[];
+    bluetooth: BluetoothDevice[];
     device: DeviceSnapshot | null;
     devices: DeviceSnapshot[];
     selectedDeviceId: string | null;

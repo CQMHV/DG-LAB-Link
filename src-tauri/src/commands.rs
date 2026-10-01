@@ -10,6 +10,9 @@ use dg_lab_link_core::sources::audio::{
     AUDIO_FILE_EXTENSIONS, AudioAction, AudioChannelConfig, VIDEO_FILE_EXTENSIONS,
 };
 use dg_lab_link_core::sources::touch::{TouchConfig, TouchInput};
+use dg_lab_link_core::transport::{
+    BleParameters, BluetoothDevice, TransportConnectionSnapshot, TransportKind,
+};
 use dg_lab_link_core::waveforms::WaveformFile;
 use dg_lab_link_core::{ControlCommand, ControlError};
 use dg_lab_link_runtime::{Client, LocalConfig, RuntimeInfo};
@@ -245,6 +248,123 @@ pub async fn disconnect_relay(client: State<'_, Client>) -> Result<(), CommandEr
 #[tauri::command]
 pub async fn refresh_pairing(client: State<'_, Client>) -> Result<(), CommandError> {
     call(&client, ControlCommand::RefreshPairing).await
+}
+
+#[tauri::command]
+pub async fn get_connections(
+    client: State<'_, Client>,
+) -> Result<Vec<TransportConnectionSnapshot>, CommandError> {
+    call(&client, ControlCommand::GetConnections).await
+}
+
+#[tauri::command]
+pub async fn connect_transport(
+    client: State<'_, Client>,
+    transport: TransportKind,
+    endpoint: Option<String>,
+) -> Result<(), CommandError> {
+    call::<serde_json::Value>(
+        &client,
+        ControlCommand::ConnectTransport {
+            transport,
+            endpoint,
+        },
+    )
+    .await
+    .map(|_| ())
+}
+
+#[tauri::command]
+pub async fn disconnect_connection(
+    client: State<'_, Client>,
+    connection_id: String,
+) -> Result<(), CommandError> {
+    call::<serde_json::Value>(
+        &client,
+        ControlCommand::DisconnectConnection { connection_id },
+    )
+    .await
+    .map(|_| ())
+}
+
+#[tauri::command]
+pub async fn refresh_connection_pairing(
+    client: State<'_, Client>,
+    connection_id: String,
+) -> Result<(), CommandError> {
+    call::<serde_json::Value>(
+        &client,
+        ControlCommand::RefreshConnectionPairing { connection_id },
+    )
+    .await
+    .map(|_| ())
+}
+
+#[tauri::command]
+pub async fn set_relay_endpoint(
+    client: State<'_, Client>,
+    transport: TransportKind,
+    endpoint: String,
+) -> Result<(), CommandError> {
+    call::<serde_json::Value>(
+        &client,
+        ControlCommand::SetRelayEndpoint {
+            transport,
+            endpoint,
+        },
+    )
+    .await
+    .map(|_| ())
+}
+
+#[tauri::command]
+pub async fn scan_bluetooth(
+    client: State<'_, Client>,
+    duration_ms: u64,
+) -> Result<Vec<BluetoothDevice>, CommandError> {
+    call(&client, ControlCommand::ScanBluetooth { duration_ms }).await
+}
+
+#[tauri::command]
+pub async fn connect_bluetooth(
+    client: State<'_, Client>,
+    device_id: String,
+) -> Result<(), CommandError> {
+    call::<serde_json::Value>(&client, ControlCommand::ConnectBluetooth { device_id })
+        .await
+        .map(|_| ())
+}
+
+#[tauri::command]
+pub async fn disconnect_bluetooth(
+    client: State<'_, Client>,
+    device_id: String,
+) -> Result<(), CommandError> {
+    call::<serde_json::Value>(&client, ControlCommand::DisconnectBluetooth { device_id })
+        .await
+        .map(|_| ())
+}
+
+#[tauri::command]
+pub async fn get_bluetooth_config(
+    client: State<'_, Client>,
+    device_id: String,
+) -> Result<BleParameters, CommandError> {
+    call(&client, ControlCommand::GetBluetoothConfig { device_id }).await
+}
+
+#[tauri::command]
+pub async fn set_bluetooth_config(
+    client: State<'_, Client>,
+    device_id: String,
+    config: BleParameters,
+) -> Result<(), CommandError> {
+    call::<serde_json::Value>(
+        &client,
+        ControlCommand::SetBluetoothConfig { device_id, config },
+    )
+    .await
+    .map(|_| ())
 }
 
 #[tauri::command]

@@ -20,6 +20,7 @@ import { AudioChannelSettings, AudioPlayer } from "../components/AudioSourceCont
 import { TouchBoard } from "../components/TouchBoard";
 import { audioControl, setAudioConfig } from "../lib/bridge";
 import { defaultAudioConfig } from "../lib/inputModes";
+import { displayChannelStatus, transportName } from "../lib/transports";
 import type {
     HubChannel,
     AudioAction,
@@ -105,13 +106,16 @@ export const DashboardPage = ({
         : null;
     const hasOpenTab = detached || tabs.length > 0;
     const deviceUnavailable = Boolean(activeDeviceId) && !device;
-    const isConnected = snapshot.connection.state === "connected";
+    const connection = device
+        ? snapshot.connections.find((item) => item.connectionId === device.connectionId)
+        : snapshot.connection;
+    const isConnected = connection?.state === "connected" && (!device || device.initialization === "ready");
     const deviceSources = {
         a: snapshot.sources.find((source) => source.id === device?.sourceIdA),
         b: snapshot.sources.find((source) => source.id === device?.sourceIdB),
     };
     const canPair =
-        (snapshot.connection.state === "waiting" || isConnected) &&
+        (snapshot.connection.state === "waiting" || snapshot.connection.state === "connected") &&
         Boolean(snapshot.connection.pairingUrl);
     const disabledChannels = (["a", "b"] as const).filter(
         (channel) =>
@@ -123,12 +127,12 @@ export const DashboardPage = ({
         a: {
             intensity: device?.intensityA ?? 0,
             limit: device?.intensityLimitA ?? 0,
-            status: device?.channelAStatus ?? "disconnected",
+            status: displayChannelStatus(device?.channelAStatus ?? "disconnected", device?.capabilities.loadStatus ?? false),
         },
         b: {
             intensity: device?.intensityB ?? 0,
             limit: device?.intensityLimitB ?? 0,
-            status: device?.channelBStatus ?? "disconnected",
+            status: displayChannelStatus(device?.channelBStatus ?? "disconnected", device?.capabilities.loadStatus ?? false),
         },
     } satisfies HubSnapshot["channels"];
     const busy = pendingAction !== null;
@@ -196,6 +200,7 @@ export const DashboardPage = ({
                             <header className="device-workspace-heading">
                                 <div className="device-scope-title">
                                     <strong>{device.name}</strong>
+                                    <span className="device-transport-label">{transportName(device.transport)}</span>
                                 </div>
                                 <div className="device-source-control">
                                     <Waveform
@@ -259,14 +264,16 @@ export const DashboardPage = ({
                                     )}
                                     <span className="device-battery">
                                         <BatteryHigh aria-hidden="true" size={18} />
-                                        电量 {device.power}%
+                                        电量 {device.power === null ? "未知" : `${device.power}%`}
                                     </span>
                                     <span className="device-channel-status">
                                         {disabledChannels.length > 0
                                             ? disabledChannels.length === 2
                                                 ? "A、B 通道已关闭，仍接收控制"
                                                 : `${disabledChannels[0].toUpperCase()} 通道已关闭，仍接收控制`
-                                            : "A、B 通道已就绪"}
+                                            : !device.capabilities.loadStatus
+                                              ? "回路状态未知"
+                                              : "A、B 通道已就绪"}
                                     </span>
                                     <span className="device-frames-sent">
                                         已发送 {snapshot.output.framesSent.toLocaleString("zh-CN")} 帧
@@ -423,7 +430,7 @@ export const DashboardPage = ({
                                                 <small>
                                                     A {candidate.intensityA} · B {candidate.intensityB}
                                                     <span>·</span>
-                                                    电量 {candidate.power}%
+                                                    电量 {candidate.power === null ? "未知" : `${candidate.power}%`}
                                                 </small>
                                             </span>
                                             <span

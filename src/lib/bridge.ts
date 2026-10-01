@@ -6,6 +6,10 @@ import type {
     AppPreferences,
     AudioAction,
     AudioChannelConfig,
+    BleParameters,
+    BluetoothDevice,
+    TransportKind,
+    TransportConnectionSnapshot,
     HubChannel,
     HubSnapshot,
     LogSnapshot,
@@ -18,6 +22,7 @@ import type {
 } from "./contracts";
 import { defaultAudioConfig, defaultTouchConfig } from "./inputModes";
 import { isTauriRuntime } from "./tauri";
+import { defaultBleParameters, defaultV4Capabilities } from "./transports";
 
 const SNAPSHOT_EVENT = "hub://snapshot";
 
@@ -47,6 +52,12 @@ const makeLog = (
 const createDefaultMockSnapshot = (): HubSnapshot => {
     const primaryDevice = {
         controlId: "demo-app:slot-a1",
+        connectionId: "ws-v4",
+        transport: "ws_v4" as const,
+        initialization: "ready" as const,
+        capabilities: defaultV4Capabilities(),
+        bleParameters: null,
+        configurationStatus: null,
         id: "coyote-030-demo",
         name: "郊狼 3.0",
         type: "COYOTE_030",
@@ -69,6 +80,12 @@ const createDefaultMockSnapshot = (): HubSnapshot => {
     };
     const secondaryDevice = {
         controlId: "demo-app:slot-b1",
+        connectionId: "ws-v4",
+        transport: "ws_v4" as const,
+        initialization: "ready" as const,
+        capabilities: defaultV4Capabilities(),
+        bleParameters: null,
+        configurationStatus: null,
         id: "coyote-020-demo",
         name: "郊狼 2.0",
         type: "COYOTE",
@@ -100,6 +117,20 @@ const createDefaultMockSnapshot = (): HubSnapshot => {
         appCount: 1,
         lastError: null,
     },
+    connections: [
+        {
+            connectionId: "ws-v4", transport: "ws_v4", state: "connected",
+            endpoint: "wss://trex.dungeon-lab.cn/v4", controllerId: "7f2ac91e",
+            pairingUrl: "https://dungeon-lab.cn/s/?v=1&action=socket&url=wss%3A%2F%2Ftrex.dungeon-lab.cn%2Fv4%3Ftid%3D7f2ac91e",
+            appCount: 1, lastError: null,
+        },
+        {
+            connectionId: "ws-v3", transport: "ws_v3", state: "disconnected",
+            endpoint: "wss://ws.dungeon-lab.cn/", controllerId: null,
+            pairingUrl: null, appCount: 0, lastError: null,
+        },
+    ],
+    bluetooth: [],
     device: { ...primaryDevice },
     devices: [{ ...primaryDevice }, { ...secondaryDevice }],
     selectedDeviceId: primaryDevice.controlId,
@@ -238,6 +269,157 @@ const refreshMockSourceCounts = (snapshot: HubSnapshot): void => {
     });
 };
 
+const refreshMockDeviceSelection = (snapshot: HubSnapshot): void => {
+    const device = snapshot.devices.find((item) => item.controlId === snapshot.selectedDeviceId)
+        ?? snapshot.devices[0] ?? null;
+    snapshot.device = device ? { ...device } : null;
+    snapshot.selectedDeviceId = device?.controlId ?? null;
+    for (const channel of ["a", "b"] as const) {
+        snapshot.channels[channel] = {
+            intensity: (channel === "a" ? device?.intensityA : device?.intensityB) ?? 0,
+            limit: (channel === "a" ? device?.intensityLimitA : device?.intensityLimitB) ?? 0,
+            status: (channel === "a" ? device?.channelAStatus : device?.channelBStatus) ?? "disconnected",
+        };
+    }
+    snapshot.outputDeviceCount = snapshot.devices.filter((item) => item.outputActive).length;
+    snapshot.output.state = snapshot.outputDeviceCount > 0 ? "running" : "idle";
+    refreshMockSourceCounts(snapshot);
+};
+
+export const getConnections = async (): Promise<TransportConnectionSnapshot[]> =>
+    isTauriRuntime() ? invoke("get_connections") : structuredClone(mockSnapshot.connections);
+
+export const connectTransport = async (
+    transport: Exclude<TransportKind, "ble">,
+    endpoint: string | null = null,
+): Promise<void> => {
+    if (isTauriRuntime()) {
+        await invoke("connect_transport", { transport, endpoint });
+        return;
+    }
+    updateMockSnapshot((snapshot) => {
+        const connection = snapshot.connections.find((item) => item.transport === transport)!;
+        if (endpoint) connection.endpoint = endpoint;
+        connection.state = "waiting";
+        connection.controllerId = transport === "ws_v4" ? "7f2ac91e" : "v3-demo-controller";
+        connection.pairingUrl = transport === "ws_v4"
+            ? createDefaultMockSnapshot().connection.pairingUrl
+            : `https://www.dungeon-lab.com/app-download.php#DGLAB-SOCKET#${encodeURIComponent(`${connection.endpoint}/${connection.controllerId}`)}`;
+        connection.lastError = null;
+        if (transport === "ws_v4") snapshot.connection = { ...connection };
+    });
+};
+
+export const disconnectConnection = async (connectionId: string): Promise<void> => {
+    if (isTauriRuntime()) {
+        await invoke("disconnect_connection", { connectionId });
+        return;
+    }
+    updateMockSnapshot((snapshot) => {
+        const connection = snapshot.connections.find((item) => item.connectionId === connectionId);
+        if (!connection) throw new Error("连接不存在");
+        Object.assign(connection, { state: "disconnected", controllerId: null, pairingUrl: null, appCount: 0 });
+        snapshot.devices = snapshot.devices.filter((device) => device.connectionId !== connectionId);
+        if (connectionId === "ws-v4") snapshot.connection = { ...connection };
+        refreshMockDeviceSelection(snapshot);
+    });
+};
+
+export const refreshConnectionPairing = async (connectionId: string): Promise<void> => {
+    if (isTauriRuntime()) {
+        await invoke("refresh_connection_pairing", { connectionId });
+        return;
+    }
+    const connection = mockSnapshot.connections.find((item) => item.connectionId === connectionId);
+    if (!connection || connection.transport === "ble") throw new Error("该连接不支持 APP 配对");
+    await disconnectConnection(connectionId);
+    await connectTransport(connection.transport);
+};
+
+export const setRelayEndpoint = async (transport: Exclude<TransportKind, "ble">, endpoint: string): Promise<void> => {
+    if (isTauriRuntime()) {
+        await invoke("set_relay_endpoint", { transport, endpoint });
+        return;
+    }
+    const parsed = new URL(endpoint);
+    if (!["ws:", "wss:"].includes(parsed.protocol)) throw new Error("端点必须使用 ws:// 或 wss://");
+    updateMockSnapshot((snapshot) => {
+        const connection = snapshot.connections.find((item) => item.transport === transport)!;
+        if (!["disconnected", "error"].includes(connection.state)) throw new Error("请先断开连接再保存端点");
+        connection.endpoint = endpoint;
+        if (transport === "ws_v4") snapshot.connection.endpoint = endpoint;
+    });
+};
+
+export const scanBluetooth = async (durationMs = 3000): Promise<BluetoothDevice[]> => {
+    if (isTauriRuntime()) return invoke("scan_bluetooth", { durationMs });
+    return updateMockSnapshot((snapshot) => {
+        snapshot.bluetooth = [{ deviceId: "ble-demo-030", name: "47L121000 演示设备", rssi: -52 }];
+    }).bluetooth;
+};
+
+export const connectBluetooth = async (deviceId: string): Promise<void> => {
+    if (isTauriRuntime()) {
+        await invoke("connect_bluetooth", { deviceId });
+        return;
+    }
+    updateMockSnapshot((snapshot) => {
+        const discovered = snapshot.bluetooth.find((item) => item.deviceId === deviceId);
+        if (!discovered) throw new Error("请先扫描并选择郊狼 3.0");
+        const connectionId = `ble:${deviceId}`;
+        if (snapshot.connections.some((item) => item.connectionId === connectionId && item.state === "connected")) throw new Error("设备已连接");
+        const connection: TransportConnectionSnapshot = {
+            connectionId, transport: "ble", endpoint: deviceId, state: "connected",
+            controllerId: null, pairingUrl: null, appCount: 0, lastError: null,
+        };
+        snapshot.connections = snapshot.connections.filter((item) => item.connectionId !== connectionId);
+        snapshot.connections.push(connection);
+        const device = {
+            ...createDefaultMockSnapshot().devices[0], connectionId, transport: "ble" as const,
+            controlId: `${connectionId}:device`, id: deviceId, name: "郊狼 3.0 蓝牙", slotId: "ble",
+            power: null, intensityA: 0, intensityB: 0, outputActive: false,
+            capabilities: { ...defaultV4Capabilities(), loadStatus: false, softLimits: true, balance: true, wheelProtection: true, standardMode: true },
+            bleParameters: defaultBleParameters(), configurationStatus: "sent",
+            channelAStatus: "unknown" as const, channelBStatus: "unknown" as const,
+        };
+        snapshot.devices.push(device);
+        refreshMockDeviceSelection(snapshot);
+    });
+};
+
+export const disconnectBluetooth = async (deviceId: string): Promise<void> => {
+    if (isTauriRuntime()) {
+        await invoke("disconnect_bluetooth", { deviceId });
+        return;
+    }
+    const device = mockSnapshot.devices.find((item) => item.controlId === deviceId && item.transport === "ble");
+    if (!device) throw new Error("蓝牙设备不存在");
+    await disconnectConnection(device.connectionId);
+};
+
+export const getBluetoothConfig = async (deviceId: string): Promise<BleParameters> => {
+    if (isTauriRuntime()) return invoke("get_bluetooth_config", { deviceId });
+    const parameters = mockSnapshot.devices.find((item) => item.controlId === deviceId)?.bleParameters;
+    if (!parameters) throw new Error("蓝牙设备不存在");
+    return { ...parameters };
+};
+
+export const setBluetoothConfig = async (deviceId: string, config: BleParameters): Promise<void> => {
+    if (isTauriRuntime()) {
+        await invoke("set_bluetooth_config", { deviceId, config });
+        return;
+    }
+    updateMockSnapshot((snapshot) => {
+        const device = snapshot.devices.find((item) => item.controlId === deviceId && item.transport === "ble");
+        if (!device) throw new Error("蓝牙设备不存在");
+        device.bleParameters = { ...config };
+        device.intensityLimitA = config.maxStrengthA;
+        device.intensityLimitB = config.maxStrengthB;
+        device.configurationStatus = "sent";
+        refreshMockDeviceSelection(snapshot);
+    });
+};
+
 export const getHubSnapshot = async (): Promise<HubSnapshot> => {
     if (isTauriRuntime()) {
         return invoke<HubSnapshot>("get_hub_snapshot");
@@ -311,13 +493,9 @@ export const connectRelay = async (): Promise<void> => {
     updateMockSnapshot((snapshot) => {
         const defaults = createDefaultMockSnapshot();
         snapshot.connection = defaults.connection;
-        snapshot.device = defaults.device;
-        snapshot.devices = defaults.devices;
-        snapshot.sources = defaults.sources;
-        snapshot.selectedDeviceId = defaults.selectedDeviceId;
-        snapshot.outputDeviceCount = 0;
-        snapshot.channels.a.status = "ready";
-        snapshot.channels.b.status = "ready";
+        snapshot.connections = snapshot.connections.map((connection) => connection.connectionId === "ws-v4" ? defaults.connections[0] : connection);
+        snapshot.devices = [...snapshot.devices.filter((device) => device.connectionId !== "ws-v4"), ...defaults.devices];
+        refreshMockDeviceSelection(snapshot);
         snapshot.connection.lastError = null;
         prependMockLog(snapshot, "info", "Relay 已重新连接");
     });
@@ -329,21 +507,8 @@ export const disconnectRelay = async (): Promise<void> => {
         return;
     }
 
+    await disconnectConnection("ws-v4");
     updateMockSnapshot((snapshot) => {
-        snapshot.connection.state = "disconnected";
-        snapshot.connection.appCount = 0;
-        snapshot.connection.controllerId = null;
-        snapshot.connection.pairingUrl = null;
-        snapshot.device = null;
-        snapshot.devices = [];
-        snapshot.sources.forEach((source) => {
-            source.assignedChannelCount = 0;
-        });
-        snapshot.selectedDeviceId = null;
-        snapshot.outputDeviceCount = 0;
-        snapshot.output.state = "idle";
-        snapshot.channels.a.status = "disconnected";
-        snapshot.channels.b.status = "disconnected";
         prependMockLog(snapshot, "warning", "已断开 Relay 连接");
     });
 };
@@ -475,14 +640,15 @@ export const startOutput = async (deviceId: string): Promise<void> => {
 
     await mockStartOutputCompletion;
     updateMockSnapshot((snapshot) => {
-        if (snapshot.connection.state !== "connected") {
-            throw new Error("设备尚未连接");
-        }
         const device = snapshot.devices.find(
             (candidate) => candidate.controlId === deviceId,
         );
         if (!device) {
             throw new Error("设备不存在或已断开");
+        }
+        const connection = snapshot.connections.find((item) => item.connectionId === device.connectionId);
+        if (connection?.state !== "connected" || device.initialization !== "ready") {
+            throw new Error("设备未连接或尚未初始化");
         }
         if (!device.sourceIdA || !device.sourceIdB) {
             throw new Error("请先为此设备的 A/B 通道选择输入源");
@@ -1029,6 +1195,8 @@ export const __resetMockBridge = (): void => {
 
 export const __emitMockSnapshot = (snapshot: HubSnapshot): void => {
     mockSnapshot = cloneSnapshot(snapshot);
+    const v4 = mockSnapshot.connections.find((connection) => connection.connectionId === "ws-v4");
+    if (v4) Object.assign(v4, mockSnapshot.connection);
     emitMockSnapshot();
 };
 

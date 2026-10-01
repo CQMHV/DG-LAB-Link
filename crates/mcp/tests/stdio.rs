@@ -223,6 +223,8 @@ async fn cold_stdio_protocol_and_http_share_one_core_and_eof_releases_the_last_h
     for uri in [
         "dglab://status",
         "dglab://devices",
+        "dglab://connections",
+        "dglab://bluetooth",
         "dglab://sources",
         "dglab://logs",
     ] {
@@ -236,6 +238,17 @@ async fn cold_stdio_protocol_and_http_share_one_core_and_eof_releases_the_last_h
     assert_eq!(status["connection"]["state"], "disconnected");
     assert!(status["connection"]["controllerId"].is_null());
     assert_eq!(status["outputDeviceCount"], 0);
+    for (uri, field) in [
+        ("dglab://connections", "connections"),
+        ("dglab://bluetooth", "bluetooth"),
+    ] {
+        let resource = stdio.request("resources/read", json!({"uri":uri})).await;
+        let value: Value =
+            serde_json::from_str(resource["result"]["contents"][0]["text"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(value, status[field]);
+        assert!(value.is_array());
+    }
 
     let observer = Client::connect(directory.path(), "CLI-style observer", None)
         .await

@@ -195,3 +195,5 @@ Invoke-WebRequest -Uri $mcp.url -Method Post -Headers $headers -ContentType "app
 排障时可直接执行 `dg-lab-link-core --json --config-dir <目录>`，端口占用等启动错误以 `{code, message}` 写入 stderr；core 的 `--port` 在绑定成功后持久保存控制端口，`--relay-endpoint` 用于覆盖模拟 Relay 地址。直接启动 core 不增加持有者，十秒内没有 GUI/CLI/stdio MCP 持有时仍按原生命周期退出；HTTP observer 不延长这个期限。需要长期运行时使用 CLI `serve` 或保持 stdio MCP 会话。
 
 CLI/MCP/core 无界面运行也需要本机音频设备才可使用音频采集或播放；设备输出和声音功能仍须按 [真机验收清单](REAL_DEVICE_CHECKLIST.md) 验证。
+
+V3／V4 连接管理、郊狼 3.0 BLE 扫描和设备参数用法见 [传输接入说明](TRANSPORTS.md)。两种 MCP 传输共用新增工具及 `dglab://connections`、`dglab://bluetooth` 资源。

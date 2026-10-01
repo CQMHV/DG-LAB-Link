@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-relay-endpoint"
+description = "Enables the set_relay_endpoint command without any pre-configured scope."
+commands.allow = ["set_relay_endpoint"]
+
+[[permission]]
+identifier = "deny-set-relay-endpoint"
+description = "Denies the set_relay_endpoint command without any pre-configured scope."
+commands.deny = ["set_relay_endpoint"]

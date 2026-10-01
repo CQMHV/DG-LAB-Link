@@ -97,7 +97,7 @@ async fn independent_http_process_observes_core_and_rejects_untrusted_requests()
     let resources = common::request(&config, "resources/list", json!({})).await;
     assert_eq!(
         resources["result"]["resources"].as_array().unwrap().len(),
-        4
+        6
     );
     let selected = common::request(
         &config,

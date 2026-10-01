@@ -201,16 +201,40 @@
           "markdownDescription": "Enables the choose_recording_destination command without any pre-configured scope."
         },
         {
+          "description": "Enables the connect_bluetooth command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-connect-bluetooth",
+          "markdownDescription": "Enables the connect_bluetooth command without any pre-configured scope."
+        },
+        {
           "description": "Enables the connect_relay command without any pre-configured scope.",
           "type": "string",
           "const": "allow-connect-relay",
           "markdownDescription": "Enables the connect_relay command without any pre-configured scope."
         },
         {
+          "description": "Enables the connect_transport command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-connect-transport",
+          "markdownDescription": "Enables the connect_transport command without any pre-configured scope."
+        },
+        {
           "description": "Enables the delete_custom_waveform command without any pre-configured scope.",
           "type": "string",
           "const": "allow-delete-custom-waveform",
           "markdownDescription": "Enables the delete_custom_waveform command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the disconnect_bluetooth command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-disconnect-bluetooth",
+          "markdownDescription": "Enables the disconnect_bluetooth command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the disconnect_connection command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-disconnect-connection",
+          "markdownDescription": "Enables the disconnect_connection command without any pre-configured scope."
         },
         {
           "description": "Enables the disconnect_relay command without any pre-configured scope.",
@@ -229,6 +253,18 @@
           "type": "string",
           "const": "allow-get-app-preferences",
           "markdownDescription": "Enables the get_app_preferences command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_bluetooth_config command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-bluetooth-config",
+          "markdownDescription": "Enables the get_bluetooth_config command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_connections command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-connections",
+          "markdownDescription": "Enables the get_connections command without any pre-configured scope."
         },
         {
           "description": "Enables the get_custom_waveform command without any pre-configured scope.",
@@ -267,6 +303,12 @@
           "markdownDescription": "Enables the parse_waveform_files command without any pre-configured scope."
         },
         {
+          "description": "Enables the refresh_connection_pairing command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-refresh-connection-pairing",
+          "markdownDescription": "Enables the refresh_connection_pairing command without any pre-configured scope."
+        },
+        {
           "description": "Enables the refresh_pairing command without any pre-configured scope.",
           "type": "string",
           "const": "allow-refresh-pairing",
@@ -277,6 +319,12 @@
           "type": "string",
           "const": "allow-reorder-custom-waveforms",
           "markdownDescription": "Enables the reorder_custom_waveforms command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the scan_bluetooth command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-scan-bluetooth",
+          "markdownDescription": "Enables the scan_bluetooth command without any pre-configured scope."
         },
         {
           "description": "Enables the select_custom_waveform command without any pre-configured scope.",
@@ -301,6 +349,12 @@
           "type": "string",
           "const": "allow-set-auto-start",
           "markdownDescription": "Enables the set_auto_start command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_bluetooth_config command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-bluetooth-config",
+          "markdownDescription": "Enables the set_bluetooth_config command without any pre-configured scope."
         },
         {
           "description": "Enables the set_close_to_tray command without any pre-configured scope.",
@@ -331,6 +385,12 @@
           "type": "string",
           "const": "allow-set-fixed-waveform",
           "markdownDescription": "Enables the set_fixed_waveform command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_relay_endpoint command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-relay-endpoint",
+          "markdownDescription": "Enables the set_relay_endpoint command without any pre-configured scope."
         },
         {
           "description": "Enables the set_start_minimized command without any pre-configured scope.",
@@ -399,16 +459,40 @@
           "markdownDescription": "Denies the choose_recording_destination command without any pre-configured scope."
         },
         {
+          "description": "Denies the connect_bluetooth command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-connect-bluetooth",
+          "markdownDescription": "Denies the connect_bluetooth command without any pre-configured scope."
+        },
+        {
           "description": "Denies the connect_relay command without any pre-configured scope.",
           "type": "string",
           "const": "deny-connect-relay",
           "markdownDescription": "Denies the connect_relay command without any pre-configured scope."
         },
         {
+          "description": "Denies the connect_transport command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-connect-transport",
+          "markdownDescription": "Denies the connect_transport command without any pre-configured scope."
+        },
+        {
           "description": "Denies the delete_custom_waveform command without any pre-configured scope.",
           "type": "string",
           "const": "deny-delete-custom-waveform",
           "markdownDescription": "Denies the delete_custom_waveform command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the disconnect_bluetooth command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-disconnect-bluetooth",
+          "markdownDescription": "Denies the disconnect_bluetooth command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the disconnect_connection command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-disconnect-connection",
+          "markdownDescription": "Denies the disconnect_connection command without any pre-configured scope."
         },
         {
           "description": "Denies the disconnect_relay command without any pre-configured scope.",
@@ -427,6 +511,18 @@
           "type": "string",
           "const": "deny-get-app-preferences",
           "markdownDescription": "Denies the get_app_preferences command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_bluetooth_config command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-bluetooth-config",
+          "markdownDescription": "Denies the get_bluetooth_config command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_connections command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-connections",
+          "markdownDescription": "Denies the get_connections command without any pre-configured scope."
         },
         {
           "description": "Denies the get_custom_waveform command without any pre-configured scope.",
@@ -465,6 +561,12 @@
           "markdownDescription": "Denies the parse_waveform_files command without any pre-configured scope."
         },
         {
+          "description": "Denies the refresh_connection_pairing command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-refresh-connection-pairing",
+          "markdownDescription": "Denies the refresh_connection_pairing command without any pre-configured scope."
+        },
+        {
           "description": "Denies the refresh_pairing command without any pre-configured scope.",
           "type": "string",
           "const": "deny-refresh-pairing",
@@ -475,6 +577,12 @@
           "type": "string",
           "const": "deny-reorder-custom-waveforms",
           "markdownDescription": "Denies the reorder_custom_waveforms command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the scan_bluetooth command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-scan-bluetooth",
+          "markdownDescription": "Denies the scan_bluetooth command without any pre-configured scope."
         },
         {
           "description": "Denies the select_custom_waveform command without any pre-configured scope.",
@@ -499,6 +607,12 @@
           "type": "string",
           "const": "deny-set-auto-start",
           "markdownDescription": "Denies the set_auto_start command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_bluetooth_config command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-bluetooth-config",
+          "markdownDescription": "Denies the set_bluetooth_config command without any pre-configured scope."
         },
         {
           "description": "Denies the set_close_to_tray command without any pre-configured scope.",
@@ -529,6 +643,12 @@
           "type": "string",
           "const": "deny-set-fixed-waveform",
           "markdownDescription": "Denies the set_fixed_waveform command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_relay_endpoint command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-relay-endpoint",
+          "markdownDescription": "Denies the set_relay_endpoint command without any pre-configured scope."
         },
         {
           "description": "Denies the set_start_minimized command without any pre-configured scope.",

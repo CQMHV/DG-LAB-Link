@@ -2451,6 +2451,157 @@ code {
     border-radius: 12px;
 }
 
+.transport-connections {
+    display: grid;
+    gap: 14px;
+}
+
+.transport-connection-card {
+    width: 100%;
+}
+
+.transport-connection-copy code {
+    display: block;
+    margin-top: 8px;
+    color: var(--muted);
+    font-size: 11px;
+    overflow-wrap: anywhere;
+}
+
+.transport-connection-actions,
+.transport-endpoint-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.transport-endpoint-row,
+.transport-connection-error {
+    grid-column: 1 / -1;
+}
+
+.transport-endpoint-row input {
+    flex: 1;
+    min-width: 160px;
+    height: 36px;
+    padding: 0 10px;
+    color: var(--text);
+    background: #111311;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font: inherit;
+    font-size: 12px;
+}
+
+.transport-endpoint-row input:focus-visible {
+    outline: 2px solid var(--gold-dark);
+    outline-offset: 2px;
+}
+
+.bluetooth-discovery-card {
+    max-width: 1180px;
+    margin: 14px auto 0;
+    padding: 24px 26px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+}
+
+.bluetooth-discovery-heading,
+.bluetooth-discovery-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+}
+
+.bluetooth-discovery-heading h2 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 6px 0;
+    font-size: 19px;
+}
+
+.bluetooth-discovery-heading p,
+.bluetooth-empty,
+.device-capability-note,
+.ble-device-settings p,
+.ble-config-status {
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.6;
+}
+
+.bluetooth-discovery-list {
+    display: grid;
+    gap: 12px;
+    margin-top: 18px;
+}
+
+.bluetooth-discovery-row {
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+}
+
+.bluetooth-discovery-row > div {
+    display: grid;
+    gap: 4px;
+    font-size: 12px;
+}
+
+.bluetooth-discovery-row code,
+.bluetooth-discovery-row span {
+    color: var(--muted);
+    font-size: 11px;
+    overflow-wrap: anywhere;
+}
+
+.device-initialization,
+.device-transport-label {
+    font-size: 11px;
+    color: var(--muted);
+}
+
+.ble-device-settings {
+    margin-top: 18px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+}
+
+.ble-device-settings summary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--gold);
+    cursor: pointer;
+    font-size: 13px;
+}
+
+.ble-device-settings .input-mode-fields {
+    margin: 14px 0;
+}
+
+.ble-config-status {
+    margin: 12px 0;
+}
+
+.ble-disconnect {
+    margin-top: 14px;
+}
+
+@media (max-width: 780px) {
+    .transport-connection-actions {
+        grid-column: 1 / -1;
+    }
+
+    .bluetooth-discovery-heading {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+}
+
 .device-sync-card {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr) auto;

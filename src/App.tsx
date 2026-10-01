@@ -17,6 +17,14 @@ import {
     adjustIntensity,
     audioControl,
     connectRelay,
+    connectTransport,
+    disconnectConnection,
+    refreshConnectionPairing,
+    setRelayEndpoint,
+    scanBluetooth,
+    connectBluetooth,
+    disconnectBluetooth,
+    setBluetoothConfig,
     deleteCustomWaveform,
     getAppPreferences,
     importCustomWaveforms,
@@ -111,7 +119,7 @@ export default function App() {
     const [dismissedExternalError, setDismissedExternalError] = useState<
         string | null
     >(null);
-    const [pairingOpen, setPairingOpen] = useState(false);
+    const [pairingConnectionId, setPairingConnectionId] = useState<string | null>(null);
     const dashboardTabsInitialized = useRef(false);
     const demoMode = isBrowserDemo();
 
@@ -134,7 +142,10 @@ export default function App() {
         [pendingAction, refresh],
     );
 
-    const closePairing = useCallback(() => setPairingOpen(false), []);
+    const closePairing = useCallback(() => setPairingConnectionId(null), []);
+    const pairingConnection = pairingConnectionId === "ws-v4"
+        ? snapshot?.connection
+        : snapshot?.connections.find((connection) => connection.connectionId === pairingConnectionId);
 
     const handleAdjust = (
         channel: HubChannel,
@@ -393,7 +404,7 @@ export default function App() {
     };
 
     const runtimeError =
-        snapshot?.output.lastError ?? snapshot?.connection.lastError ?? null;
+        snapshot?.output.lastError ?? snapshot?.connection.lastError ?? snapshot?.connections.find((connection) => connection.lastError)?.lastError ?? null;
     const externalError = snapshotError ?? runtimeError;
     const visibleExternalError =
         externalError === dismissedExternalError ? null : externalError;
@@ -587,7 +598,7 @@ export default function App() {
                                 onMoveTab={handleMoveDeviceTab}
                                 onNewDeviceTab={handleNewDeviceTab}
                                 onFocusDetachedTab={handleFocusDetachedTab}
-                                onOpenPairing={() => setPairingOpen(true)}
+                                onOpenPairing={() => setPairingConnectionId("ws-v4")}
                                 onSelectDevice={handleSelectDevice}
                                 onSelectCustomWaveform={(deviceId, channel, presetId) =>
                                     void runAction(
@@ -668,7 +679,15 @@ export default function App() {
                                         setSyncAllDevices(enabled),
                                     )
                                 }
-                                onOpenPairing={() => setPairingOpen(true)}
+                                onOpenPairing={(connectionId = "ws-v4") => setPairingConnectionId(connectionId)}
+                                onConnect={(transport) => void runAction(`connect-${transport}`, () => connectTransport(transport))}
+                                onDisconnect={(connectionId) => void runAction(`disconnect-${connectionId}`, () => disconnectConnection(connectionId))}
+                                onRefreshPairing={(connectionId) => void runAction(`pairing-${connectionId}`, () => refreshConnectionPairing(connectionId))}
+                                onSetEndpoint={(transport, endpoint) => void runAction(`endpoint-${transport}`, () => setRelayEndpoint(transport, endpoint))}
+                                onScanBluetooth={() => void runAction("bluetooth-scan", async () => { await scanBluetooth(); })}
+                                onConnectBluetooth={(deviceId) => void runAction(`bluetooth-connect-${deviceId}`, () => connectBluetooth(deviceId))}
+                                onDisconnectBluetooth={(deviceId) => void runAction(`bluetooth-disconnect-${deviceId}`, () => disconnectBluetooth(deviceId))}
+                                onSaveBluetoothConfig={(deviceId, config) => void runAction(`bluetooth-config-${deviceId}`, () => setBluetoothConfig(deviceId, config))}
                                 pendingAction={pendingAction}
                                 snapshot={snapshot}
                             />
@@ -726,11 +745,12 @@ export default function App() {
                 )}
             </main>
 
-            {pairingOpen && snapshot?.connection.pairingUrl && (
+            {pairingConnectionId && pairingConnection?.pairingUrl && (
                 <PairingModal
-                    controllerId={snapshot.connection.controllerId}
+                    controllerId={pairingConnection.controllerId}
+                    protocol={pairingConnectionId === "ws-v3" ? "v3" : "v4"}
                     onClose={closePairing}
-                    pairingUrl={snapshot.connection.pairingUrl}
+                    pairingUrl={pairingConnection.pairingUrl}
                 />
             )}
         </div>

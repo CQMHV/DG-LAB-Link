@@ -167,6 +167,12 @@ impl ServerHandler for McpServer {
         let resources = [
             ("status", "共享状态", "共享 Hub 完整最新快照"),
             ("devices", "设备", "当前配对设备及 controlId"),
+            ("connections", "连接", "V4、V3 和蓝牙连接状态与配对信息"),
+            (
+                "bluetooth",
+                "蓝牙发现",
+                "最近一次主动扫描的郊狼 3.0 设备；读取资源不触发扫描",
+            ),
             ("sources", "输入源", "输入源分配及可用波形目录"),
             ("logs", "运行记录", "最近的有界运行记录"),
         ]
@@ -190,6 +196,8 @@ impl ServerHandler for McpServer {
         let value = match request.uri.as_str() {
             "dglab://status" => json!(snapshot),
             "dglab://devices" => json!(snapshot.devices),
+            "dglab://connections" => json!(snapshot.connections),
+            "dglab://bluetooth" => json!(snapshot.bluetooth),
             "dglab://sources" => {
                 json!({ "sources": snapshot.sources, "officialWaveforms": self.official_waveforms().await?, "customWaveforms": snapshot.custom_waveforms, "defaultSourceId": snapshot.default_source_id })
             }

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-bluetooth-config"
+description = "Enables the set_bluetooth_config command without any pre-configured scope."
+commands.allow = ["set_bluetooth_config"]
+
+[[permission]]
+identifier = "deny-set-bluetooth-config"
+description = "Denies the set_bluetooth_config command without any pre-configured scope."
+commands.deny = ["set_bluetooth_config"]

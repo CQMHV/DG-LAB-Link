@@ -8,6 +8,7 @@ use std::time::Duration;
 use clap::Parser;
 use dg_lab_link_core::model::Channel;
 use dg_lab_link_core::sources::audio::AudioAction;
+use dg_lab_link_core::transport::TransportKind;
 use dg_lab_link_core::waveforms::WaveformFile;
 use dg_lab_link_core::{ControlCommand, ControlError};
 use dg_lab_link_runtime::{Client, LocalConfig, config_dir, connect_or_spawn, core_executable};
@@ -294,6 +295,7 @@ async fn start_background(directory: &Path, machine: bool) -> Result<(), Control
 enum Request {
     Command(ControlCommand),
     SnapshotField(&'static str),
+    Connection(String),
 }
 
 async fn execute(client: &Client, request: Request) -> Result<Value, ControlError> {
@@ -302,6 +304,18 @@ async fn execute(client: &Client, request: Request) -> Result<Value, ControlErro
         Request::SnapshotField(field) => {
             let snapshot = client.call(ControlCommand::GetHubSnapshot).await?;
             Ok(snapshot[field].clone())
+        }
+        Request::Connection(id) => {
+            let value = client.call(ControlCommand::GetConnections).await?;
+            value
+                .as_array()
+                .and_then(|connections| {
+                    connections
+                        .iter()
+                        .find(|connection| connection["connectionId"] == id)
+                })
+                .cloned()
+                .ok_or_else(|| ControlError::new("connection_not_found", "连接不存在"))
         }
     }
 }
@@ -316,6 +330,49 @@ fn business_request(command: Command) -> Result<Request, ControlError> {
         Command::Relay {
             command: RelayCommand::Disconnect,
         } => C::DisconnectRelay,
+        Command::Connections { command } => match command {
+            ConnectionCommand::List => C::GetConnections,
+            ConnectionCommand::Connect {
+                transport,
+                endpoint,
+            } => C::ConnectTransport {
+                transport: transport.into(),
+                endpoint,
+            },
+            ConnectionCommand::Disconnect { connection_id } => {
+                C::DisconnectConnection { connection_id }
+            }
+            ConnectionCommand::Pairing {
+                connection_id,
+                refresh: true,
+            } => C::RefreshConnectionPairing { connection_id },
+            ConnectionCommand::Pairing {
+                connection_id,
+                refresh: false,
+            } => return Ok(Request::Connection(connection_id)),
+            ConnectionCommand::Endpoint {
+                transport,
+                endpoint,
+            } => C::SetRelayEndpoint {
+                transport: transport.into(),
+                endpoint,
+            },
+        },
+        Command::Bluetooth { command } => match command {
+            BluetoothCommand::Scan { duration_ms } => C::ScanBluetooth { duration_ms },
+            BluetoothCommand::Connect { device_id } => C::ConnectBluetooth { device_id },
+            BluetoothCommand::Disconnect { device } => C::DisconnectBluetooth { device_id: device },
+            BluetoothCommand::Config { device, input } => {
+                if input.params.is_none() && input.file.is_none() {
+                    C::GetBluetoothConfig { device_id: device }
+                } else {
+                    C::from_call(
+                        "set_bluetooth_config",
+                        json!({"deviceId":device,"config":read_json(input)?}),
+                    )?
+                }
+            }
+        },
         Command::Pairing { refresh: true } => C::RefreshPairing,
         Command::Pairing { refresh: false } => return Ok(Request::SnapshotField("connection")),
         Command::Devices { command: None } => return Ok(Request::SnapshotField("devices")),
@@ -554,6 +611,15 @@ fn channel_name(channel: ChannelArg) -> &'static str {
         ChannelArg::B => "b",
     }
 }
+
+impl From<WsTransport> for TransportKind {
+    fn from(transport: WsTransport) -> Self {
+        match transport {
+            WsTransport::V4 => Self::WsV4,
+            WsTransport::V3 => Self::WsV3,
+        }
+    }
+}
 impl From<ChannelArg> for Channel {
     fn from(channel: ChannelArg) -> Self {
         match channel {
@@ -721,6 +787,85 @@ mod tests {
         assert_eq!(
             read_waveforms(vec![path]).unwrap_err().code,
             "request_too_large"
+        );
+    }
+
+    #[test]
+    fn transport_commands_keep_v4_default_and_require_explicit_ble_targets() {
+        let cli = Cli::try_parse_from(["cli", "connections", "connect"]).unwrap();
+        let Request::Command(ControlCommand::ConnectTransport {
+            transport,
+            endpoint,
+        }) = business_request(cli.command).unwrap()
+        else {
+            panic!("expected connection")
+        };
+        assert_eq!(transport, TransportKind::WsV4);
+        assert_eq!(endpoint, None);
+        let cli = Cli::try_parse_from([
+            "cli",
+            "connections",
+            "connect",
+            "--transport",
+            "v3",
+            "--endpoint",
+            "ws://127.0.0.1:9000",
+        ])
+        .unwrap();
+        let Request::Command(ControlCommand::ConnectTransport {
+            transport,
+            endpoint,
+        }) = business_request(cli.command).unwrap()
+        else {
+            panic!("expected V3")
+        };
+        assert_eq!(transport, TransportKind::WsV3);
+        assert_eq!(endpoint.as_deref(), Some("ws://127.0.0.1:9000"));
+        assert!(Cli::try_parse_from(["cli", "bluetooth", "disconnect"]).is_err());
+        assert!(Cli::try_parse_from(["cli", "bluetooth", "config"]).is_err());
+        let cli = Cli::try_parse_from(["cli", "bluetooth", "scan", "--json"]).unwrap();
+        assert!(cli.json);
+        assert!(matches!(
+            business_request(cli.command).unwrap(),
+            Request::Command(ControlCommand::ScanBluetooth { duration_ms: 3000 })
+        ));
+    }
+
+    #[test]
+    fn bluetooth_configuration_loads_json_file_before_connecting() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("ble.json");
+        std::fs::write(&path, r#"{"maxStrengthA":90,"wheelProtectionValue":12}"#).unwrap();
+        let request = business_request(Command::Bluetooth {
+            command: BluetoothCommand::Config {
+                device: "ble-control-id".to_owned(),
+                input: JsonInput {
+                    params: None,
+                    file: Some(path.clone()),
+                },
+            },
+        })
+        .unwrap();
+        let Request::Command(ControlCommand::SetBluetoothConfig { device_id, config }) = request
+        else {
+            panic!("expected BLE config")
+        };
+        assert_eq!(device_id, "ble-control-id");
+        assert_eq!(config.max_strength_a, 90);
+        assert_eq!(config.frequency_balance_a, 160);
+        assert_eq!(config.wheel_protection_value, 12);
+        std::fs::write(&path, "invalid JSON").unwrap();
+        assert!(
+            business_request(Command::Bluetooth {
+                command: BluetoothCommand::Config {
+                    device: "ble-control-id".to_owned(),
+                    input: JsonInput {
+                        params: None,
+                        file: Some(path)
+                    },
+                }
+            })
+            .is_err()
         );
     }
 }

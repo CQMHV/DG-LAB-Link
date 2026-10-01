@@ -9,12 +9,14 @@ import QRCode from "qrcode";
 import { useEffect, useRef, useState } from "react";
 
 interface PairingModalProps {
+    protocol?: "v4" | "v3";
     controllerId: string | null;
     pairingUrl: string;
     onClose: () => void;
 }
 
 export const PairingModal = ({
+    protocol = "v4",
     controllerId,
     pairingUrl,
     onClose,
@@ -150,7 +152,7 @@ export const PairingModal = ({
             <section className="pairing-modal" ref={modalRef}>
                 <div className="modal-heading">
                     <div>
-                        <span className="eyebrow">DG-LAB SOCKET V4</span>
+                        <span className="eyebrow">DG-LAB SOCKET {protocol.toUpperCase()}</span>
                         <h2>配对 DG-LAB APP</h2>
                     </div>
                     <button
