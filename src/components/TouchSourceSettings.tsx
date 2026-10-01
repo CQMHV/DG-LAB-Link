@@ -49,7 +49,7 @@ export const TouchSourceSettings = ({ config, customWaveforms, disabled, onSave,
     return (
         <section aria-label="触控模式配置" className="input-mode-settings">
             <header className="input-mode-heading"><HandTap aria-hidden="true" size={21} /><h3>触控配置</h3></header>
-            <p className="input-mode-note">配置由所有设备共用，触点按设备独立控制。相对强度不会改变通道的基础强度。</p>
+            <p className="input-mode-note">配置由所有设备共用。控制台的 A/B 面板分别控制对应通道，可同时触控；相对强度不会改变通道的基础强度。通道分配用于 CLI / MCP 的未指定通道触控输入。</p>
             <fieldset className="input-mode-fields" disabled={disabled || loadingWaveform}>
                 <label>触控面板<select aria-label="触控面板" value={draft.mode} onChange={(event) => field("mode", event.currentTarget.value as TouchConfig["mode"])}><option value="free">自由触控</option><option value="rhythm">律动触控</option></select></label>
                 <label>通道分配<select aria-label="触控通道分配" value={draft.routing} onChange={(event) => field("routing", event.currentTarget.value as TouchConfig["routing"])}><option value="a">A 单通道</option><option value="b">B 单通道</option><option value="sync">AB 同步</option><option value="separate">AB 双指</option><option value="alternate">AB 轮替</option></select></label>
