@@ -19,6 +19,15 @@ use crate::sources::audio::{
 };
 use crate::sources::touch::{TouchConfig, TouchInput, TouchRuntime};
 use crate::sources::{WaveSource, WaveformConfig, builtin_registry};
+use crate::transport::v4::devices_get_request;
+#[cfg(test)]
+use crate::transport::v4::{append_pulse_request, clear_channel_request, stop_operation_requests};
+use crate::transport::{
+    BleParameters, BluetoothDevice, DEFAULT_V3_ENDPOINT, DeviceAddress, DeviceCapabilities,
+    DeviceOperation, DeviceSession, InitializationState, SessionEvent, SessionHandle,
+    TransportAction, TransportConnectionSnapshot, TransportError, TransportKind, V3_CONNECTION_ID,
+    V4_CONNECTION_ID, bluetooth_connection_id,
+};
 
 const HUB_COMMAND_CAPACITY: usize = 64;
 const HUB_SAFETY_COMMAND_CAPACITY: usize = 8;
@@ -117,12 +126,18 @@ pub struct ConnectionSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct DeviceSnapshot {
     pub control_id: String,
+    pub connection_id: String,
+    pub transport: TransportKind,
+    pub initialization: InitializationState,
+    pub capabilities: DeviceCapabilities,
+    pub ble_parameters: Option<BleParameters>,
+    pub configuration_status: Option<String>,
     pub id: Value,
     pub name: String,
     #[serde(rename = "type")]
     pub device_type: String,
     pub slot_id: String,
-    pub power: u16,
+    pub power: Option<u16>,
     pub intensity_a: u16,
     pub intensity_b: u16,
     pub intensity_limit_a: u16,
@@ -214,6 +229,10 @@ pub struct LogSnapshot {
 pub struct HubSnapshot {
     pub revision: u64,
     pub connection: ConnectionSnapshot,
+    #[serde(default)]
+    pub connections: Vec<TransportConnectionSnapshot>,
+    #[serde(default)]
+    pub bluetooth: Vec<BluetoothDevice>,
     pub device: Option<DeviceSnapshot>,
     pub devices: Vec<DeviceSnapshot>,
     pub selected_device_id: Option<String>,
@@ -239,6 +258,8 @@ impl HubSnapshot {
     ) -> Self {
         Self {
             revision: 0,
+            connections: Vec::new(),
+            bluetooth: Vec::new(),
             connection: ConnectionSnapshot {
                 state: ConnectionState::Disconnected,
                 endpoint,
@@ -315,10 +336,12 @@ pub enum HubError {
     QueueBusy,
     #[error("Relay 操作失败：{0}")]
     Relay(String),
+    #[error("{0}")]
+    Transport(TransportError),
 }
 
 impl HubError {
-    pub const fn code(&self) -> &'static str {
+    pub fn code(&self) -> &str {
         match self {
             Self::Stopped => "hub_stopped",
             Self::NotConnected => "not_connected",
@@ -335,7 +358,14 @@ impl HubError {
             Self::InvalidConnectionTimeout => "invalid_connection_timeout",
             Self::QueueBusy => "queue_busy",
             Self::Relay(_) => "relay_error",
+            Self::Transport(error) => &error.code,
         }
+    }
+}
+
+impl From<TransportError> for HubError {
+    fn from(error: TransportError) -> Self {
+        Self::Transport(error)
     }
 }
 
@@ -349,6 +379,14 @@ impl From<RelayClientError> for HubError {
 }
 
 enum HubCommand {
+    ScanResult {
+        devices: Vec<BluetoothDevice>,
+    },
+    Transport {
+        action: TransportAction,
+        safety_epoch: u64,
+        reply: oneshot::Sender<Result<Value, HubError>>,
+    },
     SetTouchConfig {
         config: TouchConfig,
         reply: oneshot::Sender<Result<(), HubError>>,
@@ -429,6 +467,10 @@ enum HubCommand {
 }
 
 enum HubSafetyCommand {
+    DisconnectConnection {
+        connection_id: String,
+        reply: oneshot::Sender<Result<(), HubError>>,
+    },
     StopOutput {
         device_id: String,
         reply: oneshot::Sender<Result<(), HubError>>,
@@ -450,6 +492,30 @@ pub struct HubHandle {
 }
 
 impl HubHandle {
+    pub(crate) fn safety_generation(&self) -> u64 {
+        self.safety_epoch.load(Ordering::Acquire)
+    }
+    pub async fn transport(&self, action: TransportAction) -> Result<Value, HubError> {
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .try_send(HubCommand::Transport {
+                action,
+                safety_epoch: self.safety_epoch.load(Ordering::Acquire),
+                reply,
+            })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => HubError::QueueBusy,
+                _ => HubError::Stopped,
+            })?;
+        response.await.map_err(|_| HubError::Stopped)?
+    }
+    pub async fn disconnect_connection(&self, connection_id: String) -> Result<(), HubError> {
+        self.safety_request(|reply| HubSafetyCommand::DisconnectConnection {
+            connection_id,
+            reply,
+        })
+        .await
+    }
     pub fn update_touch_input(&self, input: TouchInput) -> Result<(), HubError> {
         let snapshot = self.snapshots.borrow();
         let device = snapshot
@@ -837,22 +903,7 @@ struct FixedWaveformRuntime {
     source: Box<dyn WaveSource>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct DeviceKey {
-    client_id: String,
-    slot_id: String,
-}
-
-impl DeviceKey {
-    fn control_id(&self) -> String {
-        format!(
-            "{}:{}{}",
-            self.client_id.len(),
-            self.client_id,
-            self.slot_id
-        )
-    }
-}
+type DeviceKey = DeviceAddress;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct IntensityKey {
@@ -898,6 +949,7 @@ pub struct HubRuntime {
     audio_features_active: bool,
     audio_bindings: BTreeMap<SourceBindingKey, AudioMappingRuntime>,
     commands: mpsc::Receiver<HubCommand>,
+    command_sender: mpsc::Sender<HubCommand>,
     safety_commands: mpsc::Receiver<HubSafetyCommand>,
     snapshot_sender: watch::Sender<HubSnapshot>,
     completion_sender: watch::Sender<Option<Result<(), HubError>>>,
@@ -912,6 +964,12 @@ pub struct HubRuntime {
     initialized_source_devices: BTreeSet<DeviceKey>,
     source_sync_devices: BTreeSet<DeviceKey>,
     relay: Option<RelayClientHandle>,
+    sessions: BTreeMap<String, SessionHandle>,
+    session_events: Option<mpsc::Sender<(u64, SessionEvent)>>,
+    session_identities: BTreeMap<String, u64>,
+    next_session_identity: u64,
+    session_tasks: Vec<tokio::task::JoinHandle<()>>,
+    connection_started: BTreeMap<String, Instant>,
     apps: BTreeSet<String>,
     devices: BTreeMap<DeviceKey, Value>,
     selected_device: Option<DeviceKey>,
@@ -1086,7 +1144,7 @@ pub fn create_hub_with_source_preferences(
     (
         HubHandle {
             touch_mailbox: Arc::clone(&touch_mailbox),
-            commands: command_sender,
+            commands: command_sender.clone(),
             safety_commands: safety_sender,
             snapshots: snapshot_receiver,
             shutdown: shutdown.clone(),
@@ -1103,6 +1161,7 @@ pub fn create_hub_with_source_preferences(
             audio_features_active: false,
             audio_bindings: BTreeMap::new(),
             commands: command_receiver,
+            command_sender,
             safety_commands: safety_receiver,
             snapshot_sender,
             completion_sender,
@@ -1117,6 +1176,12 @@ pub fn create_hub_with_source_preferences(
             initialized_source_devices: BTreeSet::new(),
             source_sync_devices: BTreeSet::new(),
             relay: None,
+            sessions: BTreeMap::new(),
+            session_events: None,
+            session_identities: BTreeMap::new(),
+            next_session_identity: 0,
+            session_tasks: Vec::new(),
+            connection_started: BTreeMap::new(),
             apps: BTreeSet::new(),
             devices: BTreeMap::new(),
             selected_device: None,
@@ -1174,6 +1239,499 @@ fn build_fixed_waveform_runtime(config: WaveformConfig) -> Result<FixedWaveformR
 }
 
 impl HubRuntime {
+    pub fn set_initial_v3_endpoint(&mut self, endpoint: String) {
+        self.snapshot.connections.push(TransportConnectionSnapshot {
+            connection_id: V3_CONNECTION_ID.to_owned(),
+            transport: TransportKind::WsV3,
+            state: ConnectionState::Disconnected,
+            endpoint,
+            controller_id: None,
+            pairing_url: None,
+            app_count: 0,
+            last_error: None,
+        });
+        self.publish();
+    }
+    fn device_session(&self, device: &DeviceKey) -> Result<DeviceSession, HubError> {
+        if device.connection_id == V4_CONNECTION_ID {
+            self.relay
+                .clone()
+                .map(DeviceSession::V4)
+                .ok_or(HubError::Stopped)
+        } else {
+            self.sessions
+                .get(&device.connection_id)
+                .cloned()
+                .map(DeviceSession::Local)
+                .ok_or(HubError::DeviceUnavailable)
+        }
+    }
+    fn register_session(
+        &mut self,
+        connection_id: String,
+        spawn: impl FnOnce(mpsc::Sender<SessionEvent>) -> (SessionHandle, tokio::task::JoinHandle<()>),
+    ) {
+        self.next_session_identity = self.next_session_identity.saturating_add(1);
+        let identity = self.next_session_identity;
+        self.session_identities
+            .insert(connection_id.clone(), identity);
+        let (sender, mut events) = mpsc::channel(RELAY_EVENT_CAPACITY);
+        let (handle, task) = spawn(sender);
+        self.sessions.insert(connection_id, handle);
+        self.session_tasks.retain(|task| !task.is_finished());
+        self.session_tasks.push(task);
+        let sender = self
+            .session_events
+            .as_ref()
+            .expect("session event queue")
+            .clone();
+        self.session_tasks.push(tokio::spawn(async move {
+            while let Some(event) = events.recv().await {
+                if sender.send((identity, event)).await.is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+
+    async fn handle_current_session_event(&mut self, identity: u64, event: SessionEvent) {
+        let connection_id = match &event {
+            SessionEvent::Connection(connection) => &connection.connection_id,
+            SessionEvent::Device { connection_id, .. }
+            | SessionEvent::Removed { connection_id, .. }
+            | SessionEvent::OperationFinished { connection_id, .. }
+            | SessionEvent::Log { connection_id, .. } => connection_id,
+        };
+        if self.session_identities.get(connection_id) == Some(&identity) {
+            self.handle_session_event(event).await;
+        }
+    }
+
+    fn update_connection(&mut self, connection: TransportConnectionSnapshot) {
+        if let Some(current) = self
+            .snapshot
+            .connections
+            .iter_mut()
+            .find(|c| c.connection_id == connection.connection_id)
+        {
+            *current = connection;
+        } else {
+            self.snapshot.connections.push(connection);
+        }
+    }
+
+    async fn handle_transport_action(
+        &mut self,
+        action: TransportAction,
+        reply: oneshot::Sender<Result<Value, HubError>>,
+    ) {
+        let generation = self.operation_generation;
+        let result: Result<(), HubError> = match action {
+            TransportAction::SetEndpoint {
+                transport,
+                endpoint,
+            } => match url::Url::parse(&endpoint) {
+                Ok(url)
+                    if matches!(url.scheme(), "ws" | "wss")
+                        && url.host_str().is_some()
+                        && endpoint.len() <= 2048
+                        && transport != TransportKind::Ble =>
+                {
+                    let id = if transport == TransportKind::WsV4 {
+                        V4_CONNECTION_ID
+                    } else {
+                        V3_CONNECTION_ID
+                    };
+                    let active = self
+                        .snapshot
+                        .connections
+                        .iter()
+                        .find(|c| c.connection_id == id)
+                        .is_some_and(|c| {
+                            matches!(
+                                c.state,
+                                ConnectionState::Connecting
+                                    | ConnectionState::Waiting
+                                    | ConnectionState::Connected
+                            ) && c.endpoint != endpoint
+                        });
+                    if active {
+                        Err(
+                            TransportError::new("connection_active", "请先断开该连接再修改地址")
+                                .into(),
+                        )
+                    } else {
+                        if transport == TransportKind::WsV4 {
+                            self.snapshot.connection.endpoint = endpoint;
+                        } else if let Some(c) = self
+                            .snapshot
+                            .connections
+                            .iter_mut()
+                            .find(|c| c.connection_id == id)
+                        {
+                            c.endpoint = endpoint;
+                        } else {
+                            self.set_initial_v3_endpoint(endpoint);
+                        }
+                        self.publish();
+                        Ok(())
+                    }
+                }
+                _ => Err(
+                    TransportError::new("invalid_endpoint", "端点必须是有效 WS/WSS 地址").into(),
+                ),
+            },
+            TransportAction::Connect {
+                transport,
+                endpoint,
+            } => {
+                if transport == TransportKind::WsV4 {
+                    if matches!(
+                        self.snapshot.connection.state,
+                        ConnectionState::Connecting
+                            | ConnectionState::Waiting
+                            | ConnectionState::Connected
+                    ) {
+                        Err(TransportError::new("already_connected", "V4 已连接或正在连接").into())
+                    } else {
+                        self.snapshot.connection.endpoint = endpoint;
+                        self.auto_reconnect_enabled = true;
+                        self.begin_connect();
+                        Ok(())
+                    }
+                } else if transport == TransportKind::WsV3 {
+                    let handle = self.sessions.get(V3_CONNECTION_ID).cloned();
+                    if let Some(handle) = handle {
+                        tokio::spawn(async move {
+                            let _ = reply.send(
+                                handle
+                                    .connect(endpoint, None, generation)
+                                    .await
+                                    .map(|_| Value::Null)
+                                    .map_err(Into::into),
+                            );
+                        });
+                        return;
+                    } else {
+                        Err(HubError::Stopped)
+                    }
+                } else {
+                    Err(
+                        TransportError::new("invalid_transport", "BLE 请使用扫描设备连接命令")
+                            .into(),
+                    )
+                }
+            }
+            TransportAction::RefreshPairing { connection_id } => {
+                if connection_id == V4_CONNECTION_ID {
+                    self.begin_connect();
+                    Ok(())
+                } else if connection_id == V3_CONNECTION_ID {
+                    if let Some(handle) = self.sessions.get(&connection_id).cloned() {
+                        let endpoint = self
+                            .snapshot
+                            .connections
+                            .iter()
+                            .find(|c| c.connection_id == connection_id)
+                            .map(|c| c.endpoint.clone())
+                            .unwrap_or_else(|| DEFAULT_V3_ENDPOINT.to_owned());
+                        self.operation_generation = self.operation_generation.saturating_add(1);
+                        let generation = self.operation_generation;
+                        handle.invalidate_operations(generation);
+                        self.remove_connection_devices(&connection_id);
+                        self.publish();
+                        tokio::spawn(async move {
+                            let result = match handle.disconnect().await {
+                                Ok(()) => handle.connect(endpoint, None, generation).await,
+                                Err(e) => Err(e),
+                            };
+                            let _ = reply.send(result.map(|_| Value::Null).map_err(Into::into));
+                        });
+                        return;
+                    } else {
+                        Err(HubError::Stopped)
+                    }
+                } else {
+                    Err(
+                        TransportError::new("unsupported_operation", "仅 WS 连接支持刷新配对")
+                            .into(),
+                    )
+                }
+            }
+            TransportAction::Scan { duration_ms } => {
+                if !(100..=10_000).contains(&duration_ms) {
+                    Err(
+                        TransportError::new("invalid_scan_duration", "扫描时长必须在100..=10000ms")
+                            .into(),
+                    )
+                } else {
+                    let commands = self.command_sender.clone();
+                    self.session_tasks.retain(|task| !task.is_finished());
+                    self.session_tasks.push(tokio::spawn(async move {
+                        let result = crate::transport::ble::scan(duration_ms).await;
+                        if let Ok(devices) = &result {
+                            let _ = commands.try_send(HubCommand::ScanResult {
+                                devices: devices.clone(),
+                            });
+                        }
+                        let _ = reply.send(
+                            result
+                                .map(|devices| {
+                                    serde_json::to_value(devices).expect("scan serializable")
+                                })
+                                .map_err(Into::into),
+                        );
+                    }));
+                    return;
+                }
+            }
+            TransportAction::ConnectBluetooth {
+                device_id,
+                parameters,
+            } => {
+                let id = bluetooth_connection_id(&device_id);
+                if device_id.is_empty() || device_id.len() > 256 {
+                    Err(TransportError::new("invalid_device_id", "扫描设备 ID 无效").into())
+                } else if let Err(error) = parameters.validate() {
+                    Err(error.into())
+                } else if self.sessions.len() > MAX_OUTPUT_DEVICES
+                    && !self.sessions.contains_key(&id)
+                {
+                    Err(HubError::TooManyDevices)
+                } else if self.session_events.is_some() {
+                    if !self.sessions.contains_key(&id) {
+                        let native_id = device_id.clone();
+                        self.register_session(id.clone(), |events| {
+                            crate::transport::ble::spawn(native_id, events)
+                        });
+                    }
+                    let handle = self.sessions[&id].clone();
+                    tokio::spawn(async move {
+                        let _ = reply.send(
+                            handle
+                                .connect(device_id, Some(parameters), generation)
+                                .await
+                                .map(|_| Value::Null)
+                                .map_err(Into::into),
+                        );
+                    });
+                    return;
+                } else {
+                    Err(HubError::Stopped)
+                }
+            }
+            TransportAction::ConfigureBluetooth {
+                device_id,
+                parameters,
+            } => {
+                if let Some(device) = self
+                    .devices
+                    .keys()
+                    .find(|d| d.control_id() == device_id && d.connection_id.starts_with("ble:"))
+                    .cloned()
+                {
+                    let handle = self.sessions[&device.connection_id].clone();
+                    tokio::spawn(async move {
+                        let _ = reply.send(
+                            handle
+                                .configure(parameters, generation)
+                                .await
+                                .map(|_| Value::Null)
+                                .map_err(Into::into),
+                        );
+                    });
+                    return;
+                } else {
+                    Err(HubError::DeviceUnavailable)
+                }
+            }
+        };
+        let _ = reply.send(result.map(|_| Value::Null));
+    }
+
+    async fn disconnect_connection(&mut self, connection_id: &str) -> Result<(), HubError> {
+        if connection_id == V4_CONNECTION_ID {
+            return self.disconnect_all(false).await;
+        }
+        let handle = self
+            .sessions
+            .get(connection_id)
+            .cloned()
+            .ok_or(HubError::DeviceUnavailable)?;
+        self.operation_generation = self.operation_generation.saturating_add(1);
+        handle.invalidate_operations(self.operation_generation);
+        self.remove_connection_devices(connection_id);
+        self.publish();
+        let result = self.wait_for_ordinary_relay(handle.disconnect()).await;
+        if let Some(connection) = self
+            .snapshot
+            .connections
+            .iter_mut()
+            .find(|c| c.connection_id == connection_id)
+        {
+            connection.state = if result.is_ok() {
+                ConnectionState::Disconnected
+            } else {
+                ConnectionState::Error
+            };
+            connection.controller_id = None;
+            connection.pairing_url = None;
+            connection.app_count = 0;
+            connection.last_error = result.as_ref().err().map(ToString::to_string);
+        }
+        self.connection_started.remove(connection_id);
+        self.publish();
+        if connection_id.starts_with("ble:") && !matches!(result, Err(HubError::QueueBusy)) {
+            handle.shutdown_now();
+            self.sessions.remove(connection_id);
+            self.session_identities.remove(connection_id);
+        }
+        result
+    }
+
+    async fn handle_session_event(&mut self, event: SessionEvent) {
+        match event {
+            SessionEvent::Connection(connection) => {
+                let id = connection.connection_id.clone();
+                if matches!(
+                    connection.state,
+                    ConnectionState::Disconnected | ConnectionState::Error
+                ) {
+                    self.connection_started.remove(&id);
+                    self.remove_connection_devices(&id);
+                } else if matches!(
+                    connection.state,
+                    ConnectionState::Connected | ConnectionState::Waiting
+                ) {
+                    self.connection_started
+                        .entry(id)
+                        .or_insert_with(Instant::now);
+                }
+                self.update_connection(connection);
+            }
+            SessionEvent::Device {
+                connection_id,
+                client_id,
+                device,
+            } => {
+                let key = DeviceKey {
+                    connection_id: connection_id.clone(),
+                    client_id: client_id.clone(),
+                    slot_id: device.slot_id.clone(),
+                };
+                let value = json!({"id":device.id,"slotId":device.slot_id,"name":device.name,"type":device.device_type,
+                    "initialization":device.initialization,"capabilities":device.capabilities,"bleParameters":device.ble_parameters,"configurationStatus":device.configuration_status,
+                    "channelAStatus":device.channel_a_status,"channelBStatus":device.channel_b_status,
+                    "props":{"power":device.power,"intensityA":device.intensity_a,"intensityB":device.intensity_b},
+                    "slotState":{"hasDevice":true,"channelA":{"intensityMax":device.intensity_limit_a},"channelB":{"intensityMax":device.intensity_limit_b}}});
+                self.devices.insert(key, value);
+                self.observe_projected_intensities(&connection_id, &client_id);
+                self.reconcile_connected_devices();
+                self.reconcile_intensity_lock();
+            }
+            SessionEvent::Removed {
+                connection_id,
+                client_id,
+            } => {
+                let keys = self
+                    .devices
+                    .keys()
+                    .filter(|k| k.connection_id == connection_id && k.client_id == client_id)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for key in keys {
+                    self.clear_pending_for_device(&key);
+                    self.reset_device_inputs(&key);
+                    self.devices.remove(&key);
+                }
+                self.reconcile_connected_devices();
+            }
+            SessionEvent::OperationFinished {
+                connection_id,
+                client_id,
+                request_id,
+                result,
+                confirmed,
+            } => {
+                if let Some(key) = self
+                    .pending_intensity_requests
+                    .get(&request_id)
+                    .cloned()
+                    .filter(|key| {
+                        key.device.connection_id == connection_id
+                            && key.device.client_id == client_id
+                    })
+                {
+                    match result {
+                        Ok(()) if confirmed => {
+                            if let Some(pending) = self.pending_intensity_operations.get_mut(&key) {
+                                pending.response_received = true;
+                            }
+                            self.observe_projected_intensities(&connection_id, &client_id);
+                        }
+                        Ok(()) => {}
+                        Err(error) => {
+                            self.remove_pending_intensity(&key);
+                            self.log(
+                                LogLevel::Error,
+                                format!("设备 {} 强度操作失败：{error}", key.device.control_id()),
+                            );
+                        }
+                    }
+                } else if let Some(pending) = self
+                    .pending_wave_operations
+                    .remove(&request_id)
+                    .filter(|p| {
+                        p.device.connection_id == connection_id && p.device.client_id == client_id
+                    })
+                {
+                    let Err(error) = result else {
+                        return;
+                    };
+                    if error.code == "operation_cancelled" {
+                        return;
+                    }
+                    // An I/O failure is isolated to the reporting device.
+                    let keys = vec![pending.device];
+                    for key in keys {
+                        self.output_devices.remove(&key);
+                        self.reset_device_inputs(&key);
+                        self.clear_pending_for_device(&key);
+                        if let Ok(session) = self.device_session(&key) {
+                            let generation = self.operation_generation;
+                            tokio::spawn(async move {
+                                let _ = session.stop(&key, None, false, generation).await;
+                            });
+                        }
+                    }
+                    if self.output_devices.is_empty()
+                        && self.snapshot.output.state == OutputState::Running
+                    {
+                        self.snapshot.output.state = OutputState::Error;
+                    }
+                    self.log(
+                        LogLevel::Error,
+                        format!("{connection_id} 操作失败：{error}"),
+                    );
+                }
+            }
+            SessionEvent::Log {
+                connection_id,
+                message,
+                warning,
+            } => self.log(
+                if warning {
+                    LogLevel::Warning
+                } else {
+                    LogLevel::Info
+                },
+                format!("{connection_id}：{message}"),
+            ),
+        }
+        self.refresh_selected_device_snapshot();
+        self.publish();
+    }
+
     pub fn set_initial_touch_config(&mut self, config: TouchConfig) -> Result<(), HubError> {
         TouchRuntime::new(config.clone())
             .map_err(|error| HubError::InvalidSourceConfig(error.to_string()))?;
@@ -1237,17 +1795,13 @@ impl HubRuntime {
         if !self.output_devices.contains(&binding.device) {
             return Ok(());
         }
-        let clear = self
-            .relay
-            .as_ref()
-            .ok_or(HubError::Stopped)?
-            .clear_wave_channel(
-                &binding.device.client_id,
-                &binding.device.slot_id,
-                binding.channel,
-                clear_channel_request(&binding.device.slot_id, binding.channel),
-                self.operation_generation,
-            );
+        let session = self.device_session(&binding.device)?;
+        let clear = session.stop(
+            &binding.device,
+            Some(binding.channel),
+            false,
+            self.operation_generation,
+        );
         self.wait_for_ordinary_relay(clear).await?;
         self.pending_wave_operations.retain(|_, pending| {
             pending.device != binding.device || pending.channel != binding.channel
@@ -1305,13 +1859,20 @@ impl HubRuntime {
             .filter(|(_, source)| source.as_str() == AUDIO_SOURCE_ID)
             .map(|(binding, _)| binding.clone())
             .collect::<Vec<_>>();
+        let mut failure = None;
         for binding in bindings {
-            self.clear_input_channel(&binding).await?;
+            if let Err(error) = self.clear_input_channel(&binding).await {
+                if matches!(error, HubError::QueueBusy) {
+                    return Err(error);
+                }
+                self.fail_device_output(&binding.device, format!("清理音频通道失败：{error}"));
+                failure.get_or_insert(error);
+            }
         }
         for runtime in self.audio_bindings.values_mut() {
             runtime.reset();
         }
-        Ok(())
+        failure.map_or(Ok(()), Err)
     }
 
     async fn set_touch_config(&mut self, config: TouchConfig) -> Result<(), HubError> {
@@ -1373,8 +1934,8 @@ impl HubRuntime {
             && let Err(error) = self.clear_audio_output().await
         {
             if !matches!(error, HubError::QueueBusy) {
-                self.fail_output(format!("清理过期音频波形失败：{error}"))
-                    .await;
+                self.log(LogLevel::Error, format!("清理过期音频波形失败：{error}"));
+                self.publish();
             }
             return;
         }
@@ -1456,7 +2017,7 @@ impl HubRuntime {
                 && let Err(error) = self.clear_input_channel(&binding).await
             {
                 if !matches!(error, HubError::QueueBusy) {
-                    self.fail_output(format!("清理触控通道失败：{error}")).await;
+                    self.fail_device_output(&binding.device, format!("清理触控通道失败：{error}"));
                 }
                 return;
             }
@@ -1472,6 +2033,9 @@ impl HubRuntime {
         let (event_sender, mut events) = mpsc::channel(RELAY_EVENT_CAPACITY);
         let (relay, mut relay_task) = spawn_relay_client(event_sender, RELAY_COMMAND_CAPACITY);
         self.relay = Some(relay);
+        let (session_sender, mut session_events) = mpsc::channel(RELAY_EVENT_CAPACITY);
+        self.session_events = Some(session_sender.clone());
+        self.register_session(V3_CONNECTION_ID.to_owned(), crate::transport::v3::spawn);
 
         let mut ticker = tokio::time::interval(WaveFrame::DURATION);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -1496,6 +2060,7 @@ impl HubRuntime {
                         None => commands_open = false,
                     }
                 }
+                Some((identity,event)) = session_events.recv() => self.handle_current_session_event(identity,event).await,
                 event = events.recv(), if events_open => {
                     match event {
                         Some(event) => self.handle_relay_event(event).await,
@@ -1521,6 +2086,27 @@ impl HubRuntime {
         self.snapshot.output.last_error = None;
         self.connection_started_at = None;
         let mut shutdown_result = self.send_stop_operations(true).await;
+        let local_handles = self.sessions.values().cloned().collect::<Vec<_>>();
+        let local_results =
+            futures_util::future::join_all(local_handles.iter().map(|handle| handle.disconnect()))
+                .await;
+        for result in local_results {
+            if shutdown_result.is_ok() {
+                shutdown_result = result.map_err(Into::into);
+            }
+        }
+        for handle in local_handles {
+            handle.shutdown_now();
+        }
+        let joins = self.session_tasks.drain(..).map(|mut task| async move {
+            if tokio::time::timeout(RELAY_JOIN_TIMEOUT, &mut task)
+                .await
+                .is_err()
+            {
+                task.abort();
+            }
+        });
+        futures_util::future::join_all(joins).await;
         if let Some(relay) = &self.relay {
             let disconnect_result =
                 tokio::time::timeout(RELAY_DISCONNECT_TIMEOUT, relay.disconnect())
@@ -1548,10 +2134,6 @@ impl HubRuntime {
     }
 
     fn begin_connect(&mut self) {
-        if self.snapshot.output.state == OutputState::Running {
-            self.snapshot.output.state = OutputState::Idle;
-            self.snapshot.output.last_error = None;
-        }
         self.reset_connection_state(ConnectionState::Connecting);
         self.log(LogLevel::Info, "正在连接 DG-LAB Relay");
         self.publish();
@@ -1574,6 +2156,20 @@ impl HubRuntime {
     }
 
     async fn disconnect_if_timed_out(&mut self) {
+        if self.snapshot.safety.connection_timeout_enabled {
+            let limit = Duration::from_secs(
+                u64::from(self.snapshot.safety.connection_timeout_minutes) * 60,
+            );
+            let expired = self
+                .connection_started
+                .iter()
+                .filter(|(_, started)| started.elapsed() >= limit)
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>();
+            for id in expired {
+                let _ = self.disconnect_connection(&id).await;
+            }
+        }
         if self.connection_timed_out() {
             let _ = self.disconnect_all(true).await;
         }
@@ -1582,8 +2178,43 @@ impl HubRuntime {
     async fn disconnect_all(&mut self, timed_out: bool) -> Result<(), HubError> {
         self.disable_auto_reconnect();
         self.connection_started_at = None;
-        self.snapshot.output.state = OutputState::Idle;
-        let stop_result = self.send_stop_operations(false).await;
+        // Legacy disconnect belongs to the V4 connection. Other transports keep
+        // their output, mappings and pending strength confirmations.
+        self.operation_generation = self.operation_generation.wrapping_add(1).max(1);
+        let generation = self.operation_generation;
+        if let Some(relay) = &self.relay {
+            relay.invalidate_operations(generation);
+        }
+        let devices = self
+            .devices
+            .keys()
+            .filter(|device| device.connection_id == V4_CONNECTION_ID)
+            .cloned()
+            .collect::<Vec<_>>();
+        for device in &devices {
+            self.output_devices.remove(device);
+            self.reset_device_inputs(device);
+            self.clear_pending_for_device(device);
+        }
+        if self.output_devices.is_empty() {
+            self.snapshot.output.state = OutputState::Idle;
+            self.snapshot.output.last_error = None;
+        }
+        self.refresh_selected_device_snapshot();
+        let mut stop_result = Ok(());
+        for device in &devices {
+            let result = match self.device_session(device) {
+                Ok(session) => {
+                    self.wait_for_ordinary_relay(session.stop(device, None, false, generation))
+                        .await
+                }
+                Err(error) => Err(error),
+            };
+            if let Err(error) = result {
+                stop_result = Err(error);
+                break;
+            }
+        }
         if matches!(stop_result, Err(HubError::QueueBusy)) {
             return stop_result;
         }
@@ -1601,11 +2232,10 @@ impl HubRuntime {
         let result = stop_result.and(disconnect_result);
         if result.is_ok() {
             self.reset_connection_state(ConnectionState::Disconnected);
-            self.snapshot.output.state = OutputState::Idle;
             self.log(
                 LogLevel::Warning,
                 if timed_out {
-                    "连接时长已到，所有设备输出与 Relay 连接已断开"
+                    "V4 连接时长已到，已停止所属设备并断开 Relay"
                 } else {
                     "已断开 DG-LAB Relay"
                 },
@@ -1614,8 +2244,10 @@ impl HubRuntime {
         } else if let Err(error) = &result {
             self.snapshot.connection.state = ConnectionState::Error;
             self.snapshot.connection.last_error = Some(error.to_string());
-            self.snapshot.output.state = OutputState::Error;
-            self.snapshot.output.last_error = Some(error.to_string());
+            if self.output_devices.is_empty() {
+                self.snapshot.output.state = OutputState::Error;
+                self.snapshot.output.last_error = Some(error.to_string());
+            }
             self.refresh_channel_statuses();
             self.log(
                 LogLevel::Error,
@@ -1628,6 +2260,21 @@ impl HubRuntime {
 
     async fn handle_command(&mut self, command: HubCommand) {
         match command {
+            HubCommand::ScanResult { devices } => {
+                self.snapshot.bluetooth = devices;
+                self.publish();
+            }
+            HubCommand::Transport {
+                action,
+                safety_epoch,
+                reply,
+            } => {
+                if safety_epoch != self.safety_epoch.load(Ordering::Acquire) {
+                    let _ = reply.send(Err(HubError::QueueBusy));
+                } else {
+                    self.handle_transport_action(action, reply).await;
+                }
+            }
             HubCommand::SetTouchConfig { config, reply } => {
                 let _ = reply.send(self.set_touch_config(config).await);
             }
@@ -1817,6 +2464,13 @@ impl HubRuntime {
 
     async fn handle_safety_command(&mut self, command: HubSafetyCommand) {
         match command {
+            HubSafetyCommand::DisconnectConnection {
+                connection_id,
+                reply,
+            } => {
+                let result = self.disconnect_connection(&connection_id).await;
+                let _ = reply.send(result);
+            }
             HubSafetyCommand::Disconnect(reply) => {
                 let _ = reply.send(self.disconnect_all(false).await);
             }
@@ -1910,10 +2564,15 @@ impl HubRuntime {
                 self.publish();
             }
             RelayEvent::Disconnected { reason, retryable } => {
+                let had_v4_output = self
+                    .output_devices
+                    .iter()
+                    .any(|device| device.connection_id == V4_CONNECTION_ID);
                 self.reset_connection_state(ConnectionState::Disconnected);
-                if self.snapshot.output.state == OutputState::Running {
+                if had_v4_output && self.output_devices.is_empty() {
                     self.snapshot.output.state = OutputState::Error;
-                    self.snapshot.output.last_error = Some("Relay 断开，输出已停止".to_owned());
+                    self.snapshot.output.last_error =
+                        Some("V4 Relay 断开，所属设备输出已停止".to_owned());
                 }
                 if retryable && self.auto_reconnect_enabled {
                     let delay = self.schedule_reconnect();
@@ -1983,19 +2642,23 @@ impl HubRuntime {
 
             if let Some(request_id) = request_id {
                 if let Some(pending) = self.pending_wave_operations.remove(request_id) {
-                    if pending.device.client_id != client_id {
+                    if pending.device.connection_id != V4_CONNECTION_ID
+                        || pending.device.client_id != client_id
+                    {
                         self.pending_wave_operations
                             .insert(request_id.to_owned(), pending);
                     } else if error.is_some()
                         && pending.generation == self.operation_generation
                         && self.snapshot.output.state == OutputState::Running
                     {
-                        wave_failure = error.clone();
+                        wave_failure = error.clone().map(|error| (pending.device, error));
                     }
                 }
 
                 if let Some(key) = self.pending_intensity_requests.remove(request_id) {
-                    if key.device.client_id == client_id {
+                    if key.device.connection_id == V4_CONNECTION_ID
+                        && key.device.client_id == client_id
+                    {
                         if error.is_some() {
                             if self
                                 .pending_intensity_operations
@@ -2036,8 +2699,13 @@ impl HubRuntime {
                 self.publish();
             }
 
-            if let Some(error) = wave_failure {
-                self.fail_output(format!("APP 拒绝波形操作：{error}")).await;
+            if let Some((device, error)) = wave_failure {
+                self.fail_device_output(&device, format!("APP 拒绝波形操作：{error}"));
+                self.log(
+                    LogLevel::Error,
+                    format!("APP 拒绝设备 {} 波形操作：{error}", device.control_id()),
+                );
+                self.publish();
                 return;
             }
             if let Some(error) = error {
@@ -2071,15 +2739,17 @@ impl HubRuntime {
         let previous_values = self
             .devices
             .iter()
-            .filter(|(key, _)| key.client_id == client_id)
+            .filter(|(key, _)| key.connection_id == V4_CONNECTION_ID && key.client_id == client_id)
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect::<BTreeMap<_, _>>();
         let previous = previous_values.keys().cloned().collect::<BTreeSet<_>>();
-        self.devices
-            .retain(|key, _| key.client_id.as_str() != client_id);
+        self.devices.retain(|key, _| {
+            key.connection_id != V4_CONNECTION_ID || key.client_id.as_str() != client_id
+        });
         for device in devices {
             if let Some(slot_id) = device.get("slotId").and_then(Value::as_str) {
                 let key = DeviceKey {
+                    connection_id: V4_CONNECTION_ID.to_owned(),
                     client_id: client_id.to_owned(),
                     slot_id: slot_id.to_owned(),
                 };
@@ -2094,13 +2764,13 @@ impl HubRuntime {
         let current = self
             .devices
             .keys()
-            .filter(|key| key.client_id == client_id)
+            .filter(|key| key.connection_id == V4_CONNECTION_ID && key.client_id == client_id)
             .cloned()
             .collect::<BTreeSet<_>>();
         for removed in previous.difference(&current) {
             self.clear_pending_for_device(removed);
         }
-        self.observe_projected_intensities(client_id);
+        self.observe_projected_intensities(V4_CONNECTION_ID, client_id);
         self.reconcile_connected_devices();
         self.refresh_selected_device_snapshot();
         self.reconcile_intensity_lock();
@@ -2111,6 +2781,7 @@ impl HubRuntime {
         if let Some(removed) = data.get("removed").and_then(Value::as_array) {
             for slot_id in removed.iter().filter_map(Value::as_str) {
                 let key = DeviceKey {
+                    connection_id: V4_CONNECTION_ID.to_owned(),
                     client_id: client_id.to_owned(),
                     slot_id: slot_id.to_owned(),
                 };
@@ -2123,6 +2794,7 @@ impl HubRuntime {
                 if let Some(slot_id) = device.get("slotId").and_then(Value::as_str) {
                     self.devices.insert(
                         DeviceKey {
+                            connection_id: V4_CONNECTION_ID.to_owned(),
                             client_id: client_id.to_owned(),
                             slot_id: slot_id.to_owned(),
                         },
@@ -2146,6 +2818,7 @@ impl HubRuntime {
             for patch in patches {
                 if let Some(slot_id) = patch.get("slotId").and_then(Value::as_str) {
                     let key = DeviceKey {
+                        connection_id: V4_CONNECTION_ID.to_owned(),
                         client_id: client_id.to_owned(),
                         slot_id: slot_id.to_owned(),
                     };
@@ -2155,7 +2828,7 @@ impl HubRuntime {
                 }
             }
         }
-        self.observe_projected_intensities(client_id);
+        self.observe_projected_intensities(V4_CONNECTION_ID, client_id);
         self.refresh_selected_device_snapshot();
         self.reconcile_intensity_lock();
         self.publish();
@@ -2163,8 +2836,9 @@ impl HubRuntime {
 
     fn remove_app(&mut self, client_id: &str) {
         self.apps.remove(client_id);
-        self.devices
-            .retain(|key, _| key.client_id.as_str() != client_id);
+        self.devices.retain(|key, _| {
+            key.connection_id != V4_CONNECTION_ID || key.client_id.as_str() != client_id
+        });
         self.clear_pending_for_client(client_id);
         self.snapshot.connection.app_count = self.apps.len();
         self.snapshot.connection.state = if self.apps.is_empty() {
@@ -2290,7 +2964,10 @@ impl HubRuntime {
                     snapshot.waveform_name_b = Some(runtime.config.preset_name.clone());
                 }
                 snapshot.source_sync = self.source_sync_devices.contains(key);
-                if !allow_app_control && let Some(lock) = self.intensity_lock_targets.get(key) {
+                if !allow_app_control
+                    && snapshot.transport != TransportKind::Ble
+                    && let Some(lock) = self.intensity_lock_targets.get(key)
+                {
                     snapshot.intensity_a = lock.a;
                     snapshot.intensity_b = lock.b;
                 }
@@ -2361,15 +3038,20 @@ impl HubRuntime {
     }
 
     fn start_output(&mut self, device_id: &str) -> Result<(), HubError> {
-        if self.apps.is_empty() {
-            return Err(HubError::NotConnected);
-        }
         let device = self
             .devices
             .keys()
             .find(|device| device.control_id() == device_id)
             .cloned()
             .ok_or(HubError::DeviceUnavailable)?;
+        let snapshot = self
+            .devices
+            .get(&device)
+            .and_then(|value| device_snapshot_from_value(&device, value))
+            .ok_or(HubError::DeviceUnavailable)?;
+        if snapshot.initialization != InitializationState::Ready {
+            return Err(HubError::DeviceUnavailable);
+        }
         if self.output_devices.contains(&device) {
             return Ok(());
         }
@@ -2406,12 +3088,16 @@ impl HubRuntime {
         if self.output_devices.is_empty() {
             return;
         }
-        if self
+        let timed_out = self
             .pending_wave_operations
             .values()
-            .any(|pending| pending.sent_at.elapsed() >= WAVE_OPERATION_RESPONSE_TIMEOUT)
-        {
-            self.fail_output("设备波形响应超时，输出已停止").await;
+            .filter(|pending| pending.sent_at.elapsed() >= WAVE_OPERATION_RESPONSE_TIMEOUT)
+            .map(|p| p.device.clone())
+            .collect::<BTreeSet<_>>();
+        if !timed_out.is_empty() {
+            for device in timed_out {
+                self.fail_device_output(&device, "设备波形响应超时，输出已停止".to_owned());
+            }
             return;
         }
         // `device.op` 会在波形任务播放完毕后才响应。网络或 APP 调度发生短暂抖动时，
@@ -2449,8 +3135,8 @@ impl HubRuntime {
                     .push(binding);
             }
         }
-        let mut frames_by_source = BTreeMap::<String, String>::new();
-        let mut frames_by_binding = BTreeMap::<SourceBindingKey, String>::new();
+        let mut frames_by_source = BTreeMap::<String, WaveFrame>::new();
+        let mut frames_by_binding = BTreeMap::<SourceBindingKey, WaveFrame>::new();
         let audio_features = self.audio_engine.latest();
         for (source_id, bindings) in &bindings_by_source {
             if source_id == TOUCH_SOURCE_ID {
@@ -2467,10 +3153,8 @@ impl HubRuntime {
                                 })
                                 .next_frames(std::time::Instant::now())
                         });
-                    frames_by_binding.insert(
-                        binding.clone(),
-                        encode_wave_frame(frames[binding.channel.as_v4() as usize]),
-                    );
+                    frames_by_binding
+                        .insert(binding.clone(), frames[binding.channel.as_v4() as usize]);
                 }
                 continue;
             }
@@ -2483,10 +3167,7 @@ impl HubRuntime {
                             AudioMappingRuntime::new(AudioChannelConfig::default())
                                 .expect("音频默认配置")
                         });
-                    frames_by_binding.insert(
-                        binding.clone(),
-                        encode_wave_frame(runtime.next_frame(&audio_features)),
-                    );
+                    frames_by_binding.insert(binding.clone(), runtime.next_frame(&audio_features));
                 }
                 continue;
             }
@@ -2507,7 +3188,7 @@ impl HubRuntime {
                             return;
                         }
                     };
-                    frames_by_binding.insert(binding.clone(), encode_wave_frame(frame));
+                    frames_by_binding.insert(binding.clone(), frame);
                 }
                 continue;
             }
@@ -2530,7 +3211,7 @@ impl HubRuntime {
                     return;
                 }
             };
-            frames_by_source.insert(source_id.clone(), encode_wave_frame(frame));
+            frames_by_source.insert(source_id.clone(), frame);
         }
         let mut sent = 0_u64;
         for (source_id, bindings) in bindings_by_source {
@@ -2547,27 +3228,20 @@ impl HubRuntime {
                     continue;
                 };
                 let request_id = Uuid::new_v4().to_string();
-                let request = append_pulse_request(
-                    &request_id,
-                    &binding.device.slot_id,
-                    binding.channel,
-                    frame_hex,
-                );
-                let send_result = self
-                    .relay
-                    .as_ref()
-                    .ok_or(HubError::Stopped)
-                    .and_then(|relay| {
-                        relay
-                            .try_send_wave_operation(
-                                &binding.device.client_id,
-                                &binding.device.slot_id,
-                                binding.channel,
-                                request,
-                                self.operation_generation,
-                            )
-                            .map_err(Into::into)
-                    });
+                let send_result = self.device_session(&binding.device).and_then(|session| {
+                    session
+                        .try_send(
+                            &binding.device,
+                            DeviceOperation::Wave {
+                                request_id: request_id.clone(),
+                                slot_id: binding.device.slot_id.clone(),
+                                channel: binding.channel,
+                                frame: *frame_hex,
+                            },
+                            self.operation_generation,
+                        )
+                        .map_err(Into::into)
+                });
                 match send_result {
                     Ok(()) => {
                         self.pending_wave_operations.insert(
@@ -2581,14 +3255,45 @@ impl HubRuntime {
                         );
                         sent += 1;
                     }
+                    Err(HubError::QueueBusy) => continue,
+                    Err(HubError::Transport(ref error)) if error.code == "queue_busy" => continue,
                     Err(error) => {
-                        self.fail_output(error.to_string()).await;
-                        return;
+                        self.output_devices.remove(&binding.device);
+                        self.reset_device_inputs(&binding.device);
+                        self.clear_pending_for_device(&binding.device);
+                        self.log(
+                            LogLevel::Error,
+                            format!("设备 {} 波形提交失败：{error}", binding.device.control_id()),
+                        );
+                        if self.output_devices.is_empty() {
+                            self.snapshot.output.state = OutputState::Error;
+                        }
                     }
                 }
             }
         }
         self.snapshot.output.frames_sent = self.snapshot.output.frames_sent.saturating_add(sent);
+        self.publish();
+    }
+
+    fn fail_device_output(&mut self, device: &DeviceKey, message: String) {
+        self.output_devices.remove(device);
+        self.reset_device_inputs(device);
+        self.clear_pending_for_device(device);
+        self.operation_generation = self.operation_generation.saturating_add(1);
+        if let Ok(session) = self.device_session(device) {
+            let device = device.clone();
+            let generation = self.operation_generation;
+            tokio::spawn(async move {
+                let _ = session.stop(&device, None, false, generation).await;
+            });
+        }
+        if self.output_devices.is_empty() {
+            self.snapshot.output.state = OutputState::Error;
+        }
+        self.snapshot.output.last_error = Some(message.clone());
+        self.log(LogLevel::Error, message);
+        self.refresh_selected_device_snapshot();
         self.publish();
     }
 
@@ -2616,9 +3321,6 @@ impl HubRuntime {
     ) -> Result<(), HubError> {
         if delta == 0 || !(-200..=200).contains(&delta) {
             return Err(HubError::InvalidDelta);
-        }
-        if self.apps.is_empty() {
-            return Err(HubError::NotConnected);
         }
         let selected = match device_id {
             Some(device_id) => self
@@ -2710,7 +3412,11 @@ impl HubRuntime {
         channel: Channel,
     ) -> Option<(u16, u16)> {
         let mut snapshot = device_snapshot_from_value(device, self.devices.get(device)?)?;
-        if !self.snapshot.safety.allow_app_intensity_control
+        if snapshot.initialization != InitializationState::Ready {
+            return None;
+        }
+        if snapshot.transport != TransportKind::Ble
+            && !self.snapshot.safety.allow_app_intensity_control
             && let Some(lock) = self.intensity_lock_targets.get(device)
         {
             snapshot.intensity_a = lock.a;
@@ -2743,9 +3449,15 @@ impl HubRuntime {
             return Err(HubError::QueueBusy);
         }
         let request_id = Uuid::new_v4().to_string();
-        self.send_operation(
-            &device.client_id,
-            add_intensity_request(&request_id, &device.slot_id, channel, delta),
+        self.device_session(&device)?.try_send(
+            &device,
+            DeviceOperation::AdjustIntensity {
+                request_id: request_id.clone(),
+                slot_id: device.slot_id.clone(),
+                channel,
+                delta,
+            },
+            self.operation_generation,
         )?;
         self.pending_intensity_requests
             .insert(request_id.clone(), key.clone());
@@ -3304,12 +4016,22 @@ impl HubRuntime {
             self.intensity_lock_targets.clear();
             return;
         }
-        self.intensity_lock_targets
-            .retain(|device, _| self.devices.contains_key(device));
+        self.intensity_lock_targets.retain(|device, _| {
+            self.devices.contains_key(device)
+                && matches!(
+                    device.connection_id.as_str(),
+                    V4_CONNECTION_ID | V3_CONNECTION_ID
+                )
+        });
         for (device, value) in &self.devices {
             let Some(snapshot) = device_snapshot_from_value(device, value) else {
                 continue;
             };
+            if snapshot.transport == TransportKind::Ble
+                || snapshot.initialization != InitializationState::Ready
+            {
+                continue;
+            }
             self.intensity_lock_targets
                 .entry(device.clone())
                 .or_insert(IntensityLockTarget {
@@ -3367,8 +4089,7 @@ impl HubRuntime {
             return Ok(());
         }
 
-        self.send_safety_requests(&device, stop_operation_requests(&device.slot_id, false))
-            .await?;
+        self.send_safety_requests(&device, false).await?;
         self.output_devices.remove(&device);
         self.reset_device_inputs(&device);
         self.pending_wave_operations
@@ -3429,31 +4150,28 @@ impl HubRuntime {
             self.audio_engine.emergency_stop();
         }
         let generation = self.advance_operation_generation();
-        let devices = if emergency {
-            self.devices.keys().cloned().collect::<Vec<_>>()
-        } else {
-            self.output_devices.iter().cloned().collect::<Vec<_>>()
-        };
+        let devices = self.devices.keys().cloned().collect::<Vec<_>>();
         if devices.is_empty() {
             return Ok(());
         }
-        let relay = self.relay.as_ref().cloned().ok_or(HubError::Stopped)?;
-        let mut first_error = None;
-        for device in devices {
-            let requests = stop_operation_requests(&device.slot_id, emergency);
-            let operation = relay.safety_stop(device.client_id, requests, generation);
-            let result = if emergency {
-                operation.await.map_err(HubError::from)
-            } else {
-                self.wait_for_ordinary_relay(operation).await
-            };
-            if let Err(error) = result {
-                if matches!(error, HubError::QueueBusy) {
-                    return Err(error);
-                }
-                first_error.get_or_insert(error);
+        let operations = devices.iter().map(|device| {
+            let session = self.device_session(device);
+            let device = device.clone();
+            async move {
+                session?
+                    .stop(&device, None, emergency, generation)
+                    .await
+                    .map_err(HubError::from)
             }
-        }
+        });
+        let results = futures_util::future::join_all(operations);
+        let results = if emergency {
+            results.await
+        } else {
+            self.wait_for_ordinary_relay(async { Ok::<_, HubError>(results.await) })
+                .await?
+        };
+        let first_error = results.into_iter().find_map(Result::err);
         if let Some(error) = first_error {
             Err(error)
         } else {
@@ -3466,15 +4184,14 @@ impl HubRuntime {
     async fn send_safety_requests(
         &mut self,
         device: &DeviceKey,
-        requests: Vec<Value>,
+        zero: bool,
     ) -> Result<(), HubError> {
-        let generation = self.advance_operation_generation();
-        self.relay
-            .as_ref()
-            .ok_or(HubError::Stopped)?
-            .safety_stop(device.client_id.clone(), requests, generation)
+        // A device stop must invalidate only its own session, preserving other protocols.
+        self.operation_generation = self.operation_generation.saturating_add(1);
+        self.clear_pending_for_device(device);
+        let session = self.device_session(device)?;
+        self.wait_for_ordinary_relay(session.stop(device, None, zero, self.operation_generation))
             .await
-            .map_err(Into::into)
     }
 
     fn advance_operation_generation(&mut self) -> u64 {
@@ -3487,6 +4204,9 @@ impl HubRuntime {
         if let Some(relay) = &self.relay {
             relay.invalidate_operations(self.operation_generation);
         }
+        for session in self.sessions.values() {
+            session.invalidate_operations(self.operation_generation);
+        }
         self.operation_generation
     }
 
@@ -3497,15 +4217,19 @@ impl HubRuntime {
 
     fn clear_pending_for_client(&mut self, client_id: &str) {
         self.clear_pending_intensities_for_client(client_id);
-        self.pending_wave_operations
-            .retain(|_, pending| pending.device.client_id != client_id);
+        self.pending_wave_operations.retain(|_, pending| {
+            pending.device.connection_id != V4_CONNECTION_ID
+                || pending.device.client_id != client_id
+        });
     }
 
     fn clear_pending_intensities_for_client(&mut self, client_id: &str) {
         let keys = self
             .pending_intensity_operations
             .keys()
-            .filter(|key| key.device.client_id == client_id)
+            .filter(|key| {
+                key.device.connection_id == V4_CONNECTION_ID && key.device.client_id == client_id
+            })
             .cloned()
             .collect::<Vec<_>>();
         for key in keys {
@@ -3527,11 +4251,13 @@ impl HubRuntime {
         }
     }
 
-    fn observe_projected_intensities(&mut self, client_id: &str) {
+    fn observe_projected_intensities(&mut self, connection_id: &str, client_id: &str) {
         let keys = self
             .pending_intensity_operations
             .keys()
-            .filter(|key| key.device.client_id == client_id)
+            .filter(|key| {
+                key.device.connection_id == connection_id && key.device.client_id == client_id
+            })
             .cloned()
             .collect::<Vec<_>>();
         let mut completed = Vec::new();
@@ -3561,14 +4287,6 @@ impl HubRuntime {
         }
     }
 
-    fn send_operation(&self, client_id: &str, data: Value) -> Result<(), HubError> {
-        self.relay
-            .as_ref()
-            .ok_or(HubError::Stopped)?
-            .try_send_operation(client_id.to_owned(), data, self.operation_generation)
-            .map_err(Into::into)
-    }
-
     fn send_to_app(&self, client_id: &str, data: Value) -> Result<(), HubError> {
         self.relay
             .as_ref()
@@ -3577,39 +4295,69 @@ impl HubRuntime {
             .map_err(Into::into)
     }
 
-    fn reset_connection_state(&mut self, state: ConnectionState) {
-        self.connection_started_at = None;
-        self.safety_epoch.fetch_add(1, Ordering::AcqRel);
-        self.apps.clear();
-        self.devices.clear();
-        self.device_source_bindings.clear();
-        self.fixed_waveform_bindings.clear();
-        self.touch_runtimes.clear();
-        self.touch_active_channels.clear();
+    fn remove_connection_devices(&mut self, connection_id: &str) {
+        self.connection_started.remove(connection_id);
+        let removed_ids = self
+            .devices
+            .keys()
+            .filter(|device| device.connection_id == connection_id)
+            .map(DeviceKey::control_id)
+            .collect::<BTreeSet<_>>();
+        self.devices
+            .retain(|device, _| device.connection_id != connection_id);
+        self.device_source_bindings
+            .retain(|binding, _| binding.device.connection_id != connection_id);
+        self.fixed_waveform_bindings
+            .retain(|binding, _| binding.device.connection_id != connection_id);
+        self.touch_runtimes
+            .retain(|device, _| device.connection_id != connection_id);
+        self.touch_active_channels
+            .retain(|device, _| device.connection_id != connection_id);
         self.touch_mailbox
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .clear();
-        self.audio_bindings.clear();
-        self.audio_engine.emergency_stop();
-        self.initialized_source_devices.clear();
-        self.source_sync_devices.clear();
-        self.selected_device = None;
-        self.output_devices.clear();
-        self.intensity_lock_targets.clear();
-        self.advance_operation_generation();
+            .retain(|device_id, _| !removed_ids.contains(device_id));
+        self.audio_bindings
+            .retain(|binding, _| binding.device.connection_id != connection_id);
+        self.initialized_source_devices
+            .retain(|device| device.connection_id != connection_id);
+        self.source_sync_devices
+            .retain(|device| device.connection_id != connection_id);
+        self.output_devices
+            .retain(|device| device.connection_id != connection_id);
+        self.intensity_lock_targets
+            .retain(|device, _| device.connection_id != connection_id);
+        self.pending_wave_operations
+            .retain(|_, pending| pending.device.connection_id != connection_id);
+        let pending_keys = self
+            .pending_intensity_operations
+            .keys()
+            .filter(|key| key.device.connection_id == connection_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in pending_keys {
+            self.remove_pending_intensity(&key);
+        }
+        if self.output_devices.is_empty() && self.snapshot.output.state == OutputState::Running {
+            self.snapshot.output.state = OutputState::Idle;
+            self.snapshot.output.last_error = None;
+        }
+        self.reconcile_connected_devices();
+        self.refresh_selected_device_snapshot();
+    }
+
+    fn reset_connection_state(&mut self, state: ConnectionState) {
+        self.connection_started_at = None;
+        self.apps.clear();
+        self.remove_connection_devices(V4_CONNECTION_ID);
+        self.operation_generation = self.operation_generation.wrapping_add(1).max(1);
+        if let Some(relay) = &self.relay {
+            relay.invalidate_operations(self.operation_generation);
+        }
         self.snapshot.connection.state = state;
         self.snapshot.connection.controller_id = None;
         self.snapshot.connection.pairing_url = None;
         self.snapshot.connection.app_count = 0;
-        self.snapshot.device = None;
-        self.snapshot.devices.clear();
-        self.refresh_source_snapshots();
-        self.snapshot.selected_device_id = None;
-        self.snapshot.output_device_count = 0;
-        self.snapshot.channels.a.intensity = 0;
-        self.snapshot.channels.b.intensity = 0;
-        self.refresh_channel_statuses();
     }
 
     fn log(&mut self, level: LogLevel, message: impl Into<String>) {
@@ -3625,77 +4373,22 @@ impl HubRuntime {
     }
 
     fn publish(&mut self) {
+        let legacy = &self.snapshot.connection;
+        let v4 = TransportConnectionSnapshot {
+            connection_id: V4_CONNECTION_ID.to_owned(),
+            transport: TransportKind::WsV4,
+            state: legacy.state,
+            endpoint: legacy.endpoint.clone(),
+            controller_id: legacy.controller_id.clone(),
+            pairing_url: legacy.pairing_url.clone(),
+            app_count: legacy.app_count,
+            last_error: legacy.last_error.clone(),
+        };
+        self.update_connection(v4);
         self.refresh_input_modes();
         self.snapshot.revision = self.snapshot.revision.saturating_add(1);
         let _ = self.snapshot_sender.send(self.snapshot.clone());
     }
-}
-
-fn devices_get_request() -> Value {
-    devices_get_request_with_id(&Uuid::new_v4().to_string())
-}
-
-fn devices_get_request_with_id(request_id: &str) -> Value {
-    json!({
-        "t": "req",
-        "reqId": request_id,
-        "m": "devices.get",
-    })
-}
-
-fn append_pulse_request(
-    request_id: &str,
-    slot_id: &str,
-    channel: Channel,
-    frame_hex: &str,
-) -> Value {
-    json!({
-        "t": "req",
-        "reqId": request_id,
-        "m": "device.op",
-        "data": {
-            "s": slot_id,
-            "t": 0,
-            "c": channel.as_v4(),
-            "p": 1,
-            "d": 100,
-            "ver": 3,
-            "v": [frame_hex],
-        },
-    })
-}
-
-fn add_intensity_request(request_id: &str, slot_id: &str, channel: Channel, delta: i32) -> Value {
-    json!({
-        "t": "req",
-        "reqId": request_id,
-        "m": "device.op",
-        "data": {
-            "s": slot_id,
-            "t": 3,
-            "c": channel.as_v4(),
-            "p": 1,
-            "v": delta,
-        },
-    })
-}
-
-fn clear_request(slot_id: &str) -> Value {
-    json!({
-        "t": "req",
-        "reqId": Uuid::new_v4().to_string(),
-        "m": "device.op.clear",
-        "data": { "s": slot_id },
-    })
-}
-
-fn clear_channel_request(slot_id: &str, channel: Channel) -> Value {
-    json!({
-        "t": "req",
-        "reqId": Uuid::new_v4().to_string(),
-        "m": "device.op.clear",
-        "data": { "s": slot_id, "c": channel.as_v4() },
-    })
 }
 
 const fn channel_label(channel: Channel) -> &'static str {
@@ -3703,40 +4396,6 @@ const fn channel_label(channel: Channel) -> &'static str {
         Channel::A => "A",
         Channel::B => "B",
     }
-}
-
-fn zero_intensity_request(slot_id: &str, channel: Channel) -> Value {
-    json!({
-        "t": "req",
-        "reqId": Uuid::new_v4().to_string(),
-        "m": "device.op",
-        "data": {
-            "s": slot_id,
-            "t": 7,
-            "c": channel.as_v4(),
-            "p": 1,
-            "v": 0,
-        },
-    })
-}
-
-fn stop_operation_requests(slot_id: &str, emergency: bool) -> Vec<Value> {
-    let mut requests = vec![clear_request(slot_id)];
-    if emergency {
-        requests.extend(Channel::ALL.map(|channel| zero_intensity_request(slot_id, channel)));
-    }
-    requests
-}
-
-fn encode_wave_frame(frame: WaveFrame) -> String {
-    let mut encoded = String::with_capacity(16);
-    for sample in frame.samples() {
-        encoded.push_str(&format!("{:02X}", sample.frequency()));
-    }
-    for sample in frame.samples() {
-        encoded.push_str(&format!("{:02X}", sample.pulse_intensity()));
-    }
-    encoded
 }
 
 fn pairing_url(endpoint: &str, controller_id: &str) -> Result<String, HubError> {
@@ -3776,6 +4435,32 @@ fn device_snapshot_from_value(key: &DeviceKey, device: &Value) -> Option<DeviceS
         .and_then(Value::as_bool);
     Some(DeviceSnapshot {
         control_id: key.control_id(),
+        connection_id: key.connection_id.clone(),
+        transport: if key.connection_id == V4_CONNECTION_ID {
+            TransportKind::WsV4
+        } else if key.connection_id == V3_CONNECTION_ID {
+            TransportKind::WsV3
+        } else {
+            TransportKind::Ble
+        },
+        initialization: device
+            .get("initialization")
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default(),
+        capabilities: device
+            .get("capabilities")
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default(),
+        ble_parameters: device
+            .get("bleParameters")
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok()),
+        configuration_status: device
+            .get("configurationStatus")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         id,
         name: device
             .get("name")
@@ -3788,7 +4473,7 @@ fn device_snapshot_from_value(key: &DeviceKey, device: &Value) -> Option<DeviceS
             .unwrap_or("UNKNOWN")
             .to_owned(),
         slot_id,
-        power: object_u16(props, "power").unwrap_or(0),
+        power: object_u16(props, "power"),
         intensity_a,
         intensity_b,
         intensity_limit_a: slot_state
@@ -3811,16 +4496,28 @@ fn device_snapshot_from_value(key: &DeviceKey, device: &Value) -> Option<DeviceS
         waveform_name_b: None,
         source_sync: false,
         output_active: false,
-        channel_a_status: protocol_channel_status(
-            object_u16(props, "channelAStatus"),
-            has_device,
-            slot_state.is_some_and(|state| channel_is_muted(state, Channel::A)),
-        ),
-        channel_b_status: protocol_channel_status(
-            object_u16(props, "channelBStatus"),
-            has_device,
-            slot_state.is_some_and(|state| channel_is_muted(state, Channel::B)),
-        ),
+        channel_a_status: device
+            .get("channelAStatus")
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_else(|| {
+                protocol_channel_status(
+                    object_u16(props, "channelAStatus"),
+                    has_device,
+                    slot_state.is_some_and(|state| channel_is_muted(state, Channel::A)),
+                )
+            }),
+        channel_b_status: device
+            .get("channelBStatus")
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_else(|| {
+                protocol_channel_status(
+                    object_u16(props, "channelBStatus"),
+                    has_device,
+                    slot_state.is_some_and(|state| channel_is_muted(state, Channel::B)),
+                )
+            }),
     })
 }
 
@@ -4824,10 +5521,12 @@ mod tests {
         runtime.set_allow_app_intensity_control(false);
 
         let first = DeviceKey {
+            connection_id: V4_CONNECTION_ID.to_owned(),
             client_id: "app-1".to_owned(),
             slot_id: "slot-a".to_owned(),
         };
         let second = DeviceKey {
+            connection_id: V4_CONNECTION_ID.to_owned(),
             client_id: "app-2".to_owned(),
             slot_id: "slot-b".to_owned(),
         };
@@ -4937,6 +5636,7 @@ mod tests {
         install_test_device(&mut runtime, "app-1", "slot-a", 10);
         install_test_device(&mut runtime, "app-2", "slot-b", 20);
         runtime.selected_device = Some(DeviceKey {
+            connection_id: V4_CONNECTION_ID.to_owned(),
             client_id: "app-1".to_owned(),
             slot_id: "slot-a".to_owned(),
         });
@@ -5144,6 +5844,7 @@ mod tests {
 
         let first = IntensityKey {
             device: DeviceKey {
+                connection_id: V4_CONNECTION_ID.to_owned(),
                 client_id: "app-1".to_owned(),
                 slot_id: "slot-a".to_owned(),
             },
@@ -5151,6 +5852,7 @@ mod tests {
         };
         let second = IntensityKey {
             device: DeviceKey {
+                connection_id: V4_CONNECTION_ID.to_owned(),
                 client_id: "app-2".to_owned(),
                 slot_id: "slot-b".to_owned(),
             },
@@ -5186,6 +5888,7 @@ mod tests {
 
         let first = runtime.selected_device.clone().unwrap();
         let second = DeviceKey {
+            connection_id: V4_CONNECTION_ID.to_owned(),
             client_id: "app-2".to_owned(),
             slot_id: "slot-b".to_owned(),
         };
@@ -5231,6 +5934,7 @@ mod tests {
 
         let second = IntensityKey {
             device: DeviceKey {
+                connection_id: V4_CONNECTION_ID.to_owned(),
                 client_id: "app-2".to_owned(),
                 slot_id: "slot-b".to_owned(),
             },
@@ -5259,6 +5963,7 @@ mod tests {
         runtime.relay = Some(relay.clone());
         let original_focus = runtime.selected_device.clone();
         let baseline = DeviceKey {
+            connection_id: V4_CONNECTION_ID.to_owned(),
             client_id: "app-2".to_owned(),
             slot_id: "slot-b".to_owned(),
         }
@@ -5269,6 +5974,7 @@ mod tests {
         assert_eq!(runtime.selected_device, original_focus);
         let first = IntensityKey {
             device: DeviceKey {
+                connection_id: V4_CONNECTION_ID.to_owned(),
                 client_id: "app-1".to_owned(),
                 slot_id: "slot-a".to_owned(),
             },
@@ -5300,6 +6006,7 @@ mod tests {
 
         let new_device = IntensityKey {
             device: DeviceKey {
+                connection_id: V4_CONNECTION_ID.to_owned(),
                 client_id: "app-3".to_owned(),
                 slot_id: "slot-c".to_owned(),
             },
@@ -5323,6 +6030,7 @@ mod tests {
         install_test_device(&mut runtime, "app-1", "slot-a", 10);
         install_test_device(&mut runtime, "app-2", "slot-b", 10);
         let second = DeviceKey {
+            connection_id: V4_CONNECTION_ID.to_owned(),
             client_id: "app-2".to_owned(),
             slot_id: "slot-b".to_owned(),
         };
@@ -5452,6 +6160,7 @@ mod tests {
                 format!("wave-{index}"),
                 PendingWaveOperation {
                     device: DeviceKey {
+                        connection_id: V4_CONNECTION_ID.to_owned(),
                         client_id: "app-1".to_owned(),
                         slot_id: "slot-a".to_owned(),
                     },
@@ -5477,6 +6186,7 @@ mod tests {
         let (_hub, mut runtime) = create_hub("wss://example.test/v4".to_owned());
         runtime.snapshot.output.state = OutputState::Running;
         runtime.output_devices.insert(DeviceKey {
+            connection_id: V4_CONNECTION_ID.to_owned(),
             client_id: "app-1".to_owned(),
             slot_id: "slot-a".to_owned(),
         });
@@ -5484,6 +6194,7 @@ mod tests {
             "wave-timeout".to_owned(),
             PendingWaveOperation {
                 device: DeviceKey {
+                    connection_id: V4_CONNECTION_ID.to_owned(),
                     client_id: "app-1".to_owned(),
                     slot_id: "slot-a".to_owned(),
                 },
@@ -5516,6 +6227,7 @@ mod tests {
             "wave-1".to_owned(),
             PendingWaveOperation {
                 device: DeviceKey {
+                    connection_id: V4_CONNECTION_ID.to_owned(),
                     client_id: "app-1".to_owned(),
                     slot_id: "slot-a".to_owned(),
                 },
@@ -6032,6 +6744,7 @@ mod tests {
         }
         runtime.apps.insert(client_id.to_owned());
         let key = DeviceKey {
+            connection_id: V4_CONNECTION_ID.to_owned(),
             client_id: client_id.to_owned(),
             slot_id: slot_id.to_owned(),
         };
@@ -6062,6 +6775,228 @@ mod tests {
         runtime.snapshot.connection.app_count = runtime.apps.len();
         runtime.reconcile_connected_devices();
         runtime.refresh_selected_device_snapshot();
+    }
+
+    fn install_isolation_device(
+        runtime: &mut HubRuntime,
+        connection_id: &str,
+        initialization: InitializationState,
+    ) -> DeviceKey {
+        if runtime.default_source_id.is_none() {
+            runtime
+                .set_default_source(Some(FIXED_WAVEFORM_SOURCE_ID.to_owned()))
+                .unwrap();
+        }
+        let device = DeviceKey {
+            connection_id: connection_id.to_owned(),
+            client_id: "shared-client".to_owned(),
+            slot_id: "shared-slot".to_owned(),
+        };
+        runtime.devices.insert(device.clone(), json!({
+            "id":"shared-slot", "slotId":"shared-slot", "name":"隔离测试设备",
+            "type":"COYOTE_030", "initialization":initialization,
+            "props":{"power":null,"intensityA":30,"intensityB":20},
+            "slotState":{"hasDevice":true,"channelA":{"intensityMax":100},"channelB":{"intensityMax":100}},
+        }));
+        if connection_id == V4_CONNECTION_ID {
+            runtime.apps.insert(device.client_id.clone());
+        }
+        runtime.reconcile_connected_devices();
+        runtime.refresh_selected_device_snapshot();
+        device
+    }
+
+    fn install_isolation_pending(runtime: &mut HubRuntime, device: &DeviceKey) {
+        let request_id = format!("intensity-{}", device.connection_id);
+        let key = IntensityKey {
+            device: device.clone(),
+            channel: Channel::A,
+        };
+        runtime
+            .pending_intensity_requests
+            .insert(request_id.clone(), key.clone());
+        runtime.pending_intensity_operations.insert(
+            key,
+            PendingIntensityOperation {
+                request_id,
+                projected: 31,
+                lock_correction: false,
+                response_received: false,
+                projected_observed: false,
+            },
+        );
+        runtime.pending_wave_operations.insert(
+            format!("wave-{}", device.connection_id),
+            PendingWaveOperation {
+                device: device.clone(),
+                channel: Channel::A,
+                generation: runtime.operation_generation,
+                sent_at: Instant::now(),
+            },
+        );
+    }
+
+    #[test]
+    fn v4_reset_preserves_other_connection_output_inputs_and_pending_operations() {
+        let (_hub, mut runtime) = create_hub("wss://example.test/v4".to_owned());
+        let v4 =
+            install_isolation_device(&mut runtime, V4_CONNECTION_ID, InitializationState::Ready);
+        let v3 =
+            install_isolation_device(&mut runtime, V3_CONNECTION_ID, InitializationState::Ready);
+        let ble = install_isolation_device(&mut runtime, "ble:fixture", InitializationState::Ready);
+        for device in [&v4, &v3, &ble] {
+            runtime.output_devices.insert(device.clone());
+            install_isolation_pending(&mut runtime, device);
+            runtime.touch_runtimes.insert(
+                device.clone(),
+                TouchRuntime::new(TouchConfig::default()).unwrap(),
+            );
+            runtime
+                .touch_active_channels
+                .insert(device.clone(), [true, false]);
+            runtime.touch_mailbox.lock().unwrap().insert(
+                device.control_id(),
+                TouchInputSlot {
+                    latest: TouchInput {
+                        device_id: device.control_id(),
+                        owner_id: "window".to_owned(),
+                        sequence: 1,
+                        pointers: vec![],
+                    },
+                    transitions: VecDeque::new(),
+                    pending: true,
+                    received_at: std::time::Instant::now(),
+                },
+            );
+        }
+        runtime.selected_device = Some(ble.clone());
+        runtime.snapshot.output.state = OutputState::Running;
+        let epoch = runtime.safety_epoch.load(Ordering::Acquire);
+        runtime.reset_connection_state(ConnectionState::Connecting);
+        assert_eq!(runtime.safety_epoch.load(Ordering::Acquire), epoch);
+        assert_eq!(runtime.snapshot.output.state, OutputState::Running);
+        assert_eq!(runtime.selected_device.as_ref(), Some(&ble));
+        assert_eq!(
+            runtime.devices.keys().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from([v3.clone(), ble.clone()])
+        );
+        assert_eq!(
+            runtime.output_devices,
+            BTreeSet::from([v3.clone(), ble.clone()])
+        );
+        assert_eq!(runtime.touch_runtimes.len(), 2);
+        assert_eq!(runtime.touch_active_channels.len(), 2);
+        assert_eq!(runtime.touch_mailbox.lock().unwrap().len(), 2);
+        assert_eq!(runtime.audio_bindings.len(), 4);
+        assert_eq!(runtime.device_source_bindings.len(), 4);
+        assert_eq!(runtime.pending_intensity_operations.len(), 2);
+        assert_eq!(runtime.pending_intensity_requests.len(), 2);
+        assert_eq!(runtime.pending_wave_operations.len(), 2);
+        assert!(runtime.apps.is_empty());
+        assert_eq!(
+            runtime.snapshot.connection.state,
+            ConnectionState::Connecting
+        );
+    }
+
+    #[test]
+    fn v4_device_updates_and_disconnect_do_not_match_other_transport_client_ids() {
+        let (_hub, mut runtime) = create_hub("wss://example.test/v4".to_owned());
+        let v4 =
+            install_isolation_device(&mut runtime, V4_CONNECTION_ID, InitializationState::Ready);
+        let v3 =
+            install_isolation_device(&mut runtime, V3_CONNECTION_ID, InitializationState::Ready);
+        let ble = install_isolation_device(&mut runtime, "ble:fixture", InitializationState::Ready);
+        for device in [&v4, &v3, &ble] {
+            install_isolation_pending(&mut runtime, device);
+        }
+        runtime.apply_slots_patch(
+            "shared-client",
+            &json!({"slots":[{"slotId":"shared-slot","props":{"intensityA":50}}]}),
+        );
+        assert_eq!(runtime.devices[&v4]["props"]["intensityA"], 50);
+        assert_eq!(runtime.devices[&v3]["props"]["intensityA"], 30);
+        assert_eq!(runtime.devices[&ble]["props"]["intensityA"], 30);
+        runtime.replace_devices("shared-client", &[]);
+        assert!(!runtime.devices.contains_key(&v4));
+        assert!(runtime.devices.contains_key(&v3));
+        assert!(runtime.devices.contains_key(&ble));
+        runtime.remove_app("shared-client");
+        assert_eq!(runtime.devices.len(), 2);
+        assert_eq!(runtime.pending_intensity_operations.len(), 2);
+        assert_eq!(runtime.pending_wave_operations.len(), 2);
+    }
+
+    #[test]
+    fn ble_accepts_physical_strength_and_does_not_use_the_app_lock() {
+        let (_hub, mut runtime) = create_hub("wss://example.test/v4".to_owned());
+        let ble = install_isolation_device(&mut runtime, "ble:fixture", InitializationState::Ready);
+        assert!(!runtime.snapshot.safety.allow_app_intensity_control);
+        runtime
+            .intensity_lock_targets
+            .insert(ble.clone(), IntensityLockTarget { a: 99, b: 99 });
+        runtime.refresh_selected_device_snapshot();
+        assert_eq!(runtime.snapshot.device.as_ref().unwrap().intensity_a, 30);
+        assert_eq!(
+            runtime.device_channel_control_state(&ble, Channel::A),
+            Some((30, 100))
+        );
+        runtime.sync_intensity_lock_targets();
+        assert!(!runtime.intensity_lock_targets.contains_key(&ble));
+        runtime.devices.get_mut(&ble).unwrap()["props"]["intensityA"] = json!(42);
+        runtime.reconcile_intensity_lock();
+        runtime.refresh_selected_device_snapshot();
+        assert_eq!(runtime.snapshot.device.as_ref().unwrap().intensity_a, 42);
+        assert!(runtime.pending_intensity_operations.is_empty());
+    }
+
+    #[test]
+    fn non_v4_devices_are_gated_by_initialization_instead_of_v4_app_presence() {
+        for connection_id in [V3_CONNECTION_ID, "ble:fixture"] {
+            let (_hub, mut runtime) = create_hub("wss://example.test/v4".to_owned());
+            let device = install_isolation_device(
+                &mut runtime,
+                connection_id,
+                InitializationState::Initializing,
+            );
+            let (session, _queues) = crate::transport::session_channel(8);
+            runtime.sessions.insert(connection_id.to_owned(), session);
+            assert!(runtime.apps.is_empty());
+            assert_eq!(
+                runtime.start_output(&device.control_id()),
+                Err(HubError::DeviceUnavailable)
+            );
+            assert_eq!(
+                runtime.adjust_device_intensity(Some(&device.control_id()), Channel::A, 1),
+                Err(HubError::DeviceUnavailable)
+            );
+            runtime.devices.get_mut(&device).unwrap()["initialization"] =
+                json!(InitializationState::Ready);
+            assert_eq!(runtime.start_output(&device.control_id()), Ok(()));
+            assert_eq!(
+                runtime.adjust_device_intensity(Some(&device.control_id()), Channel::A, 1),
+                Ok(())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn v4_relay_failure_leaves_ble_output_running() {
+        let (_hub, mut runtime) = create_hub("wss://example.test/v4".to_owned());
+        let v4 =
+            install_isolation_device(&mut runtime, V4_CONNECTION_ID, InitializationState::Ready);
+        let ble = install_isolation_device(&mut runtime, "ble:fixture", InitializationState::Ready);
+        runtime.output_devices.extend([v4, ble.clone()]);
+        runtime.snapshot.output.state = OutputState::Running;
+        runtime
+            .handle_relay_event(RelayEvent::Disconnected {
+                reason: "fixture disconnect".to_owned(),
+                retryable: false,
+            })
+            .await;
+        assert_eq!(runtime.output_devices, BTreeSet::from([ble]));
+        assert_eq!(runtime.snapshot.output.state, OutputState::Running);
+        assert_eq!(runtime.snapshot.output.last_error, None);
     }
 
     async fn wait_for_snapshot(hub: &HubHandle, predicate: impl Fn(&HubSnapshot) -> bool) {

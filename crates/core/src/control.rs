@@ -15,6 +15,7 @@ use crate::preferences::{PreferencesError, PreferencesState};
 use crate::sources::WaveformConfig;
 use crate::sources::audio::{AudioAction, AudioChannelConfig};
 use crate::sources::touch::{TouchConfig, TouchInput};
+use crate::transport::{BleParameters, DEFAULT_V3_ENDPOINT, TransportAction, TransportKind};
 use crate::waveforms::WaveformFile;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -26,6 +27,37 @@ use crate::waveforms::WaveformFile;
     deny_unknown_fields
 )]
 pub enum ControlCommand {
+    GetConnections,
+    ConnectTransport {
+        transport: TransportKind,
+        endpoint: Option<String>,
+    },
+    DisconnectConnection {
+        connection_id: String,
+    },
+    RefreshConnectionPairing {
+        connection_id: String,
+    },
+    SetRelayEndpoint {
+        transport: TransportKind,
+        endpoint: String,
+    },
+    ScanBluetooth {
+        duration_ms: u64,
+    },
+    ConnectBluetooth {
+        device_id: String,
+    },
+    DisconnectBluetooth {
+        device_id: String,
+    },
+    SetBluetoothConfig {
+        device_id: String,
+        config: BleParameters,
+    },
+    GetBluetoothConfig {
+        device_id: String,
+    },
     GetHubSnapshot,
     GetAppPreferences,
     SetCloseToTray {
@@ -177,6 +209,7 @@ impl ControlCommand {
         let unit = matches!(
             name,
             "get_hub_snapshot"
+                | "get_connections"
                 | "get_app_preferences"
                 | "connect_relay"
                 | "disconnect_relay"
@@ -194,7 +227,11 @@ impl ControlCommand {
     pub fn is_safety(&self) -> bool {
         matches!(
             self,
-            Self::EmergencyStop | Self::StopOutput { .. } | Self::DisconnectRelay
+            Self::EmergencyStop
+                | Self::StopOutput { .. }
+                | Self::DisconnectRelay
+                | Self::DisconnectConnection { .. }
+                | Self::DisconnectBluetooth { .. }
         )
     }
 
@@ -217,6 +254,9 @@ impl ControlCommand {
                 | Self::ImportWaveformFiles { .. }
                 | Self::DeleteCustomWaveform { .. }
                 | Self::ReorderCustomWaveforms { .. }
+                | Self::SetRelayEndpoint { .. }
+                | Self::SetBluetoothConfig { .. }
+                | Self::ConnectTransport { .. }
         )
     }
 
@@ -261,7 +301,9 @@ impl ControlService {
         let (connection_timeout_enabled, connection_timeout_minutes, allow_app_intensity_control) =
             preferences.safety_settings();
         let (hub, mut runtime) = create_hub_with_source_preferences(
-            relay_endpoint,
+            preferences
+                .relay_endpoint(TransportKind::WsV4)
+                .unwrap_or(relay_endpoint),
             preferences.default_source_id(),
             preferences.fixed_waveform(),
             preferences.custom_waveforms(),
@@ -270,6 +312,11 @@ impl ControlService {
                 connection_timeout_minutes,
                 allow_app_intensity_control,
             },
+        );
+        runtime.set_initial_v3_endpoint(
+            preferences
+                .relay_endpoint(TransportKind::WsV3)
+                .unwrap_or_else(|| DEFAULT_V3_ENDPOINT.to_owned()),
         );
         if let Err(error) = runtime.set_initial_touch_config(preferences.touch_config()) {
             eprintln!("{error}；本次运行使用默认触控配置");
@@ -303,10 +350,18 @@ impl ControlService {
                 .try_acquire_owned()
                 .map_err(|_| ControlError::from(HubError::QueueBusy))?;
             let service = self.clone();
+            let accepted_epoch = self.hub.safety_generation();
+            let may_reconnect = matches!(
+                command,
+                ControlCommand::ConnectTransport { .. } | ControlCommand::SetBluetoothConfig { .. }
+            );
             // A disconnected caller must not cancel a partially persisted transaction.
             return tokio::spawn(async move {
                 let _permit = permit;
                 let _transaction = service.configuration.lock().await;
+                if may_reconnect && accepted_epoch != service.hub.safety_generation() {
+                    return Err(HubError::QueueBusy.into());
+                }
                 service.execute_inner(command).await
             })
             .await
@@ -318,6 +373,118 @@ impl ControlService {
     async fn execute_inner(&self, command: ControlCommand) -> Result<Value, ControlError> {
         use ControlCommand::*;
         match command {
+            GetConnections => return serialize(self.snapshot().connections),
+            ConnectTransport {
+                transport,
+                endpoint,
+            } => {
+                let endpoint = endpoint
+                    .or_else(|| self.preferences.relay_endpoint(transport))
+                    .unwrap_or_else(|| {
+                        if transport == TransportKind::WsV3 {
+                            DEFAULT_V3_ENDPOINT.to_owned()
+                        } else {
+                            self.snapshot().connection.endpoint
+                        }
+                    });
+                self.set_relay_endpoint(transport, endpoint.clone()).await?;
+                self.hub
+                    .transport(TransportAction::Connect {
+                        transport,
+                        endpoint,
+                    })
+                    .await?;
+            }
+            SetRelayEndpoint {
+                transport,
+                endpoint,
+            } => self.set_relay_endpoint(transport, endpoint).await?,
+            DisconnectConnection { connection_id } => {
+                self.hub.disconnect_connection(connection_id).await?
+            }
+            RefreshConnectionPairing { connection_id } => {
+                self.hub
+                    .transport(TransportAction::RefreshPairing { connection_id })
+                    .await?;
+            }
+            ScanBluetooth { duration_ms } => {
+                return self
+                    .hub
+                    .transport(TransportAction::Scan { duration_ms })
+                    .await
+                    .map_err(Into::into);
+            }
+            ConnectBluetooth { device_id } => {
+                let parameters = self.preferences.ble_parameters(&device_id);
+                self.hub
+                    .transport(TransportAction::ConnectBluetooth {
+                        device_id,
+                        parameters,
+                    })
+                    .await?;
+            }
+            DisconnectBluetooth { device_id } => {
+                let connection_id = self.bluetooth_device(&device_id)?.connection_id;
+                self.hub.disconnect_connection(connection_id).await?;
+            }
+            GetBluetoothConfig { device_id } => {
+                return serialize(
+                    self.bluetooth_device(&device_id)?
+                        .ble_parameters
+                        .unwrap_or_default(),
+                );
+            }
+            SetBluetoothConfig { device_id, config } => {
+                config.validate().map_err(HubError::from)?;
+                let device = self.bluetooth_device(&device_id)?;
+                let peripheral_id = device
+                    .id
+                    .as_str()
+                    .ok_or_else(|| ControlError::new("device_unavailable", "蓝牙设备标识缺失"))?
+                    .to_owned();
+                let previous = self.preferences.ble_parameters(&peripheral_id);
+                if let Err(error) = self
+                    .hub
+                    .transport(TransportAction::ConfigureBluetooth {
+                        device_id: device_id.clone(),
+                        parameters: config.clone(),
+                    })
+                    .await
+                {
+                    if let Err(rollback) = self
+                        .hub
+                        .transport(TransportAction::ConfigureBluetooth {
+                            device_id: device_id.clone(),
+                            parameters: previous.clone(),
+                        })
+                        .await
+                    {
+                        let _ = self
+                            .hub
+                            .disconnect_connection(device.connection_id.clone())
+                            .await;
+                        return Err(ControlError::new(
+                            "rollback_failed",
+                            format!("{error}；恢复旧蓝牙配置失败：{rollback}"),
+                        ));
+                    }
+                    return Err(error.into());
+                }
+                if let Err(error) = self.preferences.set_ble_parameters(peripheral_id, config) {
+                    if let Err(rollback) = self
+                        .hub
+                        .transport(TransportAction::ConfigureBluetooth {
+                            device_id: device_id.clone(),
+                            parameters: previous,
+                        })
+                        .await
+                    {
+                        let _ = self.hub.disconnect_connection(device.connection_id).await;
+                        return Err(rollback_error(&error, rollback));
+                    }
+                    return Err(error.into());
+                }
+            }
             GetHubSnapshot => return serialize(self.snapshot()),
             GetAppPreferences => return serialize(self.preferences.snapshot(false)),
             SetCloseToTray { enabled } => self.preferences.set_close_to_tray(enabled)?,
@@ -524,6 +691,51 @@ impl ControlService {
         Ok(Value::Null)
     }
 
+    fn bluetooth_device(
+        &self,
+        device_id: &str,
+    ) -> Result<crate::hub::DeviceSnapshot, ControlError> {
+        self.snapshot()
+            .devices
+            .into_iter()
+            .find(|device| device.control_id == device_id && device.transport == TransportKind::Ble)
+            .ok_or_else(|| {
+                ControlError::new("device_unavailable", "指定的蓝牙 controlId 不存在或已断开")
+            })
+    }
+
+    async fn set_relay_endpoint(
+        &self,
+        transport: TransportKind,
+        endpoint: String,
+    ) -> Result<(), ControlError> {
+        let previous = self
+            .snapshot()
+            .connections
+            .into_iter()
+            .find(|connection| connection.transport == transport)
+            .map(|connection| connection.endpoint);
+        self.hub
+            .transport(TransportAction::SetEndpoint {
+                transport,
+                endpoint: endpoint.clone(),
+            })
+            .await?;
+        if let Err(error) = self.preferences.set_relay_endpoint(transport, endpoint) {
+            if let Some(endpoint) = previous {
+                self.hub
+                    .transport(TransportAction::SetEndpoint {
+                        transport,
+                        endpoint,
+                    })
+                    .await
+                    .map_err(|rollback| rollback_error(&error, rollback))?;
+            }
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
     fn custom_waveform(&self, preset_id: &str) -> Result<WaveformConfig, ControlError> {
         self.preferences
             .custom_waveforms()
@@ -583,7 +795,37 @@ fn command_description(name: &str) -> &str {
     match name {
         "get_hub_snapshot" => "读取共享核心的连接、设备、输入源、输出状态和运行记录。",
         "connect_relay" => "连接 Socket V4 Relay；连接成功后读取快照中的配对链接。",
-        "disconnect_relay" => "停止输出并断开共享 Relay 连接。",
+        "disconnect_relay" => "停止 Socket V4 所属设备输出并断开 V4 Relay；其他传输继续运行。",
+        "get_connections" => {
+            "读取 Socket V4、Socket V3 与郊狼 3.0 蓝牙连接状态、connectionId 和 APP 配对链接。"
+        }
+        "connect_transport" => {
+            "连接 ws_v4 或 ws_v3 Relay；endpoint 可省略以使用已保存端点，之后读取连接的配对链接。"
+        }
+        "disconnect_connection" => {
+            "按 connectionId 停止并断开指定连接；仅清理所属设备，其他连接继续运行。"
+        }
+        "refresh_connection_pairing" => {
+            "按 connectionId 刷新 V4 或 V3 APP 配对；会断开该连接已有的 APP 和设备。"
+        }
+        "set_relay_endpoint" => {
+            "持久保存 ws_v4 或 ws_v3 端点；连接运行时先断开，支持 ws:// 与 wss://。"
+        }
+        "scan_bluetooth" => {
+            "主动扫描郊狼 3.0 BLE 广播，durationMs 为扫描毫秒数；结果包含发现 deviceId，不自动连接或输出。"
+        }
+        "connect_bluetooth" => {
+            "连接 scan_bluetooth 返回的 deviceId（蓝牙发现标识，不是 controlId）；完成安全初始化后读取新设备的 controlId。"
+        }
+        "disconnect_bluetooth" => {
+            "按设备 controlId（不是扫描 deviceId）停止并断开指定郊狼 3.0 蓝牙设备；其他设备继续运行。"
+        }
+        "get_bluetooth_config" => {
+            "按设备 controlId（不是扫描 deviceId）读取郊狼 3.0 的持久参数，含软上限、频率/强度平衡与旋钮保护。"
+        }
+        "set_bluetooth_config" => {
+            "按设备 controlId（不是扫描 deviceId）校验、下发并持久保存郊狼 3.0 参数；BF 无设备回执，已下发不等于设备已确认。"
+        }
         "refresh_pairing" => "刷新配对链接；可能断开已有设备，请先读取状态。",
         "adjust_intensity" => {
             "按 deviceId（设备 controlId）和 a/b 通道相对调整强度，受设备上限与同步设置约束。"
@@ -806,5 +1048,87 @@ mod tests {
         );
         service.shutdown().await.unwrap();
         runtime.await.unwrap();
+    }
+    #[tokio::test]
+    async fn endpoints_are_serialized_and_failed_persistence_restores_the_previous_value() {
+        let directory = tempfile::tempdir().unwrap();
+        let (service, runtime) = ControlService::create(
+            directory.path().to_path_buf(),
+            DEFAULT_RELAY_ENDPOINT.to_owned(),
+        )
+        .unwrap();
+        let task = tokio::spawn(runtime.run());
+        let (a, b) = tokio::join!(
+            service.execute(ControlCommand::SetRelayEndpoint {
+                transport: TransportKind::WsV3,
+                endpoint: "ws://127.0.0.1:9010/".to_owned()
+            }),
+            service.execute(ControlCommand::SetRelayEndpoint {
+                transport: TransportKind::WsV4,
+                endpoint: "ws://127.0.0.1:9011/".to_owned()
+            })
+        );
+        a.unwrap();
+        b.unwrap();
+        let saved = PreferencesState::load(directory.path().to_path_buf()).unwrap();
+        assert_eq!(
+            saved.relay_endpoint(TransportKind::WsV3).as_deref(),
+            Some("ws://127.0.0.1:9010/")
+        );
+        assert_eq!(
+            saved.relay_endpoint(TransportKind::WsV4).as_deref(),
+            Some("ws://127.0.0.1:9011/")
+        );
+        let previous = service.snapshot().connections;
+        std::fs::remove_file(directory.path().join("preferences.json")).unwrap();
+        std::fs::create_dir(directory.path().join("preferences.json")).unwrap();
+        let error = service
+            .execute(ControlCommand::SetRelayEndpoint {
+                transport: TransportKind::WsV3,
+                endpoint: "ws://127.0.0.1:9012/".to_owned(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "preferences_error");
+        assert_eq!(service.snapshot().connections, previous);
+        service.shutdown().await.unwrap();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_invalidates_connection_transactions_waiting_for_the_configuration_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        let (service, runtime) = ControlService::create(
+            directory.path().to_path_buf(),
+            DEFAULT_RELAY_ENDPOINT.to_owned(),
+        )
+        .unwrap();
+        let task = tokio::spawn(runtime.run());
+        let lock = service.configuration.lock().await;
+        let queued_service = service.clone();
+        let queued = tokio::spawn(async move {
+            queued_service
+                .execute(ControlCommand::ConnectTransport {
+                    transport: TransportKind::WsV3,
+                    endpoint: None,
+                })
+                .await
+        });
+        tokio::task::yield_now().await;
+        service
+            .execute(ControlCommand::EmergencyStop)
+            .await
+            .unwrap();
+        drop(lock);
+        assert_eq!(queued.await.unwrap().unwrap_err().code, "queue_busy");
+        assert!(
+            service
+                .snapshot()
+                .connections
+                .iter()
+                .all(|c| c.state == crate::hub::ConnectionState::Disconnected)
+        );
+        service.shutdown().await.unwrap();
+        task.await.unwrap();
     }
 }

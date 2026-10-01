@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::ErrorKind;
 use std::io::Read;
@@ -9,6 +10,7 @@ use thiserror::Error;
 
 use crate::sources::WaveformConfig;
 use crate::sources::touch::TouchConfig;
+use crate::transport::{BleParameters, TransportKind};
 
 const PREFERENCES_FILE_NAME: &str = "preferences.json";
 const MAX_PREFERENCES_BYTES: u64 = 4 * 1024 * 1024;
@@ -24,6 +26,8 @@ pub struct AppPreferencesSnapshot {
 #[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 struct StoredPreferences {
+    relay_endpoints: BTreeMap<TransportKind, String>,
+    ble_parameters: BTreeMap<String, BleParameters>,
     close_to_tray: bool,
     start_minimized: bool,
     connection_timeout_enabled: bool,
@@ -41,6 +45,8 @@ struct StoredPreferences {
 impl Default for StoredPreferences {
     fn default() -> Self {
         Self {
+            relay_endpoints: BTreeMap::new(),
+            ble_parameters: BTreeMap::new(),
             close_to_tray: true,
             start_minimized: true,
             connection_timeout_enabled: false,
@@ -73,6 +79,41 @@ pub struct PreferencesState {
 }
 
 impl PreferencesState {
+    pub fn relay_endpoint(&self, transport: TransportKind) -> Option<String> {
+        self.stored
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .relay_endpoints
+            .get(&transport)
+            .cloned()
+    }
+    pub fn set_relay_endpoint(
+        &self,
+        transport: TransportKind,
+        endpoint: String,
+    ) -> Result<(), PreferencesError> {
+        self.update(|stored| {
+            stored.relay_endpoints.insert(transport, endpoint);
+        })
+    }
+    pub fn ble_parameters(&self, device_id: &str) -> BleParameters {
+        self.stored
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .ble_parameters
+            .get(device_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+    pub fn set_ble_parameters(
+        &self,
+        device_id: String,
+        parameters: BleParameters,
+    ) -> Result<(), PreferencesError> {
+        self.update(|stored| {
+            stored.ble_parameters.insert(device_id, parameters);
+        })
+    }
     pub fn touch_config(&self) -> TouchConfig {
         self.stored
             .read()
@@ -437,6 +478,43 @@ mod tests {
         let state = PreferencesState::load(config_dir.clone()).unwrap();
         assert_eq!(state.fixed_waveform().unwrap().preset_id, "BUBBLE");
 
+        fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn transport_configuration_migrates_and_persists_only_durable_parameters() {
+        let config_dir = temporary_config_dir();
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(
+            config_dir.join(PREFERENCES_FILE_NAME),
+            "{\"closeToTray\":false}",
+        )
+        .unwrap();
+        let state = PreferencesState::load(config_dir.clone()).unwrap();
+        assert_eq!(state.relay_endpoint(TransportKind::WsV3), None);
+        assert_eq!(state.ble_parameters("peripheral"), BleParameters::default());
+        state
+            .set_relay_endpoint(TransportKind::WsV3, "ws://127.0.0.1:9000/".to_owned())
+            .unwrap();
+        let parameters = BleParameters {
+            max_strength_a: 75,
+            ..BleParameters::default()
+        };
+        state
+            .set_ble_parameters("peripheral".to_owned(), parameters.clone())
+            .unwrap();
+        let reloaded = PreferencesState::load(config_dir.clone()).unwrap();
+        assert_eq!(reloaded.ble_parameters("peripheral"), parameters);
+        assert_eq!(
+            reloaded.relay_endpoint(TransportKind::WsV3).as_deref(),
+            Some("ws://127.0.0.1:9000/")
+        );
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(config_dir.join(PREFERENCES_FILE_NAME)).unwrap())
+                .unwrap();
+        assert!(saved.get("connections").is_none());
+        assert!(saved.get("output").is_none());
+        assert!(saved.get("intensityA").is_none());
         fs::remove_dir_all(config_dir).unwrap();
     }
 

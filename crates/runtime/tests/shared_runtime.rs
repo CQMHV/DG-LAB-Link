@@ -190,7 +190,7 @@ async fn stops_from_other_clients_invalidate_output_accepted_before_forwarding()
         )
         .await
         .unwrap_err();
-    assert_eq!(error.code, "not_connected");
+    assert_eq!(error.code, "device_unavailable");
     observer.release().await.unwrap();
     cli.release().await.unwrap();
     gui.release().await.unwrap();

@@ -66,6 +66,10 @@ pub(crate) fn may_resume_output(command: &ControlCommand) -> bool {
             | ControlCommand::SetSyncAllDevices { .. }
             | ControlCommand::ConnectRelay
             | ControlCommand::RefreshPairing
+            | ControlCommand::ConnectTransport { .. }
+            | ControlCommand::RefreshConnectionPairing { .. }
+            | ControlCommand::ConnectBluetooth { .. }
+            | ControlCommand::SetBluetoothConfig { .. }
     )
 }
 

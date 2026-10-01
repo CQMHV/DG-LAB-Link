@@ -4,6 +4,7 @@ pub mod hub;
 pub mod model;
 pub mod preferences;
 pub mod sources;
+pub mod transport;
 pub mod waveforms;
 
 pub use control::{ControlCommand, ControlError, ControlService};
