@@ -67,3 +67,12 @@ SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
 CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+## btleplug
+
+Windows direct Coyote 3.0 BLE uses [btleplug](https://github.com/deviceplug/btleplug)
+0.13.3. Its crate declares MIT/Apache-2.0/BSD-3-Clause; the complete upstream
+notice, including the BSD terms for code inherited from rumble, is included at
+[docs/licenses/btleplug-LICENSE.md](docs/licenses/btleplug-LICENSE.md).
+The dependency is compiled only for Windows. GATT and protocol code are
+separated so future platform backends can reuse the device session.

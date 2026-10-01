@@ -12,21 +12,7 @@ use tokio_util::sync::CancellationToken;
 use crate::hub::{ChannelStatus, ConnectionState};
 use crate::model::{Channel, WaveFrame};
 
-pub mod ble {
-    use super::*;
-    pub async fn scan(_duration_ms: u64) -> Result<Vec<BluetoothDevice>, TransportError> {
-        Err(TransportError::new(
-            "bluetooth_unsupported",
-            "蓝牙适配器尚未启用",
-        ))
-    }
-    pub fn spawn(
-        _device_id: String,
-        _events: mpsc::Sender<SessionEvent>,
-    ) -> (SessionHandle, tokio::task::JoinHandle<()>) {
-        super::spawn_disabled()
-    }
-}
+pub mod ble;
 pub(crate) mod event_delivery;
 pub mod v3;
 pub mod v4;
@@ -659,29 +645,4 @@ mod tests {
             .is_err()
         );
     }
-}
-
-fn spawn_disabled() -> (SessionHandle, tokio::task::JoinHandle<()>) {
-    let (handle, mut queues) = session_channel(8);
-    let task = tokio::spawn(async move {
-        loop {
-            let command = tokio::select! {biased;_ = queues.handle.shutdown.cancelled()=>break, command=queues.safety.recv()=>command, command=queues.commands.recv()=>command};
-            match command {
-                Some(SessionCommand::Disconnect { reply } | SessionCommand::Stop { reply, .. }) => {
-                    let _ = reply.send(Ok(()));
-                }
-                Some(
-                    SessionCommand::Connect { reply, .. } | SessionCommand::Configure { reply, .. },
-                ) => {
-                    let _ = reply.send(Err(TransportError::new(
-                        "transport_unavailable",
-                        "协议适配器尚未启用",
-                    )));
-                }
-                Some(SessionCommand::Operation(_)) => {}
-                None => break,
-            }
-        }
-    });
-    (handle, task)
 }
