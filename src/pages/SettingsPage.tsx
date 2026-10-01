@@ -341,7 +341,7 @@ export const SettingsPage = ({
                 <div className="setting-row">
                     <div className="setting-row-copy">
                         <strong>连接超时自动断开</strong>
-                        <span>Relay 建立连接后开始计时；到期停止所有输出并断开所有连接，不自动重连。</span>
+                        <span>每条连接独立计时；到期只停止所属设备并断开该连接，不自动重连。</span>
                     </div>
                     <label className="toggle-switch">
                         <span className="visually-hidden">连接超时自动断开</span>

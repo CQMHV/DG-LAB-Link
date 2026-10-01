@@ -345,7 +345,12 @@ describe("DG-LAB Link 前端", () => {
             expect(document.activeElement).toBe(closeButton);
         });
         await user.tab({ shift: true });
+        const emergencyButton = screen.getByRole("button", { name: "紧急停止全部设备" });
+        expect(document.activeElement).toBe(emergencyButton);
+        await user.tab({ shift: true });
         expect(document.activeElement).toBe(copyButton);
+        await user.tab();
+        expect(document.activeElement).toBe(emergencyButton);
         await user.tab();
         expect(document.activeElement).toBe(closeButton);
 
@@ -354,7 +359,7 @@ describe("DG-LAB Link 前端", () => {
         expect(document.activeElement).toBe(openButton);
     });
 
-    it("仪表盘只显示当前设备控制且不保留底部输出栏", async () => {
+    it("仪表盘只显示当前设备控制并保留固定安全操作栏", async () => {
         const user = userEvent.setup();
         render(<App />);
 
@@ -362,6 +367,7 @@ describe("DG-LAB Link 前端", () => {
             await screen.findByRole("region", { name: "当前设备仪表盘" }),
         ).toBeTruthy();
         expect(screen.queryByRole("region", { name: "全局控制" })).toBeNull();
+        expect(screen.getByRole("contentinfo", { name: "安全限制与输出控制" })).toBeTruthy();
         expect(
             screen.getByText("郊狼 3.0", {
                 selector: ".device-scope-title strong",

@@ -519,9 +519,10 @@ pub async fn select_device(
 pub async fn set_sync_all_devices(
     client: State<'_, Client>,
     enabled: bool,
+    device_id: Option<String>,
 ) -> Result<(), CommandError> {
     let device_id = if enabled {
-        selected_device(&client, None)?
+        selected_device(&client, device_id)?
     } else {
         client.snapshot().selected_device_id.unwrap_or_default()
     };

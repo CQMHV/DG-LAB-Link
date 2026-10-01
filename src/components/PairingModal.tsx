@@ -85,26 +85,20 @@ export const PairingModal = ({
                     "button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])",
                 ) ?? [],
             );
+            const emergencyStop = document.querySelector<HTMLButtonElement>("button[data-emergency-stop]:not([disabled])");
+            if (emergencyStop) {
+                focusable.push(emergencyStop);
+            }
             if (focusable.length === 0) {
                 event.preventDefault();
                 return;
             }
 
-            const first = focusable[0];
-            const last = focusable[focusable.length - 1];
-            if (
-                event.shiftKey &&
-                (document.activeElement === first || !modal?.contains(document.activeElement))
-            ) {
-                event.preventDefault();
-                last.focus();
-            } else if (
-                !event.shiftKey &&
-                (document.activeElement === last || !modal?.contains(document.activeElement))
-            ) {
-                event.preventDefault();
-                first.focus();
-            }
+            event.preventDefault();
+            const current = focusable.indexOf(document.activeElement as HTMLElement);
+            const next = current < 0 ? (event.shiftKey ? focusable.length - 1 : 0)
+                : (current + (event.shiftKey ? -1 : 1) + focusable.length) % focusable.length;
+            focusable[next].focus();
         };
 
         window.addEventListener("keydown", onKeyDown);

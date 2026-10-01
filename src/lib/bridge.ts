@@ -200,6 +200,7 @@ const createDefaultMockSnapshot = (): HubSnapshot => {
 
 let mockSnapshot = createDefaultMockSnapshot();
 let mockStartOutputCompletion: Promise<void> | null = null;
+let mockSafetyGeneration = 0;
 let mockTouchInput: TouchInput | null = null;
 const mockWaveformConfigs = new Map<string, WaveformConfig>();
 
@@ -354,7 +355,10 @@ export const setRelayEndpoint = async (transport: Exclude<TransportKind, "ble">,
 export const scanBluetooth = async (durationMs = 3000): Promise<BluetoothDevice[]> => {
     if (isTauriRuntime()) return invoke("scan_bluetooth", { durationMs });
     return updateMockSnapshot((snapshot) => {
-        snapshot.bluetooth = [{ deviceId: "ble-demo-030", name: "47L121000 演示设备", rssi: -52 }];
+        snapshot.bluetooth = [
+            { deviceId: "ble-demo-030", name: "47L121000 演示设备", rssi: -52 },
+            { deviceId: "ble-demo-031", name: "47L121001 演示设备", rssi: -64 },
+        ];
     }).bluetooth;
 };
 
@@ -595,15 +599,15 @@ export const adjustIntensity = async (
     });
 };
 
-export const setSyncAllDevices = async (enabled: boolean): Promise<void> => {
+export const setSyncAllDevices = async (enabled: boolean, deviceId: string): Promise<void> => {
     if (isTauriRuntime()) {
-        await invoke("set_sync_all_devices", { enabled });
+        await invoke("set_sync_all_devices", { enabled, deviceId });
         return;
     }
 
     updateMockSnapshot((snapshot) => {
         const selected = snapshot.devices.find(
-            (device) => device.controlId === snapshot.selectedDeviceId,
+            (device) => device.controlId === deviceId,
         );
         if (enabled && !selected) {
             throw new Error("设备尚未连接");
@@ -622,6 +626,7 @@ export const setSyncAllDevices = async (enabled: boolean): Promise<void> => {
             });
         }
         snapshot.syncAllDevices = enabled;
+        refreshMockDeviceSelection(snapshot);
         prependMockLog(
             snapshot,
             "info",
@@ -638,7 +643,11 @@ export const startOutput = async (deviceId: string): Promise<void> => {
         return;
     }
 
+    const acceptedGeneration = mockSafetyGeneration;
     await mockStartOutputCompletion;
+    if (acceptedGeneration !== mockSafetyGeneration) {
+        throw new Error("输出请求已被紧急停止取消");
+    }
     updateMockSnapshot((snapshot) => {
         const device = snapshot.devices.find(
             (candidate) => candidate.controlId === deviceId,
@@ -710,11 +719,15 @@ export const emergencyStop = async (): Promise<void> => {
         return;
     }
 
+    mockSafetyGeneration += 1;
+    mockTouchInput = null;
     updateMockSnapshot((snapshot) => {
         snapshot.output.state = "stopped";
         snapshot.outputDeviceCount = 0;
         snapshot.devices.forEach((device) => {
             device.outputActive = false;
+            device.intensityA = 0;
+            device.intensityB = 0;
             device.channelAStatus =
                 device.channelAStatus === "active" ? "ready" : device.channelAStatus;
             device.channelBStatus =
@@ -722,6 +735,11 @@ export const emergencyStop = async (): Promise<void> => {
         });
         snapshot.channels.a.status = snapshot.device ? "ready" : "disconnected";
         snapshot.channels.b.status = snapshot.device ? "ready" : "disconnected";
+        snapshot.inputModes.audio.state = "idle";
+        snapshot.inputModes.audio.levelLeft = 0;
+        snapshot.inputModes.audio.levelRight = 0;
+        refreshMockDeviceSelection(snapshot);
+        snapshot.output.state = "stopped";
         prependMockLog(snapshot, "warning", "已执行紧急停止并清空输出队列");
     });
 };
@@ -1188,6 +1206,7 @@ export const __resetMockBridge = (): void => {
         startMinimized: true,
     };
     mockStartOutputCompletion = null;
+    mockSafetyGeneration += 1;
     mockTouchInput = null;
     mockWaveformConfigs.clear();
     emitMockSnapshot();

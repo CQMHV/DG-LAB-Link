@@ -40,7 +40,7 @@ export const BleDeviceSettings = ({
                 蓝牙参数
             </summary>
             <p>
-                标准模式 · {device.capabilities.standardMode ? "初始化已确认" : "固件扩展不可用"}。
+                标准模式 · {device.capabilities.standardMode ? "固件支持" : "固件扩展不可用"}。
                 基础强度与输出状态不会恢复。
             </p>
             <div className="input-mode-fields">

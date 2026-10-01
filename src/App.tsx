@@ -10,6 +10,7 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { PairingModal } from "./components/PairingModal";
+import { SafetyActionBar } from "./components/SafetyActionBar";
 import type { DeviceViewTab } from "./components/DeviceTabs";
 import { WindowChrome } from "./components/WindowChrome";
 import { useHubSnapshot } from "./hooks/useHubSnapshot";
@@ -24,6 +25,7 @@ import {
     scanBluetooth,
     connectBluetooth,
     disconnectBluetooth,
+    emergencyStop,
     setBluetoothConfig,
     deleteCustomWaveform,
     getAppPreferences,
@@ -115,6 +117,11 @@ export default function App() {
         windowContext.deviceId,
     );
     const [pendingAction, setPendingAction] = useState<string | null>(null);
+    const [overviewDeviceId, setOverviewDeviceId] = useState<string | null>(null);
+    const [syncBaseDeviceId, setSyncBaseDeviceId] = useState<string | null>(null);
+    const [emergencyPending, setEmergencyPending] = useState(false);
+    const emergencyInFlight = useRef(false);
+    const actionEpoch = useRef(0);
     const [actionError, setActionError] = useState<string | null>(null);
     const [dismissedExternalError, setDismissedExternalError] = useState<
         string | null
@@ -125,16 +132,21 @@ export default function App() {
 
     const runAction = useCallback(
         async (name: string, action: () => Promise<void>) => {
-            if (pendingAction) {
+            if (pendingAction || emergencyInFlight.current) {
                 return;
             }
             setPendingAction(name);
             setActionError(null);
+            const acceptedEpoch = actionEpoch.current;
             try {
                 await action();
-                await refresh();
+                if (acceptedEpoch === actionEpoch.current) {
+                    await refresh();
+                }
             } catch (actionFailure) {
-                setActionError(getErrorMessage(actionFailure));
+                if (acceptedEpoch === actionEpoch.current) {
+                    setActionError(getErrorMessage(actionFailure));
+                }
             } finally {
                 setPendingAction(null);
             }
@@ -165,11 +177,33 @@ export default function App() {
         void runAction(`output-${deviceId}`, () => stopOutput(deviceId));
     };
 
+    const handleEmergencyStop = async () => {
+        if (emergencyInFlight.current) {
+            return;
+        }
+        emergencyInFlight.current = true;
+        actionEpoch.current += 1;
+        setEmergencyPending(true);
+        setActionError(null);
+        try {
+            await emergencyStop();
+            await refresh();
+        } catch (failure) {
+            setActionError(getErrorMessage(failure));
+        } finally {
+            emergencyInFlight.current = false;
+            setEmergencyPending(false);
+        }
+    };
+
     const handleSafetySave = (update: SafetyUpdate) => {
         void runAction("safety", () => updateSafety(update));
     };
 
     const handleCloseToTrayChange = (enabled: boolean) => {
+        if (pendingAction || emergencyInFlight.current) {
+            return;
+        }
         const previous = appPreferences;
         setAppPreferences({ ...previous, closeToTray: enabled });
         void runAction("close-to-tray", async () => {
@@ -183,6 +217,9 @@ export default function App() {
     };
 
     const handleAutoStartChange = (enabled: boolean) => {
+        if (pendingAction || emergencyInFlight.current) {
+            return;
+        }
         const previous = appPreferences;
         setAppPreferences({ ...previous, autoStart: enabled });
         void runAction("auto-start", async () => {
@@ -196,6 +233,9 @@ export default function App() {
     };
 
     const handleStartMinimizedChange = (enabled: boolean) => {
+        if (pendingAction || emergencyInFlight.current) {
+            return;
+        }
         const previous = appPreferences;
         setAppPreferences({ ...previous, startMinimized: enabled });
         void runAction("start-minimized", async () => {
@@ -422,6 +462,13 @@ export default function App() {
         : dashboardTabsInitialized.current
           ? activeDashboardTab?.deviceId ?? null
           : snapshot?.selectedDeviceId ?? snapshot?.devices[0]?.controlId ?? null;
+    const selectedOverviewDeviceId = snapshot?.devices.some((device) => device.controlId === overviewDeviceId)
+        ? overviewDeviceId
+        : snapshot?.devices[0]?.controlId ?? null;
+    const safetyDeviceId = !windowContext.detached && page === "devices"
+        ? selectedOverviewDeviceId
+        : activeDashboardDeviceId;
+    const ordinaryPendingAction = emergencyPending ? "emergency-stop" : pendingAction;
 
     useEffect(() => {
         if (windowContext.detached) {
@@ -588,6 +635,7 @@ export default function App() {
                                     activeDashboardDeviceId
                                 }
                                 detached={windowContext.detached}
+                                outputControlsInFooter
                                 detachedTabs={detachedTabs}
                                 onAdjust={handleAdjust}
                                 onCloseTab={handleCloseDeviceTab}
@@ -641,7 +689,7 @@ export default function App() {
                                             ),
                                     )
                                 }
-                                pendingAction={pendingAction}
+                                pendingAction={ordinaryPendingAction}
                                 snapshot={snapshot}
                                 tabs={dashboardTabs.tabs}
                             />
@@ -666,17 +714,22 @@ export default function App() {
                                         reorderCustomWaveforms(presetIds),
                                     )
                                 }
-                                pendingAction={pendingAction}
+                                pendingAction={ordinaryPendingAction}
                                 snapshot={snapshot}
                             />
                         )}
                         {!windowContext.detached && page === "devices" && (
                             <DevicesPage
+                                syncBaseDeviceId={syncBaseDeviceId ?? snapshot.devices.find((device) => device.initialization === "ready")?.controlId ?? null}
+                                onSelectSyncBaseDevice={setSyncBaseDeviceId}
+                                selectedDeviceId={selectedOverviewDeviceId}
+                                onSelectDevice={setOverviewDeviceId}
+                                onStopOutput={handleStopOutput}
                                 onOpenInNewTab={handleOpenDeviceInNewTab}
                                 onOpenInNewWindow={handleOpenDeviceInNewWindow}
-                                onSetSyncAllDevices={(enabled) =>
+                                onSetSyncAllDevices={(enabled, baseDeviceId) =>
                                     void runAction("sync-devices", () =>
-                                        setSyncAllDevices(enabled),
+                                        setSyncAllDevices(enabled, baseDeviceId),
                                     )
                                 }
                                 onOpenPairing={(connectionId = "ws-v4") => setPairingConnectionId(connectionId)}
@@ -688,7 +741,7 @@ export default function App() {
                                 onConnectBluetooth={(deviceId) => void runAction(`bluetooth-connect-${deviceId}`, () => connectBluetooth(deviceId))}
                                 onDisconnectBluetooth={(deviceId) => void runAction(`bluetooth-disconnect-${deviceId}`, () => disconnectBluetooth(deviceId))}
                                 onSaveBluetoothConfig={(deviceId, config) => void runAction(`bluetooth-config-${deviceId}`, () => setBluetoothConfig(deviceId, config))}
-                                pendingAction={pendingAction}
+                                pendingAction={ordinaryPendingAction}
                                 snapshot={snapshot}
                             />
                         )}
@@ -707,7 +760,7 @@ export default function App() {
                                 }
                                 onSetStartMinimized={handleStartMinimizedChange}
                                 onSaveSafety={handleSafetySave}
-                                pendingAction={pendingAction}
+                                pendingAction={ordinaryPendingAction}
                                 snapshot={snapshot}
                             />
                         )}
@@ -744,6 +797,17 @@ export default function App() {
                     </div>
                 )}
             </main>
+
+            <SafetyActionBar
+                deviceId={safetyDeviceId}
+                emergencyPending={emergencyPending}
+                onEmergencyStop={() => void handleEmergencyStop()}
+                onStartOutput={handleStartOutput}
+                onStopOutput={handleStopOutput}
+                pendingAction={pendingAction}
+                showOutputControl={windowContext.detached || page === "dashboard"}
+                snapshot={snapshot}
+            />
 
             {pairingConnectionId && pairingConnection?.pairingUrl && (
                 <PairingModal

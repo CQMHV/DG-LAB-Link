@@ -36,6 +36,7 @@ interface DashboardPageProps {
     activeTabId: string;
     activeDeviceId: string | null;
     detached?: boolean;
+    outputControlsInFooter?: boolean;
     detachedTabs: DeviceViewTab[];
     onAdjust: (channel: HubChannel, delta: number, deviceId: string) => void;
     onCloseTab: (tabId: string) => void;
@@ -79,6 +80,7 @@ export const DashboardPage = ({
     activeTabId,
     activeDeviceId,
     detached = false,
+    outputControlsInFooter = false,
     detachedTabs,
     onAdjust,
     onCloseTab,
@@ -279,7 +281,7 @@ export const DashboardPage = ({
                                         已发送 {snapshot.output.framesSent.toLocaleString("zh-CN")} 帧
                                     </span>
                                 </div>
-                                <button
+                                {!outputControlsInFooter && <button
                                     aria-label={`${device.outputActive ? "停止" : "开始"} ${device.name} 的波形输出`}
                                     className={`device-output-button ${device.outputActive ? "is-running" : ""}`}
                                     disabled={
@@ -305,7 +307,7 @@ export const DashboardPage = ({
                                         <Play aria-hidden="true" size={16} weight="fill" />
                                     )}
                                     {device.outputActive ? "停止输出" : "开始输出"}
-                                </button>
+                                </button>}
                             </header>
                             <div className="device-dashboard-content">
                                 <TouchInputProvider
