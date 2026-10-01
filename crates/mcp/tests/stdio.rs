@@ -267,6 +267,38 @@ async fn cold_stdio_protocol_and_http_share_one_core_and_eof_releases_the_last_h
         "HTTP is an independent adapter process"
     );
     assert_eq!(runtime.holder_count, 2);
+    let endpoint = "ws://127.0.0.1:9013/";
+    let updated = stdio
+        .call(
+            "set_relay_endpoint",
+            json!({"transport":"ws_v3", "endpoint":endpoint}),
+        )
+        .await;
+    assert_eq!(updated["result"]["isError"], false, "{updated}");
+    let connections = observer.call(ControlCommand::GetConnections).await.unwrap();
+    assert!(connections.as_array().unwrap().iter().any(|connection| {
+        connection["connectionId"] == "ws-v3" && connection["endpoint"] == endpoint
+    }));
+    let http_connections = http_call(&config, "get_connections", json!({})).await;
+    assert_eq!(
+        http_connections["result"]["structuredContent"]["result"],
+        connections
+    );
+    let invalid_ble = json!({"deviceId":"missing", "config":{"maxStrengthA":201}});
+    let shared_error = observer
+        .call(ControlCommand::from_call("set_bluetooth_config", invalid_ble.clone()).unwrap())
+        .await
+        .unwrap_err();
+    assert_eq!(shared_error.code, "invalid_ble_parameters");
+    for result in [
+        stdio
+            .call("set_bluetooth_config", invalid_ble.clone())
+            .await,
+        http_call(&config, "set_bluetooth_config", invalid_ble).await,
+    ] {
+        assert_eq!(result["result"]["isError"], true);
+        assert_eq!(result["result"]["structuredContent"], json!(shared_error));
+    }
     assert!(
         observer
             .holders()

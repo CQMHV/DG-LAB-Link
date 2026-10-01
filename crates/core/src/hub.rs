@@ -973,6 +973,8 @@ pub struct HubRuntime {
     apps: BTreeSet<String>,
     devices: BTreeMap<DeviceKey, Value>,
     selected_device: Option<DeviceKey>,
+    sync_baseline_device: Option<DeviceKey>,
+    emergency_zero_pending: BTreeSet<DeviceKey>,
     output_devices: BTreeSet<DeviceKey>,
     pending_wave_operations: HashMap<String, PendingWaveOperation>,
     pending_intensity_operations: BTreeMap<IntensityKey, PendingIntensityOperation>,
@@ -1185,6 +1187,8 @@ pub fn create_hub_with_source_preferences(
             apps: BTreeSet::new(),
             devices: BTreeMap::new(),
             selected_device: None,
+            sync_baseline_device: None,
+            emergency_zero_pending: BTreeSet::new(),
             output_devices: BTreeSet::new(),
             pending_wave_operations: HashMap::new(),
             pending_intensity_operations: BTreeMap::new(),
@@ -2487,10 +2491,6 @@ impl HubRuntime {
                         "已紧急停止、清空任务并将 A/B 强度归零",
                     )
                     .await;
-                if result.is_ok() {
-                    self.set_all_intensity_lock_targets(0, 0);
-                    self.publish();
-                }
                 let _ = reply.send(result);
             }
         }
@@ -2852,6 +2852,15 @@ impl HubRuntime {
     }
 
     fn reconcile_connected_devices(&mut self) {
+        self.emergency_zero_pending
+            .retain(|device| self.devices.contains_key(device));
+        if self
+            .sync_baseline_device
+            .as_ref()
+            .is_some_and(|device| !self.devices.contains_key(device))
+        {
+            self.sync_baseline_device = None;
+        }
         let disconnected = self
             .output_devices
             .iter()
@@ -3044,6 +3053,9 @@ impl HubRuntime {
             .find(|device| device.control_id() == device_id)
             .cloned()
             .ok_or(HubError::DeviceUnavailable)?;
+        if self.emergency_zero_pending.contains(&device) {
+            return Err(HubError::QueueBusy);
+        }
         let snapshot = self
             .devices
             .get(&device)
@@ -3437,6 +3449,11 @@ impl HubRuntime {
         target: u16,
         lock_correction: bool,
     ) -> Result<(), HubError> {
+        if self.emergency_zero_pending.contains(&device)
+            || (self.snapshot.sync_all_devices && !self.emergency_zero_pending.is_empty())
+        {
+            return Err(HubError::QueueBusy);
+        }
         let delta = i32::from(target) - i32::from(current);
         if delta == 0 || !(-200..=200).contains(&delta) {
             return Err(HubError::InvalidDelta);
@@ -3826,10 +3843,13 @@ impl HubRuntime {
         if enabled && self.devices.len() > MAX_OUTPUT_DEVICES {
             return Err(HubError::TooManyDevices);
         }
-        if self.snapshot.sync_all_devices == enabled {
+        if !enabled && !self.snapshot.sync_all_devices {
             return Ok(());
         }
         if enabled {
+            if !self.emergency_zero_pending.is_empty() {
+                return Err(HubError::QueueBusy);
+            }
             let selected = match device_id {
                 Some(id) => self
                     .devices
@@ -3857,6 +3877,9 @@ impl HubRuntime {
                 self.update_device_intensity_lock_target(&device, Channel::A, target_a);
                 self.update_device_intensity_lock_target(&device, Channel::B, target_b);
             }
+            self.sync_baseline_device = Some(selected);
+        } else {
+            self.sync_baseline_device = None;
         }
         self.snapshot.sync_all_devices = enabled;
         self.refresh_selected_device_snapshot();
@@ -3937,6 +3960,17 @@ impl HubRuntime {
     }
 
     fn reconcile_intensity_lock(&mut self) {
+        // Only authoritative feedback can complete zeroing. Until then, stale
+        // strengths must never become synchronization or lock correction targets.
+        self.emergency_zero_pending.retain(|device| {
+            self.devices.get(device).is_some_and(|value| {
+                device_intensity_from_value(value, Channel::A) != Some(0)
+                    || device_intensity_from_value(value, Channel::B) != Some(0)
+            })
+        });
+        if !self.emergency_zero_pending.is_empty() {
+            return;
+        }
         if self.snapshot.safety.allow_app_intensity_control {
             self.reconcile_synced_device_strengths();
             return;
@@ -3968,10 +4002,10 @@ impl HubRuntime {
     }
 
     fn reconcile_synced_device_strengths(&mut self) {
-        if !self.snapshot.sync_all_devices {
+        if !self.snapshot.sync_all_devices || !self.emergency_zero_pending.is_empty() {
             return;
         }
-        let Some(selected) = self.selected_device.clone() else {
+        let Some(selected) = self.sync_baseline_device.clone() else {
             return;
         };
         let Some((target_a, _)) = self.device_channel_control_state(&selected, Channel::A) else {
@@ -4148,9 +4182,14 @@ impl HubRuntime {
         }
         if emergency {
             self.audio_engine.emergency_stop();
+            // A partial transport failure must not retain an old nonzero WS lock.
+            self.set_all_intensity_lock_targets(0, 0);
         }
         let generation = self.advance_operation_generation();
         let devices = self.devices.keys().cloned().collect::<Vec<_>>();
+        if emergency {
+            self.emergency_zero_pending.extend(devices.iter().cloned());
+        }
         if devices.is_empty() {
             return Ok(());
         }
@@ -4296,6 +4335,15 @@ impl HubRuntime {
     }
 
     fn remove_connection_devices(&mut self, connection_id: &str) {
+        self.emergency_zero_pending
+            .retain(|device| device.connection_id != connection_id);
+        if self
+            .sync_baseline_device
+            .as_ref()
+            .is_some_and(|device| device.connection_id == connection_id)
+        {
+            self.sync_baseline_device = None;
+        }
         self.connection_started.remove(connection_id);
         let removed_ids = self
             .devices
@@ -7013,3 +7061,7 @@ mod tests {
         .unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "hub/transport_tests.rs"]
+mod transport_tests;

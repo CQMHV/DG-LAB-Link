@@ -1,14 +1,22 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use dg_lab_link_core::hub::HubSnapshot;
+use dg_lab_link_core::hub::{HubSnapshot, OutputState};
+use dg_lab_link_core::model::Channel;
+use dg_lab_link_core::transport::{
+    InitializationState, TransportKind, V3_CONNECTION_ID, V4_CONNECTION_ID,
+};
 use dg_lab_link_core::{ControlCommand, ControlError};
 use dg_lab_link_runtime::{Client, LocalConfig, MAX_REQUEST_BYTES, run_core};
 use futures_util::{SinkExt, StreamExt};
-use serde_json::json;
+use serde_json::{Value, json};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+use tokio_tungstenite::{WebSocketStream, accept_async};
 
 struct Core {
     directory: PathBuf,
@@ -347,5 +355,448 @@ async fn silent_tcp_connections_cannot_monopolize_all_capacity() {
     drop(connections);
     observer.release().await.unwrap();
     holder.release().await.unwrap();
+    core.finish().await;
+}
+
+#[derive(Default)]
+struct RelayObservations {
+    messages: Mutex<Vec<String>>,
+    waves: AtomicUsize,
+    closes: AtomicUsize,
+}
+
+async fn send_mock_json(socket: &mut WebSocketStream<TcpStream>, value: Value) {
+    socket
+        .send(Message::Text(value.to_string().into()))
+        .await
+        .unwrap();
+}
+
+async fn start_mock_v4() -> (String, Arc<RelayObservations>, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("ws://{}/v4", listener.local_addr().unwrap());
+    let observations = Arc::new(RelayObservations::default());
+    let capture = observations.clone();
+    let task = tokio::spawn(async move {
+        // The same fake endpoint supports a deliberate disconnect and reconnect
+        // so the final holder can exercise cleanup of both active WS sessions.
+        for connection in 0..2 {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            send_mock_json(
+                &mut socket,
+                json!({"type":"hello","clientId":format!("v4-controller-{connection}")}),
+            )
+            .await;
+            send_mock_json(
+                &mut socket,
+                json!({"type":"client_attached","clientId":"shared-app"}),
+            )
+            .await;
+            while let Some(incoming) = socket.next().await {
+                match incoming.unwrap() {
+                    Message::Text(text) => {
+                        let frame: Value = serde_json::from_str(text.as_ref()).unwrap();
+                        assert_eq!(frame["clientId"], "shared-app");
+                        let request = &frame["data"];
+                        let method = request["m"].as_str().unwrap();
+                        let result = match method {
+                            "devices.get" => json!({"devices":[{
+                                "id":"v3","slotId":"v3","name":"Mock V4 device","type":"COYOTE_030",
+                                "props":{"power":90,"intensityA":10,"intensityB":20,"channelAStatus":2,"channelBStatus":2},
+                                "slotState":{"hasDevice":true,"channelA":{"intensityMax":100},"channelB":{"intensityMax":100}}
+                            }]}),
+                            "device.op.clear" => {
+                                assert_eq!(request["data"]["s"], "v3");
+                                capture
+                                    .messages
+                                    .lock()
+                                    .unwrap()
+                                    .push(format!("clear-{connection}"));
+                                // Final cleanup waits for the wire write, not
+                                // an APP RPC response during socket teardown.
+                                continue;
+                            }
+                            "device.op" => {
+                                let operation = &request["data"];
+                                assert_eq!(operation["s"], "v3");
+                                match operation["t"].as_u64().unwrap() {
+                                    0 => {
+                                        capture.waves.fetch_add(1, Ordering::AcqRel);
+                                    }
+                                    7 => {
+                                        assert_eq!(operation["v"], 0);
+                                        capture
+                                            .messages
+                                            .lock()
+                                            .unwrap()
+                                            .push(format!("zero-{}-{connection}", operation["c"]));
+                                        continue;
+                                    }
+                                    other => panic!("unexpected V4 operation: {other}"),
+                                }
+                                json!({})
+                            }
+                            other => panic!("unexpected V4 method: {other}"),
+                        };
+                        send_mock_json(&mut socket,json!({"type":"message","clientId":"shared-app","data":{"t":"resp","reqId":request["reqId"],"result":result}})).await;
+                    }
+                    Message::Ping(payload) => {
+                        socket.send(Message::Pong(payload)).await.unwrap();
+                    }
+                    Message::Close(_) => {
+                        capture.closes.fetch_add(1, Ordering::AcqRel);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+    (endpoint, observations, task)
+}
+
+async fn send_mock_v3(
+    socket: &mut WebSocketStream<TcpStream>,
+    kind: &str,
+    target: &str,
+    message: String,
+) {
+    send_mock_json(
+        socket,
+        json!({"type":kind,"clientId":"v3-controller","targetId":target,"message":message}),
+    )
+    .await;
+}
+
+async fn start_mock_v3() -> (String, Arc<RelayObservations>, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("ws://{}/", listener.local_addr().unwrap());
+    let observations = Arc::new(RelayObservations::default());
+    let capture = observations.clone();
+    let task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        send_mock_v3(&mut socket, "bind", "", "targetId".to_owned()).await;
+        send_mock_v3(&mut socket, "bind", "shared-app", "200".to_owned()).await;
+        send_mock_v3(
+            &mut socket,
+            "msg",
+            "shared-app",
+            "strength-10+20+100+100".to_owned(),
+        )
+        .await;
+        let mut strength = [10_u16, 20_u16];
+        while let Some(incoming) = socket.next().await {
+            match incoming.unwrap() {
+                Message::Text(text) => {
+                    let frame: Value = serde_json::from_str(text.as_ref()).unwrap();
+                    assert_eq!(frame["type"], "msg");
+                    assert_eq!(frame["clientId"], "v3-controller");
+                    assert_eq!(frame["targetId"], "shared-app");
+                    let message = frame["message"].as_str().unwrap();
+                    if message.starts_with("pulse-") {
+                        capture.waves.fetch_add(1, Ordering::AcqRel);
+                        continue;
+                    }
+                    capture.messages.lock().unwrap().push(message.to_owned());
+                    if let Some(arguments) = message.strip_prefix("strength-") {
+                        let arguments = arguments
+                            .split('+')
+                            .map(|value| value.parse::<usize>().unwrap())
+                            .collect::<Vec<_>>();
+                        assert_eq!(arguments.len(), 3);
+                        let channel = arguments[0] - 1;
+                        match arguments[1] {
+                            0 => {
+                                assert_eq!(arguments[2], 1);
+                                strength[channel] -= 1;
+                            }
+                            1 => {
+                                assert_eq!(arguments[2], 1);
+                                strength[channel] += 1;
+                            }
+                            2 => {
+                                assert_eq!(
+                                    arguments[2], 0,
+                                    "only zero may use absolute V3 strength"
+                                );
+                                strength[channel] = 0;
+                            }
+                            other => panic!("unexpected V3 strength operation: {other}"),
+                        }
+                        // Unit changes require real feedback. Shutdown zero
+                        // has no confirmation requirement before disconnect.
+                        if arguments[1] != 2 {
+                            send_mock_v3(
+                                &mut socket,
+                                "msg",
+                                "shared-app",
+                                format!("strength-{}+{}+100+100", strength[0], strength[1]),
+                            )
+                            .await;
+                        }
+                    } else {
+                        assert!(matches!(message, "clear-1" | "clear-2"));
+                    }
+                }
+                Message::Ping(payload) => {
+                    socket.send(Message::Pong(payload)).await.unwrap();
+                }
+                Message::Close(_) => {
+                    capture.closes.fetch_add(1, Ordering::AcqRel);
+                    break;
+                }
+                _ => {}
+            }
+        }
+    });
+    (endpoint, observations, task)
+}
+
+async fn wait_runtime_snapshot(
+    client: &Client,
+    predicate: impl Fn(&HubSnapshot) -> bool,
+) -> HubSnapshot {
+    let mut snapshots = client.subscribe();
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let snapshot = snapshots.borrow_and_update().clone();
+            if predicate(&snapshot) {
+                return snapshot;
+            }
+            snapshots.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("expected shared snapshot arrived")
+}
+
+#[tokio::test]
+async fn mixed_websocket_sessions_share_clients_and_cleanup_on_final_holder_release() {
+    let (v4_endpoint, v4_seen, v4_task) = start_mock_v4().await;
+    let (v3_endpoint, v3_seen, v3_task) = start_mock_v3().await;
+    let (core, gui) = Core::start(Some(v4_endpoint)).await;
+    let cli = Client::connect(&core.directory, "CLI", None).await.unwrap();
+    let mcp = Client::connect_observer(&core.directory).await.unwrap();
+    let instance = gui.runtime_info().await.unwrap().instance_id;
+    assert_eq!(cli.runtime_info().await.unwrap().instance_id, instance);
+    assert_eq!(mcp.runtime_info().await.unwrap().instance_id, instance);
+    assert_eq!(mcp.runtime_info().await.unwrap().holder_count, 2);
+    gui.call(ControlCommand::SetDefaultSource {
+        source_id: Some("source-fixed-waveform".to_owned()),
+    })
+    .await
+    .unwrap();
+    // The acceptance assertion below uses actual feedback, with no optimistic
+    // APP lock value substituting for the reported V3 device intensity.
+    gui.call(ControlCommand::UpdateSafety {
+        connection_timeout_enabled: false,
+        connection_timeout_minutes: 60,
+        allow_app_intensity_control: true,
+    })
+    .await
+    .unwrap();
+    gui.call(ControlCommand::ConnectRelay).await.unwrap();
+    cli.call(ControlCommand::ConnectTransport {
+        transport: TransportKind::WsV3,
+        endpoint: Some(v3_endpoint),
+    })
+    .await
+    .unwrap();
+    let snapshot = wait_runtime_snapshot(&mcp, |snapshot| {
+        snapshot.devices.len() == 2
+            && snapshot
+                .devices
+                .iter()
+                .all(|device| device.initialization == InitializationState::Ready)
+    })
+    .await;
+    let v4 = snapshot
+        .devices
+        .iter()
+        .find(|device| device.connection_id == V4_CONNECTION_ID)
+        .unwrap()
+        .control_id
+        .clone();
+    let v3 = snapshot
+        .devices
+        .iter()
+        .find(|device| device.connection_id == V3_CONNECTION_ID)
+        .unwrap()
+        .control_id
+        .clone();
+    assert_ne!(
+        v4, v3,
+        "identical client and slot IDs in different protocols must be isolated"
+    );
+    let expected_ids = snapshot
+        .devices
+        .iter()
+        .map(|device| device.control_id.clone())
+        .collect::<Vec<_>>();
+    for client in [&gui, &cli, &mcp] {
+        let shared: HubSnapshot =
+            serde_json::from_value(client.call(ControlCommand::GetHubSnapshot).await.unwrap())
+                .unwrap();
+        assert_eq!(
+            shared
+                .devices
+                .iter()
+                .map(|device| device.control_id.clone())
+                .collect::<Vec<_>>(),
+            expected_ids
+        );
+        assert_eq!(
+            client
+                .call(ControlCommand::AdjustIntensity {
+                    device_id: v3.clone(),
+                    channel: Channel::A,
+                    delta: 201,
+                })
+                .await
+                .unwrap_err()
+                .code,
+            "invalid_delta"
+        );
+    }
+    mcp.call(ControlCommand::AdjustIntensity {
+        device_id: v3.clone(),
+        channel: Channel::A,
+        delta: 3,
+    })
+    .await
+    .unwrap();
+    wait_runtime_snapshot(&gui, |snapshot| {
+        snapshot
+            .devices
+            .iter()
+            .any(|device| device.control_id == v3 && device.intensity_a == 13)
+    })
+    .await;
+    // Each intermediate step receives authoritative feedback before the next
+    // one; no larger relative wire delta or nonzero absolute command is sent.
+    assert_eq!(
+        v3_seen.messages.lock().unwrap().as_slice(),
+        ["strength-1+1+1", "strength-1+1+1", "strength-1+1+1"]
+    );
+    cli.call(ControlCommand::AdjustIntensity {
+        device_id: v3.clone(),
+        channel: Channel::A,
+        delta: -2,
+    })
+    .await
+    .unwrap();
+    wait_runtime_snapshot(&mcp, |snapshot| {
+        snapshot
+            .devices
+            .iter()
+            .any(|device| device.control_id == v3 && device.intensity_a == 11)
+    })
+    .await;
+    assert_eq!(
+        v3_seen.messages.lock().unwrap().as_slice(),
+        [
+            "strength-1+1+1",
+            "strength-1+1+1",
+            "strength-1+1+1",
+            "strength-1+0+1",
+            "strength-1+0+1"
+        ]
+    );
+    gui.call(ControlCommand::StartOutput {
+        device_id: v4.clone(),
+    })
+    .await
+    .unwrap();
+    mcp.call(ControlCommand::StartOutput {
+        device_id: v3.clone(),
+    })
+    .await
+    .unwrap();
+    timeout(Duration::from_secs(3), async {
+        while v4_seen.waves.load(Ordering::Acquire) == 0
+            || v3_seen.waves.load(Ordering::Acquire) == 0
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    cli.call(ControlCommand::DisconnectRelay).await.unwrap();
+    let remaining = wait_runtime_snapshot(&mcp, |snapshot| {
+        snapshot.devices.len() == 1 && snapshot.devices[0].control_id == v3
+    })
+    .await;
+    assert_eq!(remaining.output.state, OutputState::Running);
+    assert!(remaining.devices[0].output_active);
+    assert_eq!(v3_seen.closes.load(Ordering::Acquire), 0);
+    gui.call(ControlCommand::ConnectRelay).await.unwrap();
+    wait_runtime_snapshot(&cli, |snapshot| snapshot.devices.len() == 2).await;
+    gui.call(ControlCommand::StartOutput { device_id: v4 })
+        .await
+        .unwrap();
+    gui.release().await.unwrap();
+    assert_eq!(mcp.runtime_info().await.unwrap().holder_count, 1);
+    assert_eq!(cli.runtime_info().await.unwrap().instance_id, instance);
+    assert_eq!(cli.snapshot().output.state, OutputState::Running);
+    cli.release().await.unwrap();
+    timeout(Duration::from_secs(12), mcp.closed())
+        .await
+        .unwrap();
+    core.finish().await;
+    timeout(Duration::from_secs(2), v4_task)
+        .await
+        .unwrap()
+        .unwrap();
+    timeout(Duration::from_secs(2), v3_task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(v4_seen.closes.load(Ordering::Acquire), 2);
+    assert_eq!(v3_seen.closes.load(Ordering::Acquire), 1);
+    let v4_messages = v4_seen.messages.lock().unwrap();
+    for required in ["clear-0", "clear-1", "zero-0-1", "zero-1-1"] {
+        assert!(v4_messages.iter().any(|message| message == required));
+    }
+    let v3_messages = v3_seen.messages.lock().unwrap();
+    for required in ["clear-1", "clear-2", "strength-1+2+0", "strength-2+2+0"] {
+        assert!(v3_messages.iter().any(|message| message == required));
+    }
+}
+
+#[tokio::test]
+async fn stale_transport_connects_are_rejected_after_another_entrypoint_stops() {
+    let (core, gui) = Core::start(None).await;
+    let mcp = Client::connect_observer(&core.directory).await.unwrap();
+    let cli = Client::connect(&core.directory, "CLI", None).await.unwrap();
+    let v3_epoch = mcp.accept_command(false);
+    let ble_epoch = gui.accept_command(false);
+    cli.call(ControlCommand::EmergencyStop).await.unwrap();
+    let v3_error = mcp
+        .call_received(
+            ControlCommand::ConnectTransport {
+                transport: TransportKind::WsV3,
+                endpoint: Some("ws://127.0.0.1:9/".to_owned()),
+            },
+            v3_epoch,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(v3_error.code, "queue_busy");
+    let ble_error = gui
+        .call_received(
+            ControlCommand::ConnectBluetooth {
+                device_id: "no-real-device".to_owned(),
+            },
+            ble_epoch,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(ble_error.code, "queue_busy");
+    assert!(mcp.snapshot().devices.is_empty());
+    mcp.release().await.unwrap();
+    gui.release().await.unwrap();
+    cli.release().await.unwrap();
     core.finish().await;
 }

@@ -208,6 +208,39 @@ fn concurrent_background_holders_share_core_and_release_individually() {
     let error: Value = serde_json::from_slice(&rejected.stderr).unwrap();
     assert_eq!(error["code"], "gui_only");
 
+    value(run(
+        directory,
+        &[
+            "connections",
+            "endpoint",
+            "--transport",
+            "v3",
+            "ws://127.0.0.1:9014/",
+        ],
+    ));
+    let connections = value(run(directory, &["connections", "list"]));
+    assert!(connections.as_array().unwrap().iter().any(|connection| {
+        connection["connectionId"] == "ws-v3" && connection["endpoint"] == "ws://127.0.0.1:9014/"
+    }));
+    assert_eq!(
+        value(run(directory, &["status"]))["connections"],
+        connections
+    );
+    let rejected = run(
+        directory,
+        &[
+            "bluetooth",
+            "config",
+            "--device",
+            "missing",
+            "--params",
+            "{\"maxStrengthA\":201}",
+        ],
+    );
+    assert!(!rejected.status.success());
+    let error: Value = serde_json::from_slice(&rejected.stderr).unwrap();
+    assert_eq!(error["code"], "invalid_ble_parameters");
+
     value(run(directory, &["holders", "release", &first_id]));
     cleanup.ids.remove(0);
     let holders = value(run(directory, &["holders", "list"]));
