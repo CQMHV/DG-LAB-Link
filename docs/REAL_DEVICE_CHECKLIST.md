@@ -53,13 +53,19 @@
 
 ## GUI、CLI 与 MCP 共享会话
 
-- [ ] 按 [CLI/MCP 使用说明](CLI_MCP.md) 启动后台 CLI，记录本次 holderId；确认 GUI、CLI `status` 与 MCP `dglab://status` 的 controllerId、设备 controlId 相同。
+- [ ] 确认 core、GUI、CLI、MCP 四个可执行文件来自同一次构建且客户端与 core 同目录；分别导出 HTTP 与 stdio MCP 配置，确认 stdio 命令及 HTTP `server` 启动命令为绝对路径且启动参数没有令牌。
+- [ ] 没有 GUI 或后台 CLI 时，通过 AI 客户端启动 stdio MCP；确认自动唤起 core，初始化后没有 Relay 连接、设备输出或音频活动，再显式执行连接与配对。
+- [ ] 按 [CLI/MCP 使用说明](CLI_MCP.md) 启动后台 CLI，记录本次 holderId，再启动 `dg-lab-link-mcp --transport http`；确认 GUI、CLI `status` 与 MCP `dglab://status` 的 controllerId、设备 controlId 相同。
+- [ ] HTTP MCP 启动和请求不增加 holder 数量，关闭 HTTP 不影响 GUI 或 CLI 会话；core 退出时 HTTP 也退出，只有 HTTP 运行时不能自动唤起或保持核心。
+- [ ] 关闭 HTTP 服务后通过 CLI 修改其端口，确认 GUI、CLI 和 stdio MCP 的原会话不重连；HTTP 服务运行时修改端口明确失败，重新启动后使用新端口。确认 core 默认 `17845/control` 与 MCP 默认 `17846/mcp` 分离。
+- [ ] 同时连接 stdio 和 HTTP MCP，确认两种传输与 GUI、CLI 看到同一 controllerId、设备 controlId、输入源及运行记录；按显式设备目标执行相同低强度操作，确认业务行为和错误一致。
 - [ ] 在 GUI 选择第一台设备，通过 CLI 或 MCP 显式修改第二台设备的低强度与输入源；确认只影响目标设备，GUI 能看到同一变化。
 - [ ] 通过 CLI/MCP 以第二台设备为基准开启全设备同步，确认强度取自明确的基准设备，不取 GUI 当前焦点。
 - [ ] GUI 启动低强度输出，分别通过 CLI 和 MCP 普通停止、紧急停止，确认普通停止的设备范围以及紧急停止的全设备清空、归零与音频停止行为相同。
 - [ ] 保留后台持有者并退出 GUI，确认现有共享会话仍运行；重新打开 GUI，确认读取同一会话。
-- [ ] 释放指定后台 holderId，确认其他 GUI/CLI 不受影响；释放最后一个持有者后，十秒内确认设备清空、归零、音频停止、Relay 断开。
-- [ ] 重启核心，确认没有自动恢复 Relay、输出、触点或音频采集；完成测试后释放本次创建的全部持有者。
+- [ ] 关闭一个 stdio MCP 客户端（stdin EOF），确认其持有者释放，其他 GUI/CLI/stdio MCP 继续运行；异常结束 MCP 子进程后，确认本机连接／心跳最长十秒内释放其持有关系。
+- [ ] 释放指定后台 holderId，确认其他 GUI/CLI/stdio MCP 不受影响；释放最后一个持有者后，十秒内确认设备清空、归零、音频停止、Relay 断开。HTTP 请求本身不保持核心存活。
+- [ ] 重启核心，确认没有自动恢复 Relay、输出、触点或音频采集；完成测试后关闭本次启动的 HTTP MCP 进程，再释放本次创建的全部持有者。
 
 ## 结果记录
 

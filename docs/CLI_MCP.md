@@ -1,18 +1,18 @@
 # CLI 与本机 MCP
 
-GUI、CLI 和 MCP 连接同一个独立核心，共用 Hub、Socket V4 Relay、设备会话、输入源、波形库与持久配置。所有业务操作最终调用类型化 `ControlCommand`；窗口、托盘和开机自启由 GUI 管理。
+core、GUI、CLI、MCP 四个程序按职责分开；GUI、CLI、stdio MCP 与本机 HTTP MCP 连接同一个独立核心，共用 Hub、Socket V4 Relay、设备会话、输入源、波形库与持久配置。所有业务操作最终调用类型化 `ControlCommand`；窗口、托盘和开机自启由 GUI 管理。
 
 ## 构建与持有核心
 
-只运行 CLI 时只需 Rust 工具链：
+无界面入口只需 Rust 工具链：
 
 ```powershell
-cargo build -p dg-lab-link-core-server -p dg-lab-link-cli
+cargo build -p dg-lab-link-core-server -p dg-lab-link-cli -p dg-lab-link-mcp
 $cli = ".\src-tauri\target\debug\dg-lab-link-cli.exe"
 & $cli --help
 ```
 
-可执行文件按职责分为 `dg-lab-link-core`（核心、实时链路及 MCP 服务）、`dg-lab-link-cli`（命令与持有者管理）、`dg-lab-link-gui`（窗口、托盘及自启动）。GUI 和 CLI 自动连接或启动同目录的 core；无界面使用须同时准备 core 和 CLI。MCP 是 core 内的独立协议适配模块，目前没有第四个 MCP 可执行文件。
+可执行文件按职责分为 `dg-lab-link-core`（核心、实时链路及本机 WebSocket `/control`）、`dg-lab-link-cli`（命令与持有者管理）、`dg-lab-link-mcp`（默认 stdio，`--transport http` 提供 HTTP MCP）、`dg-lab-link-gui`（窗口、托盘及自启动）。GUI、CLI 和 stdio MCP 自动连接或启动同目录的 core，HTTP MCP 只连接已有 core；实时链路始终留在 core。CLI 需要 core + CLI，stdio MCP 需要 core + MCP；HTTP MCP 需要 core + MCP，并通过 GUI 或 CLI `serve` 保持核心。桌面联合构建会准备全部四个程序。
 
 `serve` 前台持有核心，Ctrl+C 释放当前持有者。`serve --background --json` 创建隐藏的后台 CLI 进程并返回 `holderId`、持有者 `pid` 与核心 `runtime` 信息。启动只恢复配置，不自动连接 Relay 或开始输出。
 
@@ -24,7 +24,7 @@ $holder = & $cli serve --background --json | ConvertFrom-Json
 & $cli holders release $holder.holderId --json
 ```
 
-GUI、常驻 CLI、`watch` 和一次性业务 CLI 在连接期间持有核心；独立设备窗口共用 GUI 进程的持有关系，缩到托盘继续持有。GUI 或业务 CLI 会自动连接或启动核心，管理命令 `holders` 只连接已有核心。一次性 CLI 在操作结束后立即释放；如果没有其他持有者，核心随后清理并退出。因此多步操作应先 `serve`，或保持 GUI 运行。
+GUI、常驻 CLI、`watch`、一次性业务 CLI 和 stdio MCP 在连接期间持有核心；独立设备窗口共用 GUI 进程的持有关系，缩到托盘继续持有。GUI、业务 CLI 和 stdio MCP 会自动连接或启动核心，管理命令 `holders` 只连接已有核心。一次性 CLI 在操作结束后立即释放；如果没有其他持有者，核心随后清理并退出。因此 CLI 多步操作应先 `serve`，或保持 GUI 运行。stdio MCP 会在子进程会话期间持续持有，无须额外的后台 CLI。
 
 `holders release <id>` 只释放指定持有者。最后一个持有者退出后停止接受普通请求，停止所有输出、归零强度、停止音频并断开 Relay，再关闭接口和退出；清理最长十秒。异常退出通过连接与心跳最长十秒内释放。核心重启不恢复 Relay 连接、输出、触点或音频活动。
 
@@ -107,14 +107,56 @@ $device = "<devices 返回的 controlId>"
 
 ## AI 使用 MCP
 
-MCP 使用官方 Rust SDK `rmcp` 的 Streamable HTTP，地址默认为 `http://127.0.0.1:17846/mcp`。不提供 stdio、远程监听或持续 MCP 持有关系。本机 WebSocket 和 HTTP 共用随机 Bearer 令牌；核心验证 Host 与 Origin，不允许网页跨站访问。
+MCP 使用官方 Rust SDK `rmcp`，支持独立子进程 stdio 和本机 Streamable HTTP 两种传输，工具、资源及业务 Schema 相同。`mcp config --transport http|stdio --json` 输出连接配置，默认仍为 HTTP。
 
-AI 工作流：
+### stdio：客户端自动启动并持有核心
+
+适用于按命令启动 MCP 子进程的 AI 客户端，无须先运行 GUI 或 `serve`：
+
+```powershell
+& $cli mcp config --transport stdio --json
+```
+
+返回同目录 `dg-lab-link-mcp` 的绝对路径及配置目录参数，形如：
+
+```json
+{
+    "transport": "stdio",
+    "command": "C:\\DG-LAB-Link\\dg-lab-link-mcp.exe",
+    "args": ["--config-dir", "C:\\Users\\user\\AppData\\Roaming\\cn.dglab.link"]
+}
+```
+
+将返回的 `command` 与 `args` 放入客户端的 stdio MCP 配置。客户端启动 MCP 子进程后，子进程自动连接已有 core，或启动同目录 core，并持续持有这一个会话。冷启动只恢复配置，不连接 Relay、不开始输出；初始化后调用 `connect_relay` 等业务工具仍须明确执行。
+
+stdio stdout 只输出 MCP 协议消息，诊断和启动错误写入 stderr。stdin EOF、正常退出时释放当前持有者；MCP 进程异常退出通过本机连接及心跳最长十秒内释放。关闭一个 MCP 客户端不影响其他 GUI、CLI 或 stdio MCP 持有者；最后一个持有者退出才触发全局安全清理。任务完成后由客户端关闭 stdio 会话即可，无须管理后台 CLI holderId。
+
+stdio 每条请求最多 8 MiB，响应最多 16 MiB；普通请求容量为 32，停止操作预留 8 个位置。初始化须在三十秒内完成；stdout 写入超过一秒或响应队列耗尽时关闭会话并释放本进程的持有者，诊断写入 stderr。慢 stdout 不阻塞读取停止请求，停止前排队的输出操作不会在停止后恢复活动。按 ID 释放 stdio 持有者时，即使 stdin 仍然开放，MCP 进程也会退出并报告 `core_closed`。
+
+stdio 配置不包含 Bearer 令牌，也不会为了显示配置而启动 core。`--show-token` 和 `--port` 只适用于 HTTP，和 `--transport stdio` 一起使用会返回参数错误。stdio 程序仍通过已鉴权的本机 WebSocket 访问核心，令牌在本机读取，不通过 stdio 配置导出。
+
+### HTTP：启动独立 MCP 服务，连接已被持有的核心
+
+`dg-lab-link-mcp --transport http` 监听本机 `http://127.0.0.1:17846/mcp`，使用随机 Bearer 令牌并验证 Host 与 Origin。该进程以 observer 连接已运行的 core，HTTP 进程与请求都不增加核心持有者，也不自动唤起 core；先运行 GUI 或 CLI `serve` 保持核心。core 关闭时 HTTP 服务也退出。core 自身只提供默认 `17845` 端口的 `/control`，不提供 `/mcp`。
+
+后台 CLI 工作流：
 
 1. `serve --background --json`，保存返回的 holderId；也可使用已运行 GUI。
-2. `mcp config --show-token --json`，取得 MCP URL 与 `headers.Authorization`，传给支持 Streamable HTTP 的客户端。令牌只在显式 `--show-token` 时输出，不记录到公开日志。
-3. 客户端初始化并列举工具，读取状态、配对与设备，调用业务工具。设备写操作始终显式使用 controlId；命令参数是 CLI `commands` 返回的同一 Schema。
-4. 完成工作后停止需要结束的输出，再执行 `holders release <自己创建的 holderId>`。其他持有者仍存在时核心继续运行。
+2. `mcp config --transport http --json`，按返回的 `server.command` 和 `server.args` 在另一个终端启动独立 MCP HTTP 进程，或直接执行同目录 `dg-lab-link-mcp --transport http`。启动参数使用相同配置目录，不包含令牌。
+3. `mcp config --transport http --show-token --json`，取得 MCP URL 与 `headers.Authorization`，传给支持 Streamable HTTP 的客户端。令牌只在显式 `--show-token` 时输出，不记录到公开日志；随后初始化并调用业务工具，设备写操作始终显式使用 controlId。
+4. 完成工作后停止需要结束的输出，结束自己启动的 HTTP 进程（前台运行用 Ctrl+C），再执行 `holders release <自己创建的 holderId>`。其他持有者仍存在时核心继续运行。
+
+例如，先创建后台持有者，再在另一个终端用导出的启动提示运行 HTTP 服务：
+
+```powershell
+$holder = & $cli serve --background --json | ConvertFrom-Json
+# 另一个终端（相同配置目录），Ctrl+C 结束这个 HTTP 进程
+$httpConfig = & $cli mcp config --transport http --json | ConvertFrom-Json
+$serverArgs = $httpConfig.server.args
+& $httpConfig.server.command @serverArgs
+```
+
+HTTP 服务关闭后，在创建持有者的终端运行 `& $cli holders release $holder.holderId --json`。关闭 HTTP 服务只移除观察者连接，不释放 GUI 或 CLI 的持有者。
 
 连接配置示意（将占位符替换为本机命令返回值）：
 
@@ -126,12 +168,12 @@ AI 工作流：
 }
 ```
 
-MCP 工具名称与 `ControlCommand` 的 snake_case 名称一致，例如 `get_hub_snapshot`、`connect_relay`、`adjust_intensity`、`start_output`、`stop_output`、`emergency_stop`、`import_waveform_files`。设备写参数仍为 `{ "deviceId": "<controlId>" }`。工具使用相同核心校验、持久化、回滚、队列和停止优先级；Hub 快照、设备、输入源与运行记录还通过只读资源 `dglab://status`、`dglab://devices`、`dglab://sources`、`dglab://logs` 提供。MCP 请求不会启动核心；不存在持有者时先启动 GUI 或 `serve`。
+两种传输的 MCP 工具名称都与 `ControlCommand` 的 snake_case 名称一致，例如 `get_hub_snapshot`、`connect_relay`、`adjust_intensity`、`start_output`、`stop_output`、`emergency_stop`、`import_waveform_files`。设备写参数仍为 `{ "deviceId": "<controlId>" }`。工具使用相同核心校验、持久化、回滚、队列和停止优先级；Hub 快照、设备、输入源与运行记录还通过只读资源 `dglab://status`、`dglab://devices`、`dglab://sources`、`dglab://logs` 提供。
 
-使用 `initialize` 协商协议版本，后续请求带 `MCP-Protocol-Version` 和 `Accept: application/json, text/event-stream`。服务使用无状态 HTTP，不要求 `Mcp-Session-Id`。例如用 PowerShell 验证初始化（核心须已被持有）：
+HTTP 使用 `initialize` 协商协议版本，后续请求带 `MCP-Protocol-Version` 和 `Accept: application/json, text/event-stream`。服务使用无状态 HTTP，不要求 `Mcp-Session-Id`。例如用 PowerShell 验证 HTTP 初始化（core 已被持有，独立 HTTP MCP 已启动）：
 
 ```powershell
-$mcp = & $cli mcp config --show-token --json | ConvertFrom-Json
+$mcp = & $cli mcp config --transport http --show-token --json | ConvertFrom-Json
 $headers = @{
     Authorization = $mcp.headers.Authorization
     Accept = "application/json, text/event-stream"
@@ -142,10 +184,14 @@ Invoke-WebRequest -Uri $mcp.url -Method Post -Headers $headers -ContentType "app
 
 ## 配置与故障处理
 
-`mcp config --json` 显示当前地址和配置目录，默认隐藏令牌。全局 `--config-dir <绝对或相对路径>` 允许隔离开发/测试状态；日常使用默认目录以便和 GUI 共用核心。修改端口前须退出所有 GUI/常驻 CLI 并等待核心清理完成，然后执行 `mcp config --port 17847`。端口持久保存，下次启动使用新值；绑定失败明确报错，不自动选择另一个端口。
+`mcp config --json` 默认显示 HTTP 地址、配置目录及 `server` 启动提示，隐藏令牌；`mcp config --transport stdio --json` 显示 stdio 命令和参数。全局 `--config-dir <绝对或相对路径>` 允许隔离开发/测试状态；日常使用默认目录以便和 GUI 共用核心。
 
-如果 GUI 或 CLI 找不到 core，确认 `dg-lab-link-core` 与客户端位于同一目录，并运行 `npm run build:headless` 或重新执行桌面构建。GUI 不依赖 CLI 可执行文件，CLI 不承载核心服务。
+本机配置的 `port` 是 core `/control` 端口（默认 `17845`），`mcpPort` 是独立 HTTP MCP 端口（默认 `17846`）。执行 `mcp config --transport http --port 17847` 只更新 `mcpPort`；先关闭该配置目录的 HTTP MCP 服务，`mcp-http.lock` 被占用时会拒绝修改，GUI、CLI 和 stdio MCP 可继续持有 core。重新启动 HTTP 服务使用新值，token 和 core 端口保持不变；端口不能与 core 相同，绑定失败明确报错，不自动选择其他端口。
 
-排障时可直接执行 `dg-lab-link-core --json --config-dir <目录>`，端口占用等启动错误以 `{code, message}` 写入 stderr；`--port` 在绑定成功后持久保存，`--relay-endpoint` 用于覆盖模拟 Relay 地址。直接启动 core 不增加持有者，十秒内没有 GUI/CLI 连接时仍按原生命周期退出；需要长期运行时使用 CLI `serve`。
+旧本机配置只含 `port` 时会将原值迁为 HTTP MCP 端口，core 使用 `17845`；若原 HTTP 端口恰为 `17845`，core 改用 `17846` 避免冲突。迁移保留原令牌。若旧 core 还在运行，会返回 `runtime_config_migration_required`，先退出旧 core 后重试，防止改变运行中的控制地址。
 
-CLI/core 无界面运行也需要本机音频设备才可使用音频采集或播放；设备输出和声音功能仍须按 [真机验收清单](REAL_DEVICE_CHECKLIST.md) 验证。
+如果 GUI、CLI 或 MCP 找不到 core，确认 `dg-lab-link-core` 与客户端位于同一目录，并运行 `npm run build:headless` 或重新执行桌面构建。配置中的 MCP 命令找不到时，确认 `dg-lab-link-mcp` 已构建，并重新导出配置。HTTP MCP 连接失败时先运行 GUI 或 CLI `serve`；能读取 CLI 状态但无法访问 `/mcp` 时，确认独立 HTTP MCP 进程已启动及 URL 端口正确。GUI 不依赖 CLI 可执行文件，CLI/MCP 不承载核心服务。
+
+排障时可直接执行 `dg-lab-link-core --json --config-dir <目录>`，端口占用等启动错误以 `{code, message}` 写入 stderr；core 的 `--port` 在绑定成功后持久保存控制端口，`--relay-endpoint` 用于覆盖模拟 Relay 地址。直接启动 core 不增加持有者，十秒内没有 GUI/CLI/stdio MCP 持有时仍按原生命周期退出；HTTP observer 不延长这个期限。需要长期运行时使用 CLI `serve` 或保持 stdio MCP 会话。
+
+CLI/MCP/core 无界面运行也需要本机音频设备才可使用音频采集或播放；设备输出和声音功能仍须按 [真机验收清单](REAL_DEVICE_CHECKLIST.md) 验证。

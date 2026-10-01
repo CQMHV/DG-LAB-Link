@@ -1,13 +1,13 @@
 # DG-LAB Link
 
-可扩展的 DG-LAB 波形连接中枢。桌面 GUI、CLI 和本机 MCP 共用一个独立 Rust 核心进程、一条 DG-LAB Socket V4 Relay 连接和相同设备会话。桌面端使用 Tauri 2、React 与 TypeScript；CLI 与核心可独立运行，无需 WebView 或 Node.js。
+可扩展的 DG-LAB 波形连接中枢。core、GUI、CLI 和 MCP 四个程序按职责分开；GUI、CLI、stdio MCP 与本机 HTTP MCP 共用一个独立 Rust 核心进程、一条 DG-LAB Socket V4 Relay 连接和相同设备会话。桌面端使用 Tauri 2、React 与 TypeScript；CLI、MCP 与核心可独立运行，无需 WebView 或 Node.js。
 
 > 当前为首个可运行版本。自动化测试覆盖协议编码、Hub、安全停止与浏览器交互，但仍需按照真机清单完成手机、蓝牙和设备验证后再用于实际输出。
 
 ## 当前能力
 
-- GUI、`dg-lab-link-cli` 和 Streamable HTTP MCP 使用同一 `ControlService`、Hub、波形库、配置校验和安全停止链路。MCP 仅监听本机，使用随机 Bearer 令牌。
-- GUI 进程、常驻 CLI 与一次性 CLI 持有核心；最后一个持有者退出后安全清理并关闭核心。缩到托盘继续持有，独立设备窗口不增加持有者；MCP 请求本身不持有核心。
+- GUI、`dg-lab-link-cli`、stdio MCP 和 Streamable HTTP MCP 使用同一 `ControlService`、Hub、波形库、配置校验和安全停止链路。两种 MCP 传输由 `dg-lab-link-mcp` 提供；HTTP 仅监听本机，使用随机 Bearer 令牌。
+- GUI 进程、常驻 CLI、一次性 CLI 和 stdio MCP 进程持有核心；最后一个持有者退出后安全清理并关闭核心。缩到托盘继续持有，独立设备窗口不增加持有者；HTTP MCP 请求本身不持有核心。
 - 对接官方 Socket V4 Relay，生成 DG-LAB 4 App 配对二维码。
 - 同步多个 APP 下的全部设备槽位、强度和通道状态；按设备独立开始和停止输出，同时输出最多 32 台。
 - 可选开启“同步所有设备”，立即按显式基准设备（GUI 为当前仪表盘设备）对齐所有在线设备的 A/B 强度，并在后续调整中保持相同目标值；默认关闭。
@@ -37,10 +37,10 @@ npm run dev
 npm run tauri -- dev
 ```
 
-桌面开发和生产构建会同时构建 core 和 CLI。可执行文件分别为 `dg-lab-link-core`、`dg-lab-link-cli`、`dg-lab-link-gui`；GUI 和 CLI 从自身目录寻找 core。只开发无界面入口时只需 Rust 工具链：
+桌面开发和生产构建会同时准备 `dg-lab-link-core`、`dg-lab-link-cli`、`dg-lab-link-mcp`、`dg-lab-link-gui` 四个可执行文件；GUI、CLI 和 MCP 从自身目录寻找 core。只开发无界面入口时只需 Rust 工具链：
 
 ```powershell
-cargo build -p dg-lab-link-core-server -p dg-lab-link-cli
+cargo build -p dg-lab-link-core-server -p dg-lab-link-cli -p dg-lab-link-mcp
 & .\src-tauri\target\debug\dg-lab-link-cli.exe --help
 ```
 
@@ -57,7 +57,11 @@ $holder = & $cli serve --background --json | ConvertFrom-Json
 & $cli holders release $holder.holderId --json
 ```
 
-MCP 作为协议适配模块运行在 `dg-lab-link-core` 进程中，地址默认为 `http://127.0.0.1:17846/mcp`，当前不单独分发 MCP 程序。`mcp config` 显示地址；`mcp config --show-token --json` 显式导出客户端所需的 Authorization 头。AI 使用 MCP 之前同样须有 GUI 或常驻 CLI 持有核心。后台持有者不会跟随外部 AI 客户端自动退出。
+MCP 支持两种传输。`mcp config --transport stdio --json` 输出同目录 `dg-lab-link-mcp` 的绝对命令路径和参数，交给支持 stdio 的 AI 客户端启动；MCP 子进程自动连接或唤起 core，并在会话期间持续持有，无须预先运行 GUI 或后台 CLI。stdin EOF 或退出时释放，异常退出由本机连接／心跳检测释放；stdout 只输出 MCP 协议消息。
+
+HTTP MCP 使用独立入口 `dg-lab-link-mcp --transport http`，地址默认为 `http://127.0.0.1:17846/mcp`。先启动 GUI 或 CLI `serve` 保持 core，再启动 HTTP MCP 进程；它只连接已有 core，作为观察者不增加持有者，core 关闭时也会退出。`mcp config` 默认选择 HTTP，输出连接地址和 `server` 启动命令；`mcp config --transport http --show-token --json` 显式导出 Authorization 头。任务结束时关闭自己启动的 HTTP 进程，再释放自己的后台 CLI holderId。后台 CLI 持有者不会跟随外部 AI 客户端自动退出。
+
+core 的本机控制端口默认为 `17845`，只提供 `/control`；MCP HTTP 端口默认 `17846`，只由 MCP 程序提供 `/mcp`。`mcp config --port` 修改 HTTP 端口，要求 HTTP 服务已经停止，core 可继续在线。
 
 完整业务命令、参数文件、AI 客户端连接与生命周期见 [CLI 与 MCP 使用文档](docs/CLI_MCP.md)。
 
@@ -101,7 +105,7 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-`npm run build` 是 `build:client` 的别名。`npm run build:headless` 联合构建调试 core 和 CLI，`npm run build:headless:release` 构建生产 core 和 CLI；`build:cli`、`build:cli:release` 分别是上述命令的别名。内置波形提交在 `shared/official-waveforms.json` 中；只有更新波形依赖时才需要运行 `npm run generate:waveforms`，Rust 构建不需要 Node.js。
+`npm run build` 是 `build:client` 的别名。`npm run build:headless` 联合构建调试 core、CLI 和 MCP，`npm run build:headless:release` 构建相同的生产程序；`build:cli`、`build:cli:release` 分别是上述命令的别名。内置波形提交在 `shared/official-waveforms.json` 中；只有更新波形依赖时才需要运行 `npm run generate:waveforms`，Rust 构建不需要 Node.js。
 
 当前 `bundle.active` 为 `false`，因此以下命令只生成裸可执行文件，不会产出安装包、更新包或签名 bundle：
 
@@ -109,7 +113,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 npm run tauri -- build
 ```
 
-产物为 `src-tauri/target/release/dg-lab-link-core.exe`、`dg-lab-link-cli.exe`、`dg-lab-link-gui.exe`；分发时将所需客户端与 core 放在同一目录，并保留许可证和第三方声明。仅使用 GUI 时可分发 core + GUI，仅使用 CLI/MCP 时可分发 core + CLI。
+产物为 `src-tauri/target/release/dg-lab-link-core.exe`、`dg-lab-link-cli.exe`、`dg-lab-link-mcp.exe`、`dg-lab-link-gui.exe`；分发时将所需客户端与 core 放在同一目录，并保留许可证和第三方声明。仅使用 GUI 时可分发 core + GUI；仅使用 stdio MCP 时可分发 core + MCP；HTTP MCP 需要 core + MCP，并通过 GUI 或 CLI `serve` 持有核心。
 
 架构边界见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，连接真实设备前请逐项执行 [docs/REAL_DEVICE_CHECKLIST.md](docs/REAL_DEVICE_CHECKLIST.md)。
 

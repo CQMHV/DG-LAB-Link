@@ -1,16 +1,18 @@
 # 架构说明
 
-DG-LAB Link 采用“入口管理交互，独立 Rust 核心持有实时链路”的结构。GUI、CLI、MCP 共享同一个进程内的 ControlService 与 Hub；窗口刷新、前端热更新及 MCP 客户端重连不会成为设备输出链路的时钟源。
+DG-LAB Link 采用“入口管理交互，独立 Rust 核心持有实时链路”的结构。core、GUI、CLI、MCP 按职责分为四个可执行程序；全部客户端共用核心进程内的 ControlService 与 Hub。窗口刷新、前端热更新及 MCP 客户端重连不会成为设备输出链路的时钟源。
 
 ```text
-React UI ── Tauri 命令代理 ──┐
-CLI ────────────────────────┤ 本机 WebSocket / Bearer
-                           ▼
-                  独立 Rust 核心进程
-MCP 客户端 ── HTTP /mcp ── ControlService
-                           │ 类型化 ControlCommand
-                           ▼
-                       Hub actor
+React UI ── Tauri 命令代理 ─────────────────────────────┐
+CLI ──────────────────────────────────────────────────┤
+MCP 客户端 ── stdio / HTTP:17846/mcp ── dg-lab-link-mcp ┤
+                                                      │ 本机 WebSocket / Bearer
+                                                      ▼
+                                      dg-lab-link-core:17845/control
+                                                ControlService
+                                                      │ 类型化 ControlCommand
+                                                      ▼
+                                                  Hub actor
     ├── 编译期 SourceFactory 注册表
     ├── 多设备、逐通道输入源路由与逐设备强度状态
     └── DG-LAB Socket V4 客户端
@@ -23,20 +25,24 @@ MCP 客户端 ── HTTP /mcp ── ControlService
 
 - Rust 后端负责官方 Relay 连接、多个 APP 与设备状态、波形节拍、逐设备逐通道路由、队列和紧急停止。
 - React 前端只调用经过校验的命令，并展示低频状态快照；原始实时波形不会逐采样穿过 IPC。
-- Cargo workspace 将核心库、运行时与通信库、核心启动程序、CLI 和 Tauri GUI 分开。`crates/core-server` 是很薄的启动入口，生成 `dg-lab-link-core`；`crates/cli` 生成 `dg-lab-link-cli`；`src-tauri` 生成 `dg-lab-link-gui`。核心与 CLI 不依赖 Tauri、WebView 或 Node.js；Tauri 只承担窗口、托盘、自启动和本机核心客户端。
+- Cargo workspace 将核心库、运行时与通信库、核心启动程序、CLI、MCP 和 Tauri GUI 分开。核心启动程序生成 `dg-lab-link-core`；客户端分别生成 `dg-lab-link-cli`、`dg-lab-link-mcp`、`dg-lab-link-gui`。官方 `rmcp` SDK、stdio/HTTP 传输及 MCP 适配均位于 MCP crate，core 只提供实时链路与本机控制接口。核心、CLI 和 MCP 不依赖 Tauri、WebView 或 Node.js；Tauri 只承担窗口、托盘、自启动和本机核心客户端。
 - ControlService 统一处理配置校验、Hub 更新、持久化与失败回滚；持久配置事务串行，紧急停止绕过普通配置锁。CLI 的 `call` 与 MCP 工具直接使用同一类型化命令及错误 `{code, message}`。
 - 所有实时通道使用有界队列，过期数据不追赶补发。
 - Socket V4 是当前主协议。旧协议只在出现真实兼容需求后独立增加。
 
 ## 共享核心生命周期
 
-GUI 和业务 CLI 先连接已有核心，不存在时启动同目录下的 `dg-lab-link-core`。CLI 只负责业务客户端和后台持有者，不再承载核心入口。当前用户配置目录内的文件锁防止并发冷启动产生两个核心。核心仅绑定 `127.0.0.1`，端口默认 `17846`，随机令牌保存在本机配置；WebSocket 与官方 Rust SDK `rmcp` 的 Streamable HTTP `/mcp` 共用鉴权与 Host/Origin 检查。接口、请求、连接与响应队列都有容量限制。
+GUI、业务 CLI 和 stdio MCP 先连接已有核心，不存在时启动同目录下的 `dg-lab-link-core`。HTTP MCP 只连接已有核心，不负责启动。CLI 负责业务客户端和后台持有者，MCP 程序负责协议转发，都不承载 Hub 或实时链路。当前用户配置目录内的文件锁防止并发冷启动产生两个核心。core 仅绑定 `127.0.0.1`，本机 WebSocket `/control` 默认端口 `17845`；独立 MCP HTTP `/mcp` 默认端口 `17846`。两者使用本机随机 Bearer 令牌及 Host/Origin 检查。接口、请求、连接与响应队列都有容量限制。
 
-MCP 在模块层面独立，当前由核心进程承载并直接调用 ControlService。首版没有独立的 MCP 部署、stdio 接入或跨机器代理需求，因此不增加 `dg-lab-link-mcp` 进程，避免额外的请求转发、连接状态和退出顺序。如果未来增加独立 MCP 程序，它应作为核心的客户端，实时链路和安全策略仍留在 core。
+`dg-lab-link-mcp` 默认提供 stdio，`--transport http` 启动本机 Streamable HTTP 服务；两种传输复用官方 Rust SDK `rmcp` 的同一工具、资源和 Schema 适配，通过本机 WebSocket 客户端转发到同一 ControlService。stdio stdout 只包含 MCP 协议消息，诊断写入 stderr，配置只包含命令路径和参数，不导出 Bearer 令牌。传输选择不改变业务能力、校验、配置持久化和停止优先级。
 
-每个 GUI 进程持有一次，多个设备窗口共用该持有关系；缩到托盘继续持有。前台 `serve` 或后台 CLI 是常驻持有者；一次性 CLI 和 `watch` 在连接期间持有。HTTP MCP 请求不形成持续持有关系。后台 `serve` 返回 holderId，管理命令可按 ID 释放指定持有者并关闭其连接。外部 AI 客户端异常退出可能留下后台 CLI，须显式释放。
+停止保护跨入口共享：core 接受 GUI、CLI、stdio 或 HTTP 发来的普通停止、紧急停止或 Relay 断开时，提升全局命令代次，并通过 WebSocket 通知所有客户端。HTTP 和 stdio 在协议入口接收请求时记录本地及 core 代次，在 SDK 调度、客户端排队和 WebSocket 转发过程中保留原值。core 在将可能恢复活动的命令送入共享服务前校验代次；停止前接收但尚未转发的输出、强度、触控、音频控制、同步、连接或重新配对请求会返回 `queue_busy`，不能在转发时重新取得新代次而绕过停止。因此其他 GUI、CLI 或 stdio 发起的停止同样取消 HTTP 中延迟的旧请求；客户端更新代次后明确提交的新命令可重新请求活动，Hub 和 Relay 的既有波形代次继续隔离已入队的旧输出。
 
-正常退出立即释放；连接丢失或心跳失效后最长十秒内释放。最后一个持有者退出时停止接收普通请求，清理所有设备输出与强度、停止音频、断开 Relay，关闭接口并退出；清理最长等待十秒。GUI 退出释放自身持有者，其他 GUI/CLI 仍持有时继续运行。核心重启只恢复持久配置，不自动连接 Relay、开始输出、恢复触点或音频活动。
+每个 GUI 进程持有一次，多个设备窗口共用该持有关系；缩到托盘继续持有。前台 `serve` 或后台 CLI 是常驻持有者；一次性 CLI 和 `watch` 在连接期间持有。stdio MCP 子进程启动时自动连接或唤起核心，并在会话期间持续持有；stdin EOF、退出时释放，异常退出通过本机连接及心跳释放，其他持有者继续运行。HTTP MCP 进程以 observer 连接 core，进程和 HTTP 请求均不增加持有者；由 GUI 或 `serve` 保持核心，core 关闭时 HTTP MCP 也退出。后台 `serve` 返回 holderId，管理命令可按 ID 释放指定持有者并关闭其连接。外部 AI 客户端异常退出可能留下后台 CLI，须显式释放。
+
+本机配置分别保存 `port`（core 控制端口）和 `mcpPort`（HTTP MCP 端口）。`mcp config --port` 持有 `mcp-http.lock` 后只更新 HTTP 端口，HTTP 服务运行时拒绝修改，core 可继续在线。旧配置只含 `port` 时将该值迁为 HTTP 端口，core 使用默认 `17845`；若旧 HTTP 端口已为 `17845`，core 使用 `17846` 避免冲突。迁移保留令牌；旧 core 仍运行时要求先退出，避免切换其控制端口。
+
+正常退出立即释放；连接丢失或心跳失效后最长十秒内释放。最后一个持有者退出时停止接收普通请求，清理所有设备输出与强度、停止音频、断开 Relay，关闭接口并退出；清理最长等待十秒。GUI 退出释放自身持有者，其他 GUI/CLI/stdio MCP 仍持有时继续运行。核心重启只恢复持久配置，不自动连接 Relay、开始输出、恢复触点或音频活动。
 
 ## 输入源
 
@@ -86,4 +92,4 @@ Hub 每个节拍按输入源对设备通道分组：通用状态源读取一次�
 
 ## 构建与发布
 
-`build:client` 只生成 React 客户端。Tauri 的 `beforeDevCommand` 使用 `dev:desktop` 先构建调试 core 和 CLI，再启动 Vite；`beforeBuildCommand` 使用 `build:desktop` 先构建生产 core 和 CLI，再生成前端。workspace 复用 `src-tauri/target` 输出目录，三个二进制同级；GUI 和 CLI 通过自身可执行文件目录寻找 core。当前 `bundle.active = false`，交付三个裸可执行文件；安装包、更新包和签名 bundle 不在首版产物范围内。
+`build:client` 只生成 React 客户端。Tauri 的 `beforeDevCommand` 使用 `dev:desktop` 先构建调试 core、CLI 和 MCP，再启动 Vite；`beforeBuildCommand` 使用 `build:desktop` 先构建相同的生产程序，再生成前端。workspace 复用 `src-tauri/target` 输出目录，四个二进制同级；GUI、CLI 和 MCP 通过自身可执行文件目录寻找 core。当前 `bundle.active = false`，交付四个裸可执行文件；安装包、更新包和签名 bundle 不在首版产物范围内。
