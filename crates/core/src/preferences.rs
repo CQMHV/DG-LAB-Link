@@ -1,5 +1,6 @@
 use std::fs;
 use std::io::ErrorKind;
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::RwLock;
 
@@ -10,8 +11,9 @@ use crate::sources::WaveformConfig;
 use crate::sources::touch::TouchConfig;
 
 const PREFERENCES_FILE_NAME: &str = "preferences.json";
+const MAX_PREFERENCES_BYTES: u64 = 4 * 1024 * 1024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppPreferencesSnapshot {
     pub close_to_tray: bool,
@@ -85,8 +87,20 @@ impl PreferencesState {
 
     pub fn load(config_dir: PathBuf) -> Result<Self, PreferencesError> {
         let file_path = config_dir.join(PREFERENCES_FILE_NAME);
-        let mut snapshot: StoredPreferences = match fs::read_to_string(&file_path) {
-            Ok(content) => serde_json::from_str(&content).map_err(PreferencesError::Parse)?,
+        let mut snapshot: StoredPreferences = match fs::File::open(&file_path) {
+            Ok(file) => {
+                let mut content = Vec::new();
+                file.take(MAX_PREFERENCES_BYTES + 1)
+                    .read_to_end(&mut content)
+                    .map_err(PreferencesError::Read)?;
+                if content.len() as u64 > MAX_PREFERENCES_BYTES {
+                    return Err(PreferencesError::Read(std::io::Error::new(
+                        ErrorKind::InvalidData,
+                        "偏好设置超过 4 MiB",
+                    )));
+                }
+                serde_json::from_slice(&content).map_err(PreferencesError::Parse)?
+            }
             Err(error) if error.kind() == ErrorKind::NotFound => StoredPreferences::default(),
             Err(error) => return Err(PreferencesError::Read(error)),
         };
@@ -233,7 +247,24 @@ impl PreferencesState {
             fs::create_dir_all(parent).map_err(PreferencesError::Write)?;
         }
         let content = serde_json::to_vec_pretty(&snapshot).map_err(PreferencesError::Serialize)?;
-        fs::write(&self.file_path, content).map_err(PreferencesError::Write)
+        let temporary = self
+            .file_path
+            .with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+        let result = (|| {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .map_err(PreferencesError::Write)?;
+            std::io::Write::write_all(&mut file, &content).map_err(PreferencesError::Write)?;
+            file.sync_all().map_err(PreferencesError::Write)?;
+            drop(file);
+            fs::rename(&temporary, &self.file_path).map_err(PreferencesError::Write)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
     }
 }
 
@@ -243,6 +274,20 @@ mod tests {
 
     fn temporary_config_dir() -> PathBuf {
         std::env::temp_dir().join(format!("dg-lab-link-preferences-{}", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn oversized_preferences_are_rejected_before_parsing() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(
+            directory.path().join(PREFERENCES_FILE_NAME),
+            vec![b' '; MAX_PREFERENCES_BYTES as usize + 1],
+        )
+        .unwrap();
+        let result = PreferencesState::load(directory.path().to_path_buf());
+        assert!(
+            matches!(result, Err(PreferencesError::Read(error)) if error.kind() == ErrorKind::InvalidData)
+        );
     }
 
     #[test]

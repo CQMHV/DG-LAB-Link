@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MappingPoint {
     pub x: f64,

@@ -1,10 +1,6 @@
 mod commands;
-pub mod dglab;
-mod hub;
-pub mod model;
-mod preferences;
-pub mod sources;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -15,73 +11,101 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 
-use crate::dglab::client::DEFAULT_RELAY_ENDPOINT;
-use crate::hub::{HubHandle, SafetySnapshot, create_hub_with_source_preferences};
-use crate::preferences::PreferencesState;
+use dg_lab_link_core::preferences::AppPreferencesSnapshot;
+use dg_lab_link_core::{ControlCommand, ControlError};
+use dg_lab_link_runtime::{Client, connect_or_spawn, core_executable};
+
+pub(crate) struct RuntimeConfigDir(pub PathBuf);
+
+pub(crate) struct DesktopPreferences {
+    close_to_tray: AtomicBool,
+}
+
+impl DesktopPreferences {
+    fn new(preferences: AppPreferencesSnapshot) -> Self {
+        Self {
+            close_to_tray: AtomicBool::new(preferences.close_to_tray),
+        }
+    }
+
+    pub(crate) fn update(&self, preferences: AppPreferencesSnapshot) {
+        self.close_to_tray
+            .store(preferences.close_to_tray, Ordering::Release);
+    }
+
+    fn close_to_tray(&self) -> bool {
+        self.close_to_tray.load(Ordering::Acquire)
+    }
+}
 
 const AUTOSTART_ARG: &str = "--autostart";
 
 pub fn run() {
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("无法初始化 TLS 加密提供器");
-
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec![AUTOSTART_ARG]),
         ))
         .setup(|app| {
-            let preferences_dir = app.path().app_config_dir()?;
-            let preferences =
-                PreferencesState::load(preferences_dir.clone()).unwrap_or_else(|error| {
-                    eprintln!("{error}；本次运行使用默认设置");
-                    PreferencesState::with_defaults(preferences_dir)
-                });
-            let start_hidden = launched_from_autostart() && preferences.start_minimized();
-            let default_source_id = preferences.default_source_id();
-            let fixed_waveform = preferences.fixed_waveform();
-            let custom_waveforms = preferences.custom_waveforms();
-            let touch_config = preferences.touch_config();
-            let (
-                connection_timeout_enabled,
-                connection_timeout_minutes,
-                allow_app_intensity_control,
-            ) = preferences.safety_settings();
-            app.manage(preferences);
+            let config_dir = dg_lab_link_runtime::config_dir()?;
+            let core_executable = core_executable()?;
+            let (client, preferences) = tauri::async_runtime::block_on(async {
+                let client = connect_or_spawn(&config_dir, &core_executable, "GUI", None).await?;
+                let value = client.call(ControlCommand::GetAppPreferences).await?;
+                let preferences = serde_json::from_value::<AppPreferencesSnapshot>(value)
+                    .map_err(|error| ControlError::new("invalid_response", error.to_string()))?;
+                Ok::<_, ControlError>((client, preferences))
+            })?;
+            let start_hidden = launched_from_autostart() && preferences.start_minimized;
+            app.manage(DesktopPreferences::new(preferences));
+            app.manage(RuntimeConfigDir(config_dir));
             create_tray(app)?;
             if start_hidden && let Some(window) = app.get_webview_window("main") {
                 window.hide()?;
             }
 
-            let (hub, mut runtime) = create_hub_with_source_preferences(
-                DEFAULT_RELAY_ENDPOINT.to_owned(),
-                default_source_id,
-                fixed_waveform,
-                custom_waveforms,
-                SafetySnapshot {
-                    connection_timeout_enabled,
-                    connection_timeout_minutes,
-                    allow_app_intensity_control,
-                },
-            );
-            if let Err(error) = runtime.set_initial_touch_config(touch_config) {
-                eprintln!("{error}；本次运行使用默认触控配置");
-            }
-            let mut snapshots = hub.subscribe();
+            let mut snapshots = client.subscribe();
             let app_handle = app.handle().clone();
-
-            tauri::async_runtime::spawn(runtime.run());
+            let monitored_client = client.clone();
             tauri::async_runtime::spawn(async move {
-                while snapshots.changed().await.is_ok() {
-                    let snapshot = snapshots.borrow_and_update().clone();
-                    if app_handle.emit("hub://snapshot", snapshot).is_err() {
-                        break;
+                loop {
+                    tokio::select! {
+                        changed = snapshots.changed() => {
+                            if changed.is_err() { break; }
+                            let snapshot = snapshots.borrow_and_update().clone();
+                            if app_handle.emit("hub://snapshot", snapshot).is_err() { break; }
+                        }
+                        _ = monitored_client.closed() => {
+                            let _ = app_handle.emit("hub://snapshot", monitored_client.snapshot());
+                            let _ = app_handle.emit("hub://runtime-error", ControlError::new(
+                                "core_disconnected", "共享核心已断开，请退出并重新打开应用。",
+                            ));
+                            break;
+                        }
                     }
                 }
             });
 
-            app.manage(hub);
+            let preferences_client = client.clone();
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(2));
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => {
+                            if let Ok(value) = preferences_client.call(ControlCommand::GetAppPreferences).await
+                                && let Ok(preferences) = serde_json::from_value(value)
+                                && let Some(cache) = app_handle.try_state::<DesktopPreferences>()
+                            {
+                                cache.update(preferences);
+                            }
+                        }
+                        _ = preferences_client.closed() => break,
+                    }
+                }
+            });
+
+            app.manage(client);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -90,6 +114,9 @@ pub fn run() {
             commands::set_auto_start,
             commands::set_start_minimized,
             commands::get_hub_snapshot,
+            commands::get_runtime_info,
+            commands::get_mcp_config,
+            commands::parse_waveform_files,
             commands::update_touch_input,
             commands::set_touch_config,
             commands::set_audio_config,
@@ -117,7 +144,14 @@ pub fn run() {
             commands::update_safety,
         ])
         .build(tauri::generate_context!())
-        .expect("无法启动 DG-LAB Link");
+        .unwrap_or_else(|error| {
+            rfd::MessageDialog::new()
+                .set_title("无法启动 DG-LAB Link")
+                .set_description(error.to_string())
+                .set_level(rfd::MessageLevel::Error)
+                .show();
+            std::process::exit(1);
+        });
 
     let shutdown_started = Arc::new(AtomicBool::new(false));
     let shutdown_complete = Arc::new(AtomicBool::new(false));
@@ -128,7 +162,7 @@ pub fn run() {
             ..
         } if label == "main" && !shutdown_complete.load(Ordering::Acquire) => {
             let close_to_tray = app_handle
-                .try_state::<PreferencesState>()
+                .try_state::<DesktopPreferences>()
                 .map(|preferences| preferences.close_to_tray())
                 .unwrap_or(true);
             api.prevent_close();
@@ -150,11 +184,6 @@ pub fn run() {
                 &shutdown_complete,
                 code.unwrap_or(0),
             );
-        }
-        RunEvent::Exit => {
-            if let Some(hub) = app_handle.try_state::<HubHandle>() {
-                hub.shutdown_now();
-            }
         }
         _ => {}
     });
@@ -217,14 +246,33 @@ fn begin_graceful_shutdown<R: tauri::Runtime>(
 
     let app_handle = app_handle.clone();
     let shutdown_complete = Arc::clone(shutdown_complete);
-    let hub = app_handle
-        .try_state::<HubHandle>()
-        .map(|hub| hub.inner().clone());
+    let client = app_handle
+        .try_state::<Client>()
+        .map(|client| client.inner().clone());
     tauri::async_runtime::spawn(async move {
-        if let Some(hub) = hub {
-            let _ = tokio::time::timeout(Duration::from_secs(10), hub.shutdown_gracefully()).await;
+        if let Some(client) = client {
+            let _ = tokio::time::timeout(Duration::from_secs(10), client.release()).await;
         }
         shutdown_complete.store(true, Ordering::Release);
         app_handle.exit(exit_code);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn close_behavior_uses_loaded_preferences_and_successful_updates() {
+        let mut preferences = AppPreferencesSnapshot {
+            close_to_tray: false,
+            auto_start: false,
+            start_minimized: true,
+        };
+        let cache = DesktopPreferences::new(preferences);
+        assert!(!cache.close_to_tray());
+        preferences.close_to_tray = true;
+        cache.update(preferences);
+        assert!(cache.close_to_tray());
+    }
 }

@@ -12,7 +12,19 @@ pub type SourceId = Uuid;
 /// DG-LAB 设备的两个输出通道。
 ///
 /// 领域层使用可读的 `a` / `b` 表示；V4 的 `0` / `1` wire 值由协议层转换。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Channel {
     A,
@@ -63,7 +75,7 @@ pub enum ModelError {
 ///
 /// `frequency` 是设备协议的频率编码而非 Hz。官方有效范围为 10..=240；
 /// `pulse_intensity` 是波形脉宽相对值，范围为 0..=100，与通道绝对强度不同。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(try_from = "WaveSampleWire", into = "WaveSampleWire")]
 pub struct WaveSample {
     frequency: u8,
@@ -115,7 +127,7 @@ impl WaveSample {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, schemars::JsonSchema)]
 struct WaveSampleWire {
     frequency: u8,
     pulse_intensity: u8,
@@ -139,7 +151,7 @@ impl From<WaveSample> for WaveSampleWire {
 }
 
 /// 一帧 100ms 波形，由四组连续的 25ms 采样组成。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WaveFrame {
     samples: [WaveSample; Self::SAMPLE_COUNT],
 }
@@ -173,7 +185,7 @@ impl WaveFrame {
 }
 
 /// 输入源在一次调度中产生的有界波形块。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WaveChunk {
     pub source_id: SourceId,
     pub channel: Channel,
@@ -223,7 +235,7 @@ impl WaveChunk {
 }
 
 /// 可持久化的输入源实例定义。每种 factory 自行解释并校验 `config`。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceSpec {
     pub id: SourceId,

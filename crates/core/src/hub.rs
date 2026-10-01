@@ -3,10 +3,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio::time::{Duration, Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -48,7 +48,7 @@ struct TouchInputSlot {
 type TouchMailbox = Arc<Mutex<BTreeMap<String, TouchInputSlot>>>;
 const MAX_TOUCH_TRANSITIONS: usize = 8;
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioBindingSnapshot {
     pub device_id: String,
@@ -56,7 +56,7 @@ pub struct AudioBindingSnapshot {
     pub config: AudioChannelConfig,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InputModesSnapshot {
     pub touch_config: TouchConfig,
@@ -64,7 +64,7 @@ pub struct InputModesSnapshot {
     pub audio_bindings: Vec<AudioBindingSnapshot>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectionState {
     Disconnected,
@@ -74,7 +74,7 @@ pub enum ConnectionState {
     Error,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputState {
     Idle,
@@ -83,7 +83,7 @@ pub enum OutputState {
     Error,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChannelStatus {
     Idle,
@@ -94,7 +94,7 @@ pub enum ChannelStatus {
     Fault,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LogLevel {
     Info,
@@ -102,7 +102,7 @@ pub enum LogLevel {
     Error,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionSnapshot {
     pub state: ConnectionState,
@@ -113,7 +113,7 @@ pub struct ConnectionSnapshot {
     pub last_error: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceSnapshot {
     pub control_id: String,
@@ -139,7 +139,7 @@ pub struct DeviceSnapshot {
     pub channel_b_status: ChannelStatus,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceSnapshot {
     pub id: String,
@@ -151,7 +151,7 @@ pub struct SourceSnapshot {
     pub selected_preset_name: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CustomWaveformSnapshot {
     pub id: String,
@@ -160,7 +160,7 @@ pub struct CustomWaveformSnapshot {
     pub duration_ms: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OutputSnapshot {
     pub state: OutputState,
@@ -168,7 +168,7 @@ pub struct OutputSnapshot {
     pub last_error: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelSnapshot {
     pub intensity: u16,
@@ -176,13 +176,13 @@ pub struct ChannelSnapshot {
     pub status: ChannelStatus,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelsSnapshot {
     pub a: ChannelSnapshot,
     pub b: ChannelSnapshot,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SafetySnapshot {
     pub connection_timeout_enabled: bool,
@@ -200,7 +200,7 @@ impl Default for SafetySnapshot {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LogSnapshot {
     pub id: String,
@@ -209,7 +209,7 @@ pub struct LogSnapshot {
     pub timestamp: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HubSnapshot {
     pub revision: u64,
@@ -361,15 +361,22 @@ enum HubCommand {
     },
     AudioControl {
         action: AudioAction,
+        safety_epoch: u64,
         reply: oneshot::Sender<Result<(), HubError>>,
     },
-    Connect(oneshot::Sender<Result<(), HubError>>),
-    Disconnect(oneshot::Sender<Result<(), HubError>>),
-    RefreshPairing(oneshot::Sender<Result<(), HubError>>),
+    Connect {
+        safety_epoch: u64,
+        reply: oneshot::Sender<Result<(), HubError>>,
+    },
+    RefreshPairing {
+        safety_epoch: u64,
+        reply: oneshot::Sender<Result<(), HubError>>,
+    },
     AdjustIntensity {
         device_id: Option<String>,
         channel: Channel,
         delta: i32,
+        safety_epoch: u64,
         reply: oneshot::Sender<Result<(), HubError>>,
     },
     StartOutput {
@@ -408,7 +415,9 @@ enum HubCommand {
         reply: oneshot::Sender<Result<(), HubError>>,
     },
     SetSyncAllDevices {
+        device_id: String,
         enabled: bool,
+        safety_epoch: u64,
         reply: oneshot::Sender<Result<(), HubError>>,
     },
     UpdateSafety {
@@ -425,6 +434,7 @@ enum HubSafetyCommand {
         reply: oneshot::Sender<Result<(), HubError>>,
     },
     EmergencyStop(oneshot::Sender<Result<(), HubError>>),
+    Disconnect(oneshot::Sender<Result<(), HubError>>),
 }
 
 #[derive(Clone)]
@@ -436,6 +446,7 @@ pub struct HubHandle {
     shutdown: CancellationToken,
     completion: watch::Receiver<Option<Result<(), HubError>>>,
     safety_epoch: Arc<AtomicU64>,
+    safety_wakeup: Arc<Notify>,
 }
 
 impl HubHandle {
@@ -553,8 +564,13 @@ impl HubHandle {
 
     pub async fn audio_control(&self, action: AudioAction) -> Result<(), HubError> {
         let (reply, response) = oneshot::channel();
+        let safety_epoch = self.safety_epoch.load(Ordering::Acquire);
         self.commands
-            .send(HubCommand::AudioControl { action, reply })
+            .send(HubCommand::AudioControl {
+                action,
+                safety_epoch,
+                reply,
+            })
             .await
             .map_err(|_| HubError::Stopped)?;
         response.await.map_err(|_| HubError::Stopped)?
@@ -569,15 +585,26 @@ impl HubHandle {
     }
 
     pub async fn connect_relay(&self) -> Result<(), HubError> {
-        self.request(HubCommand::Connect).await
+        let safety_epoch = self.safety_epoch.load(Ordering::Acquire);
+        self.request(|reply| HubCommand::Connect {
+            safety_epoch,
+            reply,
+        })
+        .await
     }
 
     pub async fn disconnect_relay(&self) -> Result<(), HubError> {
-        self.request(HubCommand::Disconnect).await
+        self.safety_epoch.fetch_add(1, Ordering::AcqRel);
+        self.safety_request(HubSafetyCommand::Disconnect).await
     }
 
     pub async fn refresh_pairing(&self) -> Result<(), HubError> {
-        self.request(HubCommand::RefreshPairing).await
+        let safety_epoch = self.safety_epoch.load(Ordering::Acquire);
+        self.request(|reply| HubCommand::RefreshPairing {
+            safety_epoch,
+            reply,
+        })
+        .await
     }
 
     pub async fn adjust_device_intensity(
@@ -587,11 +614,13 @@ impl HubHandle {
         delta: i32,
     ) -> Result<(), HubError> {
         let (reply, response) = oneshot::channel();
+        let safety_epoch = self.safety_epoch.load(Ordering::Acquire);
         self.commands
             .send(HubCommand::AdjustIntensity {
                 device_id,
                 channel,
                 delta,
+                safety_epoch,
                 reply,
             })
             .await
@@ -620,6 +649,7 @@ impl HubHandle {
             .send(HubSafetyCommand::StopOutput { device_id, reply })
             .await
             .map_err(|_| HubError::Stopped)?;
+        self.safety_wakeup.notify_waiters();
         response.await.map_err(|_| HubError::Stopped)?
     }
 
@@ -718,10 +748,20 @@ impl HubHandle {
         response.await.map_err(|_| HubError::Stopped)?
     }
 
-    pub async fn set_sync_all_devices(&self, enabled: bool) -> Result<(), HubError> {
+    pub async fn set_sync_all_devices(
+        &self,
+        device_id: String,
+        enabled: bool,
+    ) -> Result<(), HubError> {
         let (reply, response) = oneshot::channel();
+        let safety_epoch = self.safety_epoch.load(Ordering::Acquire);
         self.commands
-            .send(HubCommand::SetSyncAllDevices { enabled, reply })
+            .send(HubCommand::SetSyncAllDevices {
+                device_id,
+                enabled,
+                safety_epoch,
+                reply,
+            })
             .await
             .map_err(|_| HubError::Stopped)?;
         response.await.map_err(|_| HubError::Stopped)?
@@ -782,6 +822,7 @@ impl HubHandle {
             .send(make_command(reply))
             .await
             .map_err(|_| HubError::Stopped)?;
+        self.safety_wakeup.notify_waiters();
         response.await.map_err(|_| HubError::Stopped)?
     }
 }
@@ -881,6 +922,7 @@ pub struct HubRuntime {
     intensity_lock_targets: BTreeMap<DeviceKey, IntensityLockTarget>,
     operation_generation: u64,
     safety_epoch: Arc<AtomicU64>,
+    safety_wakeup: Arc<Notify>,
     connection_started_at: Option<Instant>,
     reconnect_at: Option<Instant>,
     reconnect_attempt: u32,
@@ -1038,6 +1080,7 @@ pub fn create_hub_with_source_preferences(
     let (safety_sender, safety_receiver) = mpsc::channel(HUB_SAFETY_COMMAND_CAPACITY);
     let shutdown = CancellationToken::new();
     let safety_epoch = Arc::new(AtomicU64::new(0));
+    let safety_wakeup = Arc::new(Notify::new());
     let (completion_sender, completion_receiver) = watch::channel(None);
     let touch_mailbox = Arc::new(Mutex::new(BTreeMap::new()));
     (
@@ -1049,6 +1092,7 @@ pub fn create_hub_with_source_preferences(
             shutdown: shutdown.clone(),
             completion: completion_receiver,
             safety_epoch: Arc::clone(&safety_epoch),
+            safety_wakeup: Arc::clone(&safety_wakeup),
         },
         HubRuntime {
             touch_mailbox,
@@ -1083,10 +1127,11 @@ pub fn create_hub_with_source_preferences(
             intensity_lock_targets: BTreeMap::new(),
             operation_generation: 0,
             safety_epoch,
+            safety_wakeup,
             connection_started_at: None,
             reconnect_at: None,
             reconnect_attempt: 0,
-            auto_reconnect_enabled: true,
+            auto_reconnect_enabled: false,
         },
     )
 }
@@ -1192,7 +1237,8 @@ impl HubRuntime {
         if !self.output_devices.contains(&binding.device) {
             return Ok(());
         }
-        self.relay
+        let clear = self
+            .relay
             .as_ref()
             .ok_or(HubError::Stopped)?
             .clear_wave_channel(
@@ -1201,12 +1247,54 @@ impl HubRuntime {
                 binding.channel,
                 clear_channel_request(&binding.device.slot_id, binding.channel),
                 self.operation_generation,
-            )
-            .await?;
+            );
+        self.wait_for_ordinary_relay(clear).await?;
         self.pending_wave_operations.retain(|_, pending| {
             pending.device != binding.device || pending.channel != binding.channel
         });
         Ok(())
+    }
+
+    fn wait_for_ordinary_relay<'a, T, E, F>(
+        &'a self,
+        operation: F,
+    ) -> impl std::future::Future<Output = Result<T, HubError>> + use<'a, T, E, F>
+    where
+        E: Into<HubError>,
+        F: std::future::Future<Output = Result<T, E>>,
+    {
+        let wakeup = self.safety_wakeup.clone();
+        let epoch = self.safety_epoch.clone();
+        let baseline = epoch.load(Ordering::Acquire);
+        let queue = &self.safety_commands;
+        let mut interrupted = Box::pin(wakeup.clone().notified_owned());
+        // Register before examining the queue so a concurrent safety send
+        // cannot be lost between the check and the first await.
+        interrupted.as_mut().enable();
+        let shutdown = self.shutdown.clone();
+        async move {
+            tokio::pin!(operation);
+            loop {
+                if !queue.is_empty()
+                    || epoch.load(Ordering::Acquire) != baseline
+                    || shutdown.is_cancelled()
+                {
+                    return Err(HubError::QueueBusy);
+                }
+                tokio::select! {
+                    biased;
+                    _ = &mut interrupted => {
+                        // A sender can notify after the actor has already taken
+                        // its command. Ignore that late notification unless a
+                        // newer epoch or another queued command requires stopping.
+                        interrupted = Box::pin(wakeup.clone().notified_owned());
+                        interrupted.as_mut().enable();
+                    },
+                    _ = shutdown.cancelled() => return Err(HubError::QueueBusy),
+                    result = &mut operation => return result.map_err(Into::into),
+                }
+            }
+        }
     }
 
     async fn clear_audio_output(&mut self) -> Result<(), HubError> {
@@ -1284,8 +1372,10 @@ impl HubRuntime {
             && !audio_active
             && let Err(error) = self.clear_audio_output().await
         {
-            self.fail_output(format!("清理过期音频波形失败：{error}"))
-                .await;
+            if !matches!(error, HubError::QueueBusy) {
+                self.fail_output(format!("清理过期音频波形失败：{error}"))
+                    .await;
+            }
             return;
         }
         self.audio_features_active = audio_active;
@@ -1365,7 +1455,9 @@ impl HubRuntime {
                 .is_some_and(|source| source == TOUCH_SOURCE_ID)
                 && let Err(error) = self.clear_input_channel(&binding).await
             {
-                self.fail_output(format!("清理触控通道失败：{error}")).await;
+                if !matches!(error, HubError::QueueBusy) {
+                    self.fail_output(format!("清理触控通道失败：{error}")).await;
+                }
                 return;
             }
         }
@@ -1380,7 +1472,6 @@ impl HubRuntime {
         let (event_sender, mut events) = mpsc::channel(RELAY_EVENT_CAPACITY);
         let (relay, mut relay_task) = spawn_relay_client(event_sender, RELAY_COMMAND_CAPACITY);
         self.relay = Some(relay);
-        self.begin_connect();
 
         let mut ticker = tokio::time::interval(WaveFrame::DURATION);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -1493,11 +1584,17 @@ impl HubRuntime {
         self.connection_started_at = None;
         self.snapshot.output.state = OutputState::Idle;
         let stop_result = self.send_stop_operations(false).await;
+        if matches!(stop_result, Err(HubError::QueueBusy)) {
+            return stop_result;
+        }
         let disconnect_result = if let Some(relay) = &self.relay {
-            tokio::time::timeout(RELAY_DISCONNECT_TIMEOUT, relay.disconnect())
-                .await
-                .map_err(|_| HubError::Relay("断开 Relay 超时".to_owned()))
-                .and_then(|result| result.map_err(Into::into))
+            self.wait_for_ordinary_relay(async {
+                tokio::time::timeout(RELAY_DISCONNECT_TIMEOUT, relay.disconnect())
+                    .await
+                    .map_err(|_| HubError::Relay("断开 Relay 超时".to_owned()))
+                    .and_then(|result| result.map_err(Into::into))
+            })
+            .await
         } else {
             Err(HubError::Stopped)
         };
@@ -1542,7 +1639,15 @@ impl HubRuntime {
             } => {
                 let _ = reply.send(self.set_audio_config(&device_id, channel, config).await);
             }
-            HubCommand::AudioControl { action, reply } => {
+            HubCommand::AudioControl {
+                action,
+                safety_epoch,
+                reply,
+            } => {
+                if safety_epoch != self.safety_epoch.load(Ordering::Acquire) {
+                    let _ = reply.send(Err(HubError::QueueBusy));
+                    return;
+                }
                 let clear_result = if matches!(
                     &action,
                     AudioAction::SaveRecording { .. } | AudioAction::SetPlaybackOptions { .. }
@@ -1552,6 +1657,9 @@ impl HubRuntime {
                     self.clear_audio_output().await
                 };
                 let result = clear_result.and_then(|()| {
+                    if safety_epoch != self.safety_epoch.load(Ordering::Acquire) {
+                        return Err(HubError::QueueBusy);
+                    }
                     self.audio_engine
                         .control(action)
                         .map_err(|error| HubError::InvalidSourceConfig(error.to_string()))
@@ -1560,7 +1668,14 @@ impl HubRuntime {
                 self.publish();
                 let _ = reply.send(result);
             }
-            HubCommand::Connect(reply) => {
+            HubCommand::Connect {
+                safety_epoch,
+                reply,
+            } => {
+                if safety_epoch != self.safety_epoch.load(Ordering::Acquire) {
+                    let _ = reply.send(Err(HubError::QueueBusy));
+                    return;
+                }
                 self.enable_auto_reconnect();
                 if !matches!(
                     self.snapshot.connection.state,
@@ -1572,13 +1687,20 @@ impl HubRuntime {
                 }
                 let _ = reply.send(Ok(()));
             }
-            HubCommand::Disconnect(reply) => {
-                let _ = reply.send(self.disconnect_all(false).await);
-            }
-            HubCommand::RefreshPairing(reply) => {
+            HubCommand::RefreshPairing {
+                safety_epoch,
+                reply,
+            } => {
+                if safety_epoch != self.safety_epoch.load(Ordering::Acquire) {
+                    let _ = reply.send(Err(HubError::QueueBusy));
+                    return;
+                }
                 self.enable_auto_reconnect();
                 self.snapshot.output.state = OutputState::Idle;
-                let result = self.send_stop_operations(false).await;
+                let mut result = self.send_stop_operations(false).await;
+                if result.is_ok() && safety_epoch != self.safety_epoch.load(Ordering::Acquire) {
+                    result = Err(HubError::QueueBusy);
+                }
                 if result.is_ok() {
                     self.begin_connect();
                 } else if let Err(error) = &result {
@@ -1594,9 +1716,14 @@ impl HubRuntime {
                 device_id,
                 channel,
                 delta,
+                safety_epoch,
                 reply,
             } => {
-                let result = self.adjust_device_intensity(device_id.as_deref(), channel, delta);
+                let result = if safety_epoch == self.safety_epoch.load(Ordering::Acquire) {
+                    self.adjust_device_intensity(device_id.as_deref(), channel, delta)
+                } else {
+                    Err(HubError::QueueBusy)
+                };
                 let _ = reply.send(result);
             }
             HubCommand::StartOutput {
@@ -1657,8 +1784,17 @@ impl HubRuntime {
                 let result = self.select_device(device_id).await;
                 let _ = reply.send(result);
             }
-            HubCommand::SetSyncAllDevices { enabled, reply } => {
-                let result = self.set_sync_all_devices(enabled);
+            HubCommand::SetSyncAllDevices {
+                device_id,
+                enabled,
+                safety_epoch,
+                reply,
+            } => {
+                let result = if safety_epoch == self.safety_epoch.load(Ordering::Acquire) {
+                    self.set_sync_all_devices_from(Some(device_id), enabled)
+                } else {
+                    Err(HubError::QueueBusy)
+                };
                 let _ = reply.send(result);
             }
             HubCommand::UpdateSafety {
@@ -1681,6 +1817,9 @@ impl HubRuntime {
 
     async fn handle_safety_command(&mut self, command: HubSafetyCommand) {
         match command {
+            HubSafetyCommand::Disconnect(reply) => {
+                let _ = reply.send(self.disconnect_all(false).await);
+            }
             HubSafetyCommand::StopOutput { device_id, reply } => {
                 let result = self.stop_device_output(&device_id).await;
                 let _ = reply.send(result);
@@ -2915,42 +3054,7 @@ impl HubRuntime {
         waveforms: Vec<WaveformConfig>,
         selected: Option<WaveformConfig>,
     ) -> Result<(), HubError> {
-        if waveforms.len() > MAX_CUSTOM_WAVEFORMS {
-            return Err(HubError::CustomWaveformLimit);
-        }
-        if waveforms
-            .iter()
-            .map(|waveform| waveform.frames.len())
-            .sum::<usize>()
-            > MAX_CUSTOM_WAVEFORM_FRAMES
-        {
-            return Err(HubError::CustomWaveformFrameLimit);
-        }
-        let mut seen_ids = BTreeSet::new();
-        if waveforms
-            .iter()
-            .any(|waveform| !seen_ids.insert(waveform.preset_id.as_str()))
-        {
-            return Err(HubError::InvalidSourceConfig(
-                "自定义波形标识不能重复".to_owned(),
-            ));
-        }
-
-        let registry = builtin_registry();
-        for waveform in &waveforms {
-            let value = serde_json::to_value(waveform)
-                .map_err(|error| HubError::InvalidSourceConfig(error.to_string()))?;
-            registry
-                .validate("builtin.fixed_waveform", &value)
-                .map_err(|error| HubError::InvalidSourceConfig(error.to_string()))?;
-        }
-        if let Some(selected) = &selected {
-            let value = serde_json::to_value(selected)
-                .map_err(|error| HubError::InvalidSourceConfig(error.to_string()))?;
-            registry
-                .validate("builtin.fixed_waveform", &value)
-                .map_err(|error| HubError::InvalidSourceConfig(error.to_string()))?;
-        }
+        validate_waveform_library(&waveforms, selected.as_ref())?;
         let next_ids = waveforms
             .iter()
             .map(|waveform| waveform.preset_id.as_str())
@@ -2994,7 +3098,16 @@ impl HubRuntime {
         Ok(())
     }
 
+    #[cfg(test)]
     fn set_sync_all_devices(&mut self, enabled: bool) -> Result<(), HubError> {
+        self.set_sync_all_devices_from(None, enabled)
+    }
+
+    fn set_sync_all_devices_from(
+        &mut self,
+        device_id: Option<String>,
+        enabled: bool,
+    ) -> Result<(), HubError> {
         if enabled && self.devices.is_empty() {
             return Err(HubError::NoDevice);
         }
@@ -3005,7 +3118,15 @@ impl HubRuntime {
             return Ok(());
         }
         if enabled {
-            let selected = self.selected_device.clone().ok_or(HubError::NoDevice)?;
+            let selected = match device_id {
+                Some(id) => self
+                    .devices
+                    .keys()
+                    .find(|key| key.control_id() == id)
+                    .cloned()
+                    .ok_or(HubError::DeviceUnavailable)?,
+                None => self.selected_device.clone().ok_or(HubError::NoDevice)?,
+            };
             let (target_a, _) = self
                 .device_channel_control_state(&selected, Channel::A)
                 .ok_or(HubError::DeviceUnavailable)?;
@@ -3030,7 +3151,7 @@ impl HubRuntime {
         self.log(
             LogLevel::Info,
             if enabled {
-                "已开启所有设备强度同步控制，并向当前控制设备的 A/B 强度对齐"
+                "已开启所有设备强度同步控制，并向指定基准设备的 A/B 强度对齐"
             } else {
                 "已关闭所有设备强度同步控制"
             },
@@ -3305,7 +3426,7 @@ impl HubRuntime {
             runtime.reset();
         }
         if emergency {
-            let _ = self.audio_engine.control(AudioAction::Stop);
+            self.audio_engine.emergency_stop();
         }
         let generation = self.advance_operation_generation();
         let devices = if emergency {
@@ -3320,11 +3441,17 @@ impl HubRuntime {
         let mut first_error = None;
         for device in devices {
             let requests = stop_operation_requests(&device.slot_id, emergency);
-            if let Err(error) = relay
-                .safety_stop(device.client_id, requests, generation)
-                .await
-            {
-                first_error.get_or_insert_with(|| HubError::from(error));
+            let operation = relay.safety_stop(device.client_id, requests, generation);
+            let result = if emergency {
+                operation.await.map_err(HubError::from)
+            } else {
+                self.wait_for_ordinary_relay(operation).await
+            };
+            if let Err(error) = result {
+                if matches!(error, HubError::QueueBusy) {
+                    return Err(error);
+                }
+                first_error.get_or_insert(error);
             }
         }
         if let Some(error) = first_error {
@@ -3464,7 +3591,7 @@ impl HubRuntime {
             .unwrap_or_else(|error| error.into_inner())
             .clear();
         self.audio_bindings.clear();
-        let _ = self.audio_engine.control(AudioAction::Stop);
+        self.audio_engine.emergency_stop();
         self.initialized_source_devices.clear();
         self.source_sync_devices.clear();
         self.selected_device = None;
@@ -3783,6 +3910,48 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
     (year, month, day)
 }
 
+pub(crate) fn validate_waveform_library(
+    waveforms: &[WaveformConfig],
+    selected: Option<&WaveformConfig>,
+) -> Result<(), HubError> {
+    if waveforms.len() > MAX_CUSTOM_WAVEFORMS {
+        return Err(HubError::CustomWaveformLimit);
+    }
+    if waveforms
+        .iter()
+        .map(|waveform| waveform.frames.len())
+        .sum::<usize>()
+        > MAX_CUSTOM_WAVEFORM_FRAMES
+    {
+        return Err(HubError::CustomWaveformFrameLimit);
+    }
+    let mut seen_ids = BTreeSet::new();
+    if waveforms
+        .iter()
+        .any(|waveform| !seen_ids.insert(waveform.preset_id.as_str()))
+    {
+        return Err(HubError::InvalidSourceConfig(
+            "自定义波形标识不能重复".to_owned(),
+        ));
+    }
+
+    let registry = builtin_registry();
+    for waveform in waveforms {
+        let value = serde_json::to_value(waveform)
+            .map_err(|error| HubError::InvalidSourceConfig(error.to_string()))?;
+        registry
+            .validate("builtin.fixed_waveform", &value)
+            .map_err(|error| HubError::InvalidSourceConfig(error.to_string()))?;
+    }
+    if let Some(selected) = selected {
+        let value = serde_json::to_value(selected)
+            .map_err(|error| HubError::InvalidSourceConfig(error.to_string()))?;
+        registry
+            .validate("builtin.fixed_waveform", &value)
+            .map_err(|error| HubError::InvalidSourceConfig(error.to_string()))?;
+    }
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5081,6 +5250,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn synchronization_uses_explicit_baseline_without_changing_gui_focus() {
+        let (_hub, mut runtime) = create_hub("wss://example.test/v4".to_owned());
+        install_test_device(&mut runtime, "app-1", "slot-a", 10);
+        install_test_device(&mut runtime, "app-2", "slot-b", 30);
+        let (events, _receiver) = mpsc::channel(8);
+        let (relay, relay_task) = spawn_relay_client(events, 8);
+        runtime.relay = Some(relay.clone());
+        let original_focus = runtime.selected_device.clone();
+        let baseline = DeviceKey {
+            client_id: "app-2".to_owned(),
+            slot_id: "slot-b".to_owned(),
+        }
+        .control_id();
+        runtime
+            .set_sync_all_devices_from(Some(baseline), true)
+            .unwrap();
+        assert_eq!(runtime.selected_device, original_focus);
+        let first = IntensityKey {
+            device: DeviceKey {
+                client_id: "app-1".to_owned(),
+                slot_id: "slot-a".to_owned(),
+            },
+            channel: Channel::A,
+        };
+        assert_eq!(
+            runtime
+                .pending_intensity_operations
+                .get(&first)
+                .map(|pending| pending.projected),
+            Some(30)
+        );
+        relay.shutdown_now();
+        relay_task.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn synchronized_mode_aligns_a_newly_connected_device() {
         let (_hub, mut runtime) = create_hub("wss://example.test/v4".to_owned());
         install_test_device(&mut runtime, "app-1", "slot-a", 10);
@@ -5338,6 +5543,147 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn late_notification_from_an_already_taken_safety_command_does_not_cancel_its_ack() {
+        let (hub, mut runtime) = create_hub("wss://example.test/v4".to_owned());
+        hub.safety_epoch.fetch_add(1, Ordering::AcqRel);
+        let (reply, _response) = oneshot::channel();
+        hub.safety_commands
+            .try_send(HubSafetyCommand::Disconnect(reply))
+            .unwrap();
+        let _already_taken = runtime.safety_commands.recv().await.unwrap();
+        let (ack, received) = oneshot::channel();
+        let waiting = runtime
+            .wait_for_ordinary_relay(async { received.await.map_err(|_| HubError::Stopped) });
+        hub.safety_wakeup.notify_waiters();
+        ack.send(()).unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(200), waiting)
+                .await
+                .unwrap(),
+            Ok(())
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_ordinary_relay_ack_is_interrupted_by_stop_and_shutdown() {
+        let (hub, mut runtime) = create_hub("wss://example.test/v4".to_owned());
+        let stop = tokio::spawn(async move { hub.emergency_stop().await });
+        let result = tokio::time::timeout(
+            Duration::from_millis(200),
+            runtime.wait_for_ordinary_relay(std::future::pending::<Result<(), HubError>>()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, Err(HubError::QueueBusy));
+        let command = runtime.safety_commands.recv().await.unwrap();
+        runtime.handle_safety_command(command).await;
+        stop.await.unwrap().unwrap();
+        assert_eq!(runtime.snapshot.output.state, OutputState::Stopped);
+
+        let (hub, runtime) = create_hub("wss://example.test/v4".to_owned());
+        hub.shutdown_now();
+        assert_eq!(
+            runtime
+                .wait_for_ordinary_relay(std::future::pending::<Result<(), HubError>>())
+                .await,
+            Err(HubError::QueueBusy)
+        );
+    }
+
+    #[tokio::test]
+    async fn cold_start_waits_for_an_explicit_relay_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("ws://{}/v4", listener.local_addr().unwrap());
+        let (hub, runtime) = create_hub(endpoint);
+        assert!(!runtime.auto_reconnect_enabled);
+        let runtime_task = tokio::spawn(runtime.run());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), listener.accept())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            hub.snapshot().connection.state,
+            ConnectionState::Disconnected
+        );
+        assert_eq!(hub.snapshot().output_device_count, 0);
+        let relay = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            socket
+                .send(Message::Text(
+                    json!({"type":"hello", "clientId":"explicit-controller"})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            while let Some(Ok(message)) = socket.next().await {
+                if matches!(message, Message::Close(_)) {
+                    break;
+                }
+            }
+        });
+        hub.connect_relay().await.unwrap();
+        wait_for_snapshot(&hub, |snapshot| {
+            snapshot.connection.controller_id.as_deref() == Some("explicit-controller")
+        })
+        .await;
+        hub.shutdown_gracefully().await.unwrap();
+        runtime_task.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), relay)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_invalidates_queued_audio_intensity_sync_and_reconnection_commands() {
+        let (hub, mut runtime) = create_hub("wss://example.test/v4".to_owned());
+        type CommandFactory = fn(oneshot::Sender<Result<(), HubError>>) -> HubCommand;
+        let commands: [CommandFactory; 5] = [
+            |reply| HubCommand::AudioControl {
+                action: AudioAction::StartRecording,
+                safety_epoch: 0,
+                reply,
+            },
+            |reply| HubCommand::AdjustIntensity {
+                device_id: Some("missing".to_owned()),
+                channel: Channel::A,
+                delta: 10,
+                safety_epoch: 0,
+                reply,
+            },
+            |reply| HubCommand::SetSyncAllDevices {
+                device_id: "missing".to_owned(),
+                enabled: true,
+                safety_epoch: 0,
+                reply,
+            },
+            |reply| HubCommand::Connect {
+                safety_epoch: 0,
+                reply,
+            },
+            |reply| HubCommand::RefreshPairing {
+                safety_epoch: 0,
+                reply,
+            },
+        ];
+        hub.safety_epoch.fetch_add(1, Ordering::AcqRel);
+        for make_command in commands {
+            let (reply, response) = oneshot::channel();
+            runtime.handle_command(make_command(reply)).await;
+            assert_eq!(response.await.unwrap(), Err(HubError::QueueBusy));
+        }
+        assert!(!runtime.auto_reconnect_enabled);
+        assert_eq!(
+            runtime.snapshot.connection.state,
+            ConnectionState::Disconnected
+        );
+        assert!(!runtime.snapshot.sync_all_devices);
+    }
+
+    #[tokio::test]
     async fn graceful_shutdown_has_a_completion_signal() {
         let (hub, runtime) = create_hub("not-a-websocket-url".to_owned());
         let runtime_task = tokio::spawn(runtime.run());
@@ -5355,6 +5701,7 @@ mod tests {
     #[tokio::test]
     async fn retryable_disconnect_reconnects_but_user_disconnect_does_not() {
         let (_hub, mut runtime) = create_hub("wss://example.test/v4".to_owned());
+        runtime.enable_auto_reconnect();
 
         runtime
             .handle_relay_event(RelayEvent::Disconnected {
@@ -5576,6 +5923,7 @@ mod tests {
         let (hub, runtime) =
             create_hub_with_default_source(endpoint, Some("source-fixed-waveform".to_owned()));
         let runtime_task = tokio::spawn(runtime.run());
+        hub.connect_relay().await.unwrap();
         wait_for_snapshot(&hub, |snapshot| snapshot.devices.len() == 2).await;
         assert_eq!(hub.snapshot().connection.state, ConnectionState::Connected);
         let first_device = hub

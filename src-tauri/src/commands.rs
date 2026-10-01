@@ -1,69 +1,199 @@
-use serde::Serialize;
+use serde::{Serialize, de::DeserializeOwned};
 use tauri::{AppHandle, State};
 use tauri_plugin_autostart::ManagerExt;
 
-use crate::hub::{HubError, HubHandle, HubSnapshot};
-use crate::model::Channel;
-use crate::preferences::{AppPreferencesSnapshot, PreferencesError, PreferencesState};
-use crate::sources::WaveformConfig;
-use crate::sources::audio::{
+use dg_lab_link_core::hub::HubSnapshot;
+use dg_lab_link_core::model::Channel;
+use dg_lab_link_core::preferences::AppPreferencesSnapshot;
+use dg_lab_link_core::sources::WaveformConfig;
+use dg_lab_link_core::sources::audio::{
     AUDIO_FILE_EXTENSIONS, AudioAction, AudioChannelConfig, VIDEO_FILE_EXTENSIONS,
 };
-use crate::sources::touch::{TouchConfig, TouchInput};
+use dg_lab_link_core::sources::touch::{TouchConfig, TouchInput};
+use dg_lab_link_core::waveforms::WaveformFile;
+use dg_lab_link_core::{ControlCommand, ControlError};
+use dg_lab_link_runtime::{Client, LocalConfig, RuntimeInfo};
+
+use crate::{DesktopPreferences, RuntimeConfigDir};
+
+pub type CommandError = ControlError;
+
+async fn call<T: DeserializeOwned>(
+    client: &Client,
+    command: ControlCommand,
+) -> Result<T, CommandError> {
+    serde_json::from_value(client.call(command).await?)
+        .map_err(|error| ControlError::new("invalid_response", error.to_string()))
+}
+
+async fn app_preferences(
+    app: &AppHandle,
+    client: &Client,
+    cache: &DesktopPreferences,
+    command: ControlCommand,
+) -> Result<AppPreferencesSnapshot, CommandError> {
+    if !matches!(command, ControlCommand::GetAppPreferences) {
+        call::<()>(client, command).await?;
+    }
+    let mut preferences: AppPreferencesSnapshot =
+        call(client, ControlCommand::GetAppPreferences).await?;
+    cache.update(preferences);
+    preferences.auto_start = app.autolaunch().is_enabled().map_err(autostart_error)?;
+    Ok(preferences)
+}
+
+fn autostart_error(error: tauri_plugin_autostart::Error) -> CommandError {
+    ControlError::new("autostart_error", format!("无法更新开机自启设置：{error}"))
+}
+
+fn selected_device(client: &Client, device_id: Option<String>) -> Result<String, CommandError> {
+    device_id
+        .or_else(|| client.snapshot().selected_device_id)
+        .ok_or_else(|| ControlError::new("not_connected", "设备尚未连接"))
+}
 
 #[tauri::command]
-pub fn update_touch_input(
-    hub: State<'_, HubHandle>,
+pub async fn get_app_preferences(
+    app: AppHandle,
+    client: State<'_, Client>,
+    cache: State<'_, DesktopPreferences>,
+) -> Result<AppPreferencesSnapshot, CommandError> {
+    app_preferences(&app, &client, &cache, ControlCommand::GetAppPreferences).await
+}
+
+#[tauri::command]
+pub async fn set_close_to_tray(
+    app: AppHandle,
+    client: State<'_, Client>,
+    cache: State<'_, DesktopPreferences>,
+    enabled: bool,
+) -> Result<AppPreferencesSnapshot, CommandError> {
+    app_preferences(
+        &app,
+        &client,
+        &cache,
+        ControlCommand::SetCloseToTray { enabled },
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn set_start_minimized(
+    app: AppHandle,
+    client: State<'_, Client>,
+    cache: State<'_, DesktopPreferences>,
+    enabled: bool,
+) -> Result<AppPreferencesSnapshot, CommandError> {
+    app_preferences(
+        &app,
+        &client,
+        &cache,
+        ControlCommand::SetStartMinimized { enabled },
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn set_auto_start(
+    app: AppHandle,
+    client: State<'_, Client>,
+    cache: State<'_, DesktopPreferences>,
+    enabled: bool,
+) -> Result<AppPreferencesSnapshot, CommandError> {
+    if enabled {
+        app.autolaunch().enable().map_err(autostart_error)?;
+    } else {
+        app.autolaunch().disable().map_err(autostart_error)?;
+    }
+    app_preferences(&app, &client, &cache, ControlCommand::GetAppPreferences).await
+}
+
+#[tauri::command]
+pub async fn get_hub_snapshot(client: State<'_, Client>) -> Result<HubSnapshot, CommandError> {
+    call(&client, ControlCommand::GetHubSnapshot).await
+}
+
+#[tauri::command]
+pub async fn get_runtime_info(client: State<'_, Client>) -> Result<RuntimeInfo, CommandError> {
+    client.runtime_info().await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpConfig {
+    url: String,
+    token: String,
+}
+
+#[tauri::command]
+pub async fn get_mcp_config(
+    client: State<'_, Client>,
+    config_dir: State<'_, RuntimeConfigDir>,
+) -> Result<McpConfig, CommandError> {
+    let info = client.runtime_info().await?;
+    let config = LocalConfig::load(&config_dir.0)?;
+    Ok(McpConfig {
+        url: info.mcp_url,
+        token: config.token,
+    })
+}
+
+#[tauri::command]
+pub async fn update_touch_input(
+    client: State<'_, Client>,
     input: TouchInput,
 ) -> Result<(), CommandError> {
-    hub.update_touch_input(input).map_err(Into::into)
+    call(&client, ControlCommand::UpdateTouchInput { input }).await
 }
 
 #[tauri::command]
 pub async fn set_touch_config(
-    hub: State<'_, HubHandle>,
-    preferences: State<'_, PreferencesState>,
+    client: State<'_, Client>,
     config: TouchConfig,
 ) -> Result<(), CommandError> {
-    let previous = hub.snapshot().input_modes.touch_config;
-    hub.set_touch_config(config.clone()).await?;
-    if let Err(error) = preferences.set_touch_config(config) {
-        let _ = hub.set_touch_config(previous).await;
-        return Err(error.into());
-    }
-    Ok(())
+    call(&client, ControlCommand::SetTouchConfig { config }).await
 }
 
 #[tauri::command]
 pub async fn set_audio_config(
-    hub: State<'_, HubHandle>,
+    client: State<'_, Client>,
     device_id: String,
     channel: Channel,
     config: AudioChannelConfig,
 ) -> Result<(), CommandError> {
-    hub.set_audio_config(device_id, channel, config)
-        .await
-        .map_err(Into::into)
+    call(
+        &client,
+        ControlCommand::SetAudioConfig {
+            device_id,
+            channel,
+            config,
+        },
+    )
+    .await
 }
 
 #[tauri::command]
 pub async fn audio_control(
-    hub: State<'_, HubHandle>,
+    client: State<'_, Client>,
     action: AudioAction,
 ) -> Result<(), CommandError> {
-    hub.audio_control(action).await.map_err(Into::into)
+    call(&client, ControlCommand::AudioControl { action }).await
 }
 
 #[tauri::command]
-pub fn get_custom_waveform(
-    preferences: State<'_, PreferencesState>,
+pub async fn get_custom_waveform(
+    client: State<'_, Client>,
     preset_id: String,
 ) -> Result<WaveformConfig, CommandError> {
-    preferences
-        .custom_waveforms()
-        .into_iter()
-        .find(|config| config.preset_id == preset_id)
-        .ok_or_else(|| HubError::InvalidSourceConfig("自定义波形不存在".to_owned()).into())
+    call(&client, ControlCommand::GetCustomWaveform { preset_id }).await
+}
+
+#[tauri::command]
+pub async fn parse_waveform_files(
+    client: State<'_, Client>,
+    files: Vec<WaveformFile>,
+) -> Result<Vec<WaveformConfig>, CommandError> {
+    call(&client, ControlCommand::ParseWaveformFiles { files }).await
 }
 
 #[tauri::command]
@@ -85,10 +215,7 @@ pub async fn choose_audio_file() -> Result<Option<String>, CommandError> {
             .map(|path| path.to_string_lossy().into_owned())
     })
     .await
-    .map_err(|error| CommandError {
-        code: "dialog_error",
-        message: error.to_string(),
-    })
+    .map_err(|error| ControlError::new("dialog_error", error.to_string()))
 }
 
 #[tauri::command]
@@ -102,389 +229,205 @@ pub async fn choose_recording_destination() -> Result<Option<String>, CommandErr
             .map(|path| path.to_string_lossy().into_owned())
     })
     .await
-    .map_err(|error| CommandError {
-        code: "dialog_error",
-        message: error.to_string(),
-    })
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CommandError {
-    pub code: &'static str,
-    pub message: String,
-}
-
-impl From<HubError> for CommandError {
-    fn from(error: HubError) -> Self {
-        Self {
-            code: error.code(),
-            message: error.to_string(),
-        }
-    }
-}
-
-impl From<PreferencesError> for CommandError {
-    fn from(error: PreferencesError) -> Self {
-        Self {
-            code: "preferences_error",
-            message: error.to_string(),
-        }
-    }
-}
-
-impl From<tauri_plugin_autostart::Error> for CommandError {
-    fn from(error: tauri_plugin_autostart::Error) -> Self {
-        Self {
-            code: "autostart_error",
-            message: format!("无法更新开机自启设置：{error}"),
-        }
-    }
-}
-
-fn app_preferences(
-    app: &AppHandle,
-    preferences: &PreferencesState,
-) -> Result<AppPreferencesSnapshot, CommandError> {
-    let auto_start = app.autolaunch().is_enabled()?;
-    Ok(preferences.snapshot(auto_start))
+    .map_err(|error| ControlError::new("dialog_error", error.to_string()))
 }
 
 #[tauri::command]
-pub fn get_app_preferences(
-    app: AppHandle,
-    preferences: State<'_, PreferencesState>,
-) -> Result<AppPreferencesSnapshot, CommandError> {
-    app_preferences(&app, &preferences)
+pub async fn connect_relay(client: State<'_, Client>) -> Result<(), CommandError> {
+    call(&client, ControlCommand::ConnectRelay).await
 }
 
 #[tauri::command]
-pub fn set_close_to_tray(
-    app: AppHandle,
-    preferences: State<'_, PreferencesState>,
-    enabled: bool,
-) -> Result<AppPreferencesSnapshot, CommandError> {
-    preferences.set_close_to_tray(enabled)?;
-    app_preferences(&app, &preferences)
+pub async fn disconnect_relay(client: State<'_, Client>) -> Result<(), CommandError> {
+    call(&client, ControlCommand::DisconnectRelay).await
 }
 
 #[tauri::command]
-pub fn set_auto_start(
-    app: AppHandle,
-    preferences: State<'_, PreferencesState>,
-    enabled: bool,
-) -> Result<AppPreferencesSnapshot, CommandError> {
-    if enabled {
-        app.autolaunch().enable()?;
-    } else {
-        app.autolaunch().disable()?;
-    }
-    app_preferences(&app, &preferences)
-}
-
-#[tauri::command]
-pub fn set_start_minimized(
-    app: AppHandle,
-    preferences: State<'_, PreferencesState>,
-    enabled: bool,
-) -> Result<AppPreferencesSnapshot, CommandError> {
-    preferences.set_start_minimized(enabled)?;
-    app_preferences(&app, &preferences)
-}
-
-#[tauri::command]
-pub fn get_hub_snapshot(hub: State<'_, HubHandle>) -> HubSnapshot {
-    hub.snapshot()
-}
-
-#[tauri::command]
-pub async fn connect_relay(hub: State<'_, HubHandle>) -> Result<(), CommandError> {
-    hub.connect_relay().await.map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn disconnect_relay(hub: State<'_, HubHandle>) -> Result<(), CommandError> {
-    hub.disconnect_relay().await.map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn refresh_pairing(hub: State<'_, HubHandle>) -> Result<(), CommandError> {
-    hub.refresh_pairing().await.map_err(Into::into)
+pub async fn refresh_pairing(client: State<'_, Client>) -> Result<(), CommandError> {
+    call(&client, ControlCommand::RefreshPairing).await
 }
 
 #[tauri::command]
 pub async fn adjust_intensity(
-    hub: State<'_, HubHandle>,
+    client: State<'_, Client>,
     device_id: Option<String>,
     channel: Channel,
     delta: i32,
 ) -> Result<(), CommandError> {
-    hub.adjust_device_intensity(device_id, channel, delta)
-        .await
-        .map_err(Into::into)
+    let device_id = selected_device(&client, device_id)?;
+    call(
+        &client,
+        ControlCommand::AdjustIntensity {
+            device_id,
+            channel,
+            delta,
+        },
+    )
+    .await
 }
 
 #[tauri::command]
 pub async fn start_output(
-    hub: State<'_, HubHandle>,
+    client: State<'_, Client>,
     device_id: String,
 ) -> Result<(), CommandError> {
-    hub.start_output(device_id).await.map_err(Into::into)
+    call(&client, ControlCommand::StartOutput { device_id }).await
 }
 
 #[tauri::command]
-pub async fn stop_output(hub: State<'_, HubHandle>, device_id: String) -> Result<(), CommandError> {
-    hub.stop_output(device_id).await.map_err(Into::into)
+pub async fn stop_output(client: State<'_, Client>, device_id: String) -> Result<(), CommandError> {
+    call(&client, ControlCommand::StopOutput { device_id }).await
 }
 
 #[tauri::command]
-pub async fn emergency_stop(hub: State<'_, HubHandle>) -> Result<(), CommandError> {
-    hub.emergency_stop().await.map_err(Into::into)
+pub async fn emergency_stop(client: State<'_, Client>) -> Result<(), CommandError> {
+    call(&client, ControlCommand::EmergencyStop).await
 }
 
 #[tauri::command]
 pub async fn set_device_channel_source(
-    hub: State<'_, HubHandle>,
+    client: State<'_, Client>,
     device_id: String,
     channel: Channel,
     source_id: String,
 ) -> Result<(), CommandError> {
-    hub.set_device_channel_source(device_id, channel, source_id)
-        .await
-        .map_err(Into::into)
+    call(
+        &client,
+        ControlCommand::SetDeviceChannelSource {
+            device_id,
+            channel,
+            source_id,
+        },
+    )
+    .await
 }
 
 #[tauri::command]
 pub async fn set_device_channel_source_sync(
-    hub: State<'_, HubHandle>,
+    client: State<'_, Client>,
     device_id: String,
     enabled: bool,
 ) -> Result<(), CommandError> {
-    hub.set_device_channel_source_sync(device_id, enabled)
-        .await
-        .map_err(Into::into)
+    call(
+        &client,
+        ControlCommand::SetDeviceChannelSourceSync { device_id, enabled },
+    )
+    .await
 }
 
 #[tauri::command]
 pub async fn set_default_source(
-    hub: State<'_, HubHandle>,
-    preferences: State<'_, PreferencesState>,
+    client: State<'_, Client>,
     source_id: Option<String>,
 ) -> Result<(), CommandError> {
-    let previous_source_id = hub.snapshot().default_source_id;
-    hub.set_default_source(source_id.clone()).await?;
-    if let Err(error) = preferences.set_default_source_id(source_id) {
-        let _ = hub.set_default_source(previous_source_id).await;
-        return Err(error.into());
-    }
-    Ok(())
+    call(&client, ControlCommand::SetDefaultSource { source_id }).await
 }
 
 #[tauri::command]
 pub async fn set_fixed_waveform(
-    hub: State<'_, HubHandle>,
+    client: State<'_, Client>,
     device_id: String,
     channel: Channel,
     config: WaveformConfig,
 ) -> Result<(), CommandError> {
-    hub.set_fixed_waveform(device_id, channel, Some(config))
-        .await
-        .map_err(Into::into)
+    call(
+        &client,
+        ControlCommand::SetFixedWaveform {
+            device_id,
+            channel,
+            config,
+        },
+    )
+    .await
 }
 
 #[tauri::command]
 pub async fn import_custom_waveforms(
-    hub: State<'_, HubHandle>,
-    preferences: State<'_, PreferencesState>,
+    client: State<'_, Client>,
     configs: Vec<WaveformConfig>,
 ) -> Result<(), CommandError> {
-    if configs.is_empty() {
-        return Ok(());
-    }
-    let previous_waveforms = preferences.custom_waveforms();
-    let previous_selected = preferences.fixed_waveform();
-    let mut next_waveforms = previous_waveforms.clone();
-    next_waveforms.extend(configs);
-    apply_waveform_state(
-        &hub,
-        &preferences,
-        previous_selected.clone(),
-        previous_waveforms,
-        previous_selected,
-        next_waveforms,
-    )
-    .await
+    call(&client, ControlCommand::ImportCustomWaveforms { configs }).await
 }
 
 #[tauri::command]
 pub async fn select_custom_waveform(
-    hub: State<'_, HubHandle>,
-    preferences: State<'_, PreferencesState>,
+    client: State<'_, Client>,
     device_id: String,
     channel: Channel,
     preset_id: String,
 ) -> Result<(), CommandError> {
-    let waveforms = preferences.custom_waveforms();
-    let selected = waveforms
-        .iter()
-        .find(|waveform| waveform.preset_id == preset_id)
-        .cloned()
-        .ok_or_else(|| {
-            CommandError::from(HubError::InvalidSourceConfig(
-                "选择的自定义波形不存在".to_owned(),
-            ))
-        })?;
-    hub.set_fixed_waveform(device_id, channel, Some(selected))
-        .await
-        .map_err(Into::into)
+    call(
+        &client,
+        ControlCommand::SelectCustomWaveform {
+            device_id,
+            channel,
+            preset_id,
+        },
+    )
+    .await
 }
 
 #[tauri::command]
 pub async fn delete_custom_waveform(
-    hub: State<'_, HubHandle>,
-    preferences: State<'_, PreferencesState>,
+    client: State<'_, Client>,
     preset_id: String,
 ) -> Result<(), CommandError> {
-    let previous_waveforms = preferences.custom_waveforms();
-    let previous_selected = preferences.fixed_waveform();
-    let removed_index = previous_waveforms
-        .iter()
-        .position(|waveform| waveform.preset_id == preset_id)
-        .ok_or_else(|| {
-            CommandError::from(HubError::InvalidSourceConfig(
-                "要删除的自定义波形不存在".to_owned(),
-            ))
-        })?;
-    let mut next_waveforms = previous_waveforms.clone();
-    next_waveforms.remove(removed_index);
-    let next_selected = if previous_selected
-        .as_ref()
-        .map(|item| item.preset_id.as_str())
-        == Some(preset_id.as_str())
-    {
-        None
-    } else {
-        previous_selected.clone()
-    };
-    apply_waveform_state(
-        &hub,
-        &preferences,
-        previous_selected,
-        previous_waveforms,
-        next_selected,
-        next_waveforms,
-    )
-    .await
+    call(&client, ControlCommand::DeleteCustomWaveform { preset_id }).await
 }
 
 #[tauri::command]
 pub async fn reorder_custom_waveforms(
-    hub: State<'_, HubHandle>,
-    preferences: State<'_, PreferencesState>,
+    client: State<'_, Client>,
     preset_ids: Vec<String>,
 ) -> Result<(), CommandError> {
-    let previous_waveforms = preferences.custom_waveforms();
-    let selected = preferences.fixed_waveform();
-    if preset_ids.len() != previous_waveforms.len() {
-        return Err(
-            HubError::InvalidSourceConfig("排序结果必须包含全部自定义波形".to_owned()).into(),
-        );
-    }
-    let mut remaining = previous_waveforms
-        .iter()
-        .cloned()
-        .map(|waveform| (waveform.preset_id.clone(), waveform))
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let mut next_waveforms = Vec::with_capacity(preset_ids.len());
-    for preset_id in preset_ids {
-        let waveform = remaining.remove(&preset_id).ok_or_else(|| {
-            CommandError::from(HubError::InvalidSourceConfig(
-                "排序结果包含未知或重复的自定义波形".to_owned(),
-            ))
-        })?;
-        next_waveforms.push(waveform);
-    }
-    if !remaining.is_empty() {
-        return Err(
-            HubError::InvalidSourceConfig("排序结果必须包含全部自定义波形".to_owned()).into(),
-        );
-    }
-    apply_waveform_state(
-        &hub,
-        &preferences,
-        selected.clone(),
-        previous_waveforms,
-        selected,
-        next_waveforms,
+    call(
+        &client,
+        ControlCommand::ReorderCustomWaveforms { preset_ids },
     )
     .await
 }
 
-async fn apply_waveform_state(
-    hub: &HubHandle,
-    preferences: &PreferencesState,
-    previous_selected: Option<WaveformConfig>,
-    previous_waveforms: Vec<WaveformConfig>,
-    next_selected: Option<WaveformConfig>,
-    next_waveforms: Vec<WaveformConfig>,
-) -> Result<(), CommandError> {
-    preferences.set_waveform_state(next_selected.clone(), next_waveforms.clone())?;
-    if let Err(error) = hub.set_waveform_state(next_waveforms, next_selected).await {
-        let _ = preferences.set_waveform_state(previous_selected, previous_waveforms);
-        return Err(error.into());
-    }
-    Ok(())
-}
-
 #[tauri::command]
 pub async fn select_device(
-    hub: State<'_, HubHandle>,
+    client: State<'_, Client>,
     device_id: String,
 ) -> Result<(), CommandError> {
-    hub.select_device(device_id).await.map_err(Into::into)
+    call(&client, ControlCommand::SelectDevice { device_id }).await
 }
 
 #[tauri::command]
 pub async fn set_sync_all_devices(
-    hub: State<'_, HubHandle>,
+    client: State<'_, Client>,
     enabled: bool,
 ) -> Result<(), CommandError> {
-    hub.set_sync_all_devices(enabled).await.map_err(Into::into)
+    let device_id = if enabled {
+        selected_device(&client, None)?
+    } else {
+        client.snapshot().selected_device_id.unwrap_or_default()
+    };
+    call(
+        &client,
+        ControlCommand::SetSyncAllDevices { device_id, enabled },
+    )
+    .await
 }
 
 #[tauri::command]
 pub async fn update_safety(
-    hub: State<'_, HubHandle>,
-    preferences: State<'_, PreferencesState>,
+    client: State<'_, Client>,
     connection_timeout_enabled: bool,
     connection_timeout_minutes: i32,
     allow_app_intensity_control: bool,
 ) -> Result<(), CommandError> {
-    if !(1..=1440).contains(&connection_timeout_minutes) {
-        return Err(HubError::InvalidConnectionTimeout.into());
-    }
-    let previous = hub.snapshot().safety;
-    hub.update_safety(
-        connection_timeout_enabled,
-        connection_timeout_minutes,
-        allow_app_intensity_control,
+    call(
+        &client,
+        ControlCommand::UpdateSafety {
+            connection_timeout_enabled,
+            connection_timeout_minutes,
+            allow_app_intensity_control,
+        },
     )
-    .await?;
-    if let Err(error) = preferences.set_safety_settings(
-        connection_timeout_enabled,
-        connection_timeout_minutes as u16,
-        allow_app_intensity_control,
-    ) {
-        let _ = hub
-            .update_safety(
-                previous.connection_timeout_enabled,
-                i32::from(previous.connection_timeout_minutes),
-                previous.allow_app_intensity_control,
-            )
-            .await;
-        return Err(error.into());
-    }
-    Ok(())
+    .await
 }
 
 #[cfg(test)]
@@ -492,11 +435,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn command_errors_are_serializable_and_chinese() {
-        let error = CommandError::from(HubError::NotConnected);
-        let json = serde_json::to_value(error).unwrap();
-        assert_eq!(json["code"], "not_connected");
-        assert!(json["message"].as_str().unwrap().contains("连接"));
+    fn command_errors_preserve_shared_error_format() {
+        let json =
+            serde_json::to_value(ControlError::new("not_connected", "设备尚未连接")).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "code": "not_connected", "message": "设备尚未连接" })
+        );
     }
 
     #[test]
@@ -504,7 +449,6 @@ mod tests {
         let commands_source = include_str!("commands.rs");
         let build_script = include_str!("../build.rs");
         let capability = include_str!("../capabilities/default.json");
-
         let command_attribute = ["#[tauri", "::command]"].concat();
         for command_block in commands_source.split(&command_attribute).skip(1) {
             let function = command_block

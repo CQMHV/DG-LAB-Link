@@ -28,7 +28,7 @@ const DEFAULT_WAVEFORM_FRAMES: [&str; 12] = [
     "0A0A0A0A00000000",
 ];
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, rename_all = "camelCase")]
 pub struct WaveformConfig {
     pub preset_id: String,

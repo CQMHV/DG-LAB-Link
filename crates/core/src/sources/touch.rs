@@ -16,7 +16,9 @@ pub const TOUCH_SOURCE_KIND: &str = "builtin.touch";
 pub const TOUCH_INPUT_LEASE: Duration = Duration::from_secs(1);
 const MAX_INPUT_ID_LENGTH: usize = 128;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum TouchMode {
     #[default]
@@ -24,7 +26,9 @@ pub enum TouchMode {
     Rhythm,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum TouchRouting {
     A,
@@ -35,7 +39,9 @@ pub enum TouchRouting {
     Alternate,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum TouchIntensityMode {
     #[default]
@@ -43,7 +49,9 @@ pub enum TouchIntensityMode {
     Gradient,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum TouchGradientDirection {
     Left,
@@ -52,7 +60,7 @@ pub enum TouchGradientDirection {
     Both,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, rename_all = "camelCase")]
 pub struct TouchConfig {
     pub mode: TouchMode,
@@ -101,7 +109,7 @@ impl Default for TouchConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TouchPointer {
     pub id: i64,
@@ -110,7 +118,7 @@ pub struct TouchPointer {
     pub cell: Option<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TouchInput {
     pub device_id: String,

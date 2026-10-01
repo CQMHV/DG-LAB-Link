@@ -17,7 +17,7 @@ const CONTROL_CAPACITY: usize = 8;
 const PCM_CAPACITY: usize = 4;
 const FEATURE_LEASE: Duration = Duration::from_millis(500);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum AudioAction {
     LoadFile {
@@ -45,7 +45,9 @@ pub enum AudioAction {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum AudioMode {
     #[default]
@@ -55,7 +57,9 @@ pub enum AudioMode {
     Desktop,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum AudioState {
     #[default]
@@ -68,7 +72,7 @@ pub enum AudioState {
     Error,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioSnapshot {
     pub mode: AudioMode,
@@ -111,15 +115,17 @@ struct LatestFeatures {
     features: AudioFeatures,
     received_at: Instant,
     generation: u64,
+    stop_epoch: u64,
 }
 
 /// 控制和 PCM 队列均有界。创建时不请求麦克风，明确动作才打开设备。
 pub struct AudioEngine {
-    controls: Mutex<mpsc::SyncSender<(AudioAction, u64)>>,
+    controls: Mutex<mpsc::SyncSender<(AudioAction, u64, u64)>>,
     latest: Arc<Mutex<LatestFeatures>>,
     snapshot: Arc<Mutex<AudioSnapshot>>,
     running: Arc<AtomicBool>,
     generation: Arc<AtomicU64>,
+    stop_epoch: Arc<AtomicU64>,
 }
 
 impl Default for AudioEngine {
@@ -135,15 +141,18 @@ impl AudioEngine {
             features: AudioFeatures::silent(),
             received_at: Instant::now(),
             generation: 0,
+            stop_epoch: 0,
         }));
         let snapshot = Arc::new(Mutex::new(AudioSnapshot::default()));
         let running = Arc::new(AtomicBool::new(true));
         let generation = Arc::new(AtomicU64::new(0));
+        let stop_epoch = Arc::new(AtomicU64::new(0));
         let worker = Worker::new(
             latest.clone(),
             snapshot.clone(),
             running.clone(),
             generation.clone(),
+            stop_epoch.clone(),
         );
         if let Err(error) = thread::Builder::new()
             .name("dglab-audio".to_owned())
@@ -160,6 +169,7 @@ impl AudioEngine {
             snapshot,
             running,
             generation,
+            stop_epoch,
         }
     }
 
@@ -179,6 +189,7 @@ impl AudioEngine {
             return Err(SourceError::Runtime("播放位置不能超过一小时".to_owned()));
         }
         let controls = lock(&self.controls);
+        let stop_epoch = self.stop_epoch.load(Ordering::Acquire);
         let preserves_stream = matches!(
             action,
             AudioAction::SaveRecording { .. } | AudioAction::SetPlaybackOptions { .. }
@@ -189,7 +200,7 @@ impl AudioEngine {
             self.generation.load(Ordering::Acquire).wrapping_add(1)
         };
         controls
-            .try_send((action.clone(), generation))
+            .try_send((action.clone(), generation, stop_epoch))
             .map_err(|error| match error {
                 mpsc::TrySendError::Full(_) => {
                     SourceError::Runtime("音频控制队列已满，请稍后重试".to_owned())
@@ -206,10 +217,17 @@ impl AudioEngine {
         Ok(())
     }
 
+    /// 紧急停止不获取普通控制锁，也不占用有界控制队列。
+    /// 立即撤销旧特征和回调；worker 优先关闭流并丢弃之前排队的动作。
+    pub fn emergency_stop(&self) {
+        self.stop_epoch.fetch_add(1, Ordering::AcqRel);
+    }
+
     pub fn latest(&self) -> AudioFeatures {
         let latest = lock(&self.latest);
         if latest.received_at.elapsed() <= FEATURE_LEASE
             && latest.generation == self.generation.load(Ordering::Acquire)
+            && latest.stop_epoch == self.stop_epoch.load(Ordering::Acquire)
         {
             latest.features.clone()
         } else {
@@ -222,6 +240,7 @@ impl AudioEngine {
     }
 
     pub fn shutdown(&self) {
+        self.emergency_stop();
         self.running.store(false, Ordering::Release);
         self.generation.fetch_add(1, Ordering::AcqRel);
         lock(&self.latest).features = AudioFeatures::silent();
@@ -242,6 +261,7 @@ fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
 
 struct AudioBlock {
     generation: u64,
+    stop_epoch: u64,
     rate: u32,
     samples: Vec<[f32; 2]>,
     received_at: Instant,
@@ -249,6 +269,7 @@ struct AudioBlock {
 
 struct StreamFailure {
     generation: u64,
+    stop_epoch: u64,
     message: String,
 }
 
@@ -332,7 +353,10 @@ struct Worker {
     snapshot: Arc<Mutex<AudioSnapshot>>,
     running: Arc<AtomicBool>,
     generation: Arc<AtomicU64>,
+    stop_epoch: Arc<AtomicU64>,
+    observed_stop_epoch: u64,
     active_generation: u64,
+    active_stop_epoch: u64,
     block_tx: mpsc::SyncSender<AudioBlock>,
     blocks: mpsc::Receiver<AudioBlock>,
     error_tx: mpsc::SyncSender<StreamFailure>,
@@ -350,6 +374,7 @@ impl Worker {
         snapshot: Arc<Mutex<AudioSnapshot>>,
         running: Arc<AtomicBool>,
         generation: Arc<AtomicU64>,
+        stop_epoch: Arc<AtomicU64>,
     ) -> Self {
         let (block_tx, blocks) = mpsc::sync_channel(PCM_CAPACITY);
         let (error_tx, errors) = mpsc::sync_channel(1);
@@ -358,7 +383,10 @@ impl Worker {
             snapshot,
             running,
             generation,
+            stop_epoch,
+            observed_stop_epoch: 0,
             active_generation: 0,
+            active_stop_epoch: 0,
             block_tx,
             blocks,
             error_tx,
@@ -371,25 +399,27 @@ impl Worker {
         }
     }
 
-    fn run(mut self, controls: mpsc::Receiver<(AudioAction, u64)>) {
+    fn run(mut self, controls: mpsc::Receiver<(AudioAction, u64, u64)>) {
         while self.running.load(Ordering::Acquire) {
+            self.apply_emergency_stop();
             match controls.recv_timeout(Duration::from_millis(5)) {
-                Ok((action, generation)) => {
-                    self.active_generation = generation;
-                    if let Err(error) = self.handle(action) {
-                        self.fail(error);
-                    }
+                Ok((action, generation, stop_epoch)) => {
+                    self.handle_control(action, generation, stop_epoch);
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
+            self.apply_emergency_stop();
             while let Ok(error) = self.errors.try_recv() {
-                if error.generation == self.generation.load(Ordering::Acquire) {
+                if error.generation == self.generation.load(Ordering::Acquire)
+                    && error.stop_epoch == self.stop_epoch.load(Ordering::Acquire)
+                {
                     self.fail(error.message);
                 }
             }
             while let Ok(block) = self.blocks.try_recv() {
                 if block.generation != self.generation.load(Ordering::Acquire)
+                    || block.stop_epoch != self.stop_epoch.load(Ordering::Acquire)
                     || block.received_at.elapsed() > FEATURE_LEASE
                 {
                     continue;
@@ -430,6 +460,37 @@ impl Worker {
         if let Some(recording) = &mut self.recording {
             let _ = recording.finish();
         }
+    }
+
+    fn apply_emergency_stop(&mut self) {
+        let stop_epoch = self.stop_epoch.load(Ordering::Acquire);
+        if stop_epoch == self.observed_stop_epoch {
+            return;
+        }
+        self.observed_stop_epoch = stop_epoch;
+        // 先关闭设备；录音收尾失败也不能保留正在播放或采集的流。
+        self.close_stream();
+        if let Err(error) = self.finish_recording() {
+            self.fail(error);
+        } else {
+            let mut snapshot = lock(&self.snapshot);
+            snapshot.state = AudioState::Idle;
+            snapshot.position_ms = 0;
+        }
+    }
+
+    fn handle_control(&mut self, action: AudioAction, generation: u64, stop_epoch: u64) {
+        self.apply_emergency_stop();
+        if stop_epoch != self.stop_epoch.load(Ordering::Acquire) {
+            return;
+        }
+        self.active_generation = generation;
+        self.active_stop_epoch = stop_epoch;
+        if let Err(error) = self.handle(action) {
+            self.fail(error);
+        }
+        // 动作可能阻塞在文件或设备初始化上；返回后仍须执行期间到达的停止。
+        self.apply_emergency_stop();
     }
 
     fn handle(&mut self, action: AudioAction) -> Result<(), String> {
@@ -603,6 +664,9 @@ impl Worker {
     }
 
     fn consume(&mut self, block: AudioBlock) -> Result<(), String> {
+        if block.stop_epoch != self.stop_epoch.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let state = lock(&self.snapshot).state;
         if !matches!(
             state,
@@ -637,6 +701,7 @@ impl Worker {
             features,
             received_at: block.received_at,
             generation: block.generation,
+            stop_epoch: block.stop_epoch,
         };
         Ok(())
     }
@@ -661,17 +726,23 @@ impl Worker {
         let mut blocks = BlockCollector::new(
             rate,
             self.active_generation,
+            self.active_stop_epoch,
             self.block_tx.clone(),
             self.error_tx.clone(),
         );
         let error_tx = self.error_tx.clone();
         let generation = self.active_generation;
+        let stream_epoch = self.active_stop_epoch;
+        let stop_epoch = self.stop_epoch.clone();
         let config = supported.config();
         macro_rules! build {
             ($type:ty) => {
                 device.build_input_stream(
                     config,
                     move |data: &[$type], _| {
+                        if stop_epoch.load(Ordering::Acquire) != stream_epoch {
+                            return;
+                        }
                         blocks.begin_callback();
                         for frame in data.chunks_exact(channels) {
                             blocks.push(capture_frame(frame, desktop));
@@ -681,6 +752,7 @@ impl Worker {
                         if let Some(message) = capture_error(mode, &error) {
                             let _ = error_tx.try_send(StreamFailure {
                                 generation,
+                                stop_epoch: stream_epoch,
                                 message,
                             });
                         }
@@ -775,17 +847,23 @@ impl Worker {
         let mut blocks = BlockCollector::new(
             rate,
             self.active_generation,
+            self.active_stop_epoch,
             self.block_tx.clone(),
             self.error_tx.clone(),
         );
         let error_tx = self.error_tx.clone();
         let generation = self.active_generation;
+        let stream_epoch = self.active_stop_epoch;
+        let stop_epoch = self.stop_epoch.clone();
         let config = supported.config();
         macro_rules! build {
             ($type:ty) => {
                 device.build_output_stream(
                     config,
                     move |data: &mut [$type], _| {
+                        if mute_cancelled_output(data, &stop_epoch, stream_epoch) {
+                            return;
+                        }
                         let mut queue = match buffer.try_lock() {
                             Ok(queue) => queue,
                             Err(_) => {
@@ -794,6 +872,9 @@ impl Worker {
                             }
                         };
                         for output in data.chunks_exact_mut(channels) {
+                            if mute_cancelled_output(output, &stop_epoch, stream_epoch) {
+                                continue;
+                            }
                             let sample = queue.queue.pop_front();
                             if sample.is_some() {
                                 queue.consumed += 1;
@@ -817,6 +898,7 @@ impl Worker {
                     move |error| {
                         let _ = error_tx.try_send(StreamFailure {
                             generation,
+                            stop_epoch: stream_epoch,
                             message: format!("扬声器错误：{error}"),
                         });
                     },
@@ -849,6 +931,18 @@ impl Worker {
         snapshot.position_ms = position_ms;
         Ok(())
     }
+}
+
+fn mute_cancelled_output<T: cpal::Sample>(
+    output: &mut [T],
+    stop_epoch: &AtomicU64,
+    stream_epoch: u64,
+) -> bool {
+    if stop_epoch.load(Ordering::Acquire) == stream_epoch {
+        return false;
+    }
+    output.fill(T::EQUILIBRIUM);
+    true
 }
 
 fn capture_device(mode: AudioMode) -> Result<(cpal::Device, cpal::SupportedStreamConfig), String> {
@@ -929,6 +1023,7 @@ struct BlockCollector {
     size: usize,
     rate: u32,
     generation: u64,
+    stop_epoch: u64,
     sender: mpsc::SyncSender<AudioBlock>,
     errors: mpsc::SyncSender<StreamFailure>,
     last_callback: Instant,
@@ -938,6 +1033,7 @@ impl BlockCollector {
     fn new(
         rate: u32,
         generation: u64,
+        stop_epoch: u64,
         sender: mpsc::SyncSender<AudioBlock>,
         errors: mpsc::SyncSender<StreamFailure>,
     ) -> Self {
@@ -947,6 +1043,7 @@ impl BlockCollector {
             size,
             rate,
             generation,
+            stop_epoch,
             sender,
             errors,
             last_callback: Instant::now(),
@@ -970,6 +1067,7 @@ impl BlockCollector {
                 .sender
                 .try_send(AudioBlock {
                     generation: self.generation,
+                    stop_epoch: self.stop_epoch,
                     rate: self.rate,
                     samples,
                     received_at: Instant::now(),
@@ -978,6 +1076,7 @@ impl BlockCollector {
             {
                 let _ = self.errors.try_send(StreamFailure {
                     generation: self.generation,
+                    stop_epoch: self.stop_epoch,
                     message: "音频处理队列拥塞，已停止输入以避免延迟输出".to_owned(),
                 });
             }
@@ -989,12 +1088,168 @@ impl BlockCollector {
 mod tests {
     use super::*;
 
+    fn queued_engine() -> (AudioEngine, mpsc::Receiver<(AudioAction, u64, u64)>, Worker) {
+        let (sender, receiver) = mpsc::sync_channel(CONTROL_CAPACITY);
+        let engine = AudioEngine {
+            controls: Mutex::new(sender),
+            latest: Arc::new(Mutex::new(LatestFeatures {
+                features: AudioFeatures {
+                    active: true,
+                    ..Default::default()
+                },
+                received_at: Instant::now(),
+                generation: 0,
+                stop_epoch: 0,
+            })),
+            snapshot: Arc::new(Mutex::new(AudioSnapshot {
+                state: AudioState::Playing,
+                ..Default::default()
+            })),
+            running: Arc::new(AtomicBool::new(true)),
+            generation: Arc::new(AtomicU64::new(0)),
+            stop_epoch: Arc::new(AtomicU64::new(0)),
+        };
+        let worker = Worker::new(
+            engine.latest.clone(),
+            engine.snapshot.clone(),
+            engine.running.clone(),
+            engine.generation.clone(),
+            engine.stop_epoch.clone(),
+        );
+        (engine, receiver, worker)
+    }
+
+    #[test]
+    fn emergency_stop_bypasses_full_queue_and_busy_locks_and_discards_old_starts() {
+        let (engine, receiver, mut worker) = queued_engine();
+        let engine = Arc::new(engine);
+        // 文件未加载；即使取消过滤回归，Play 也会在查找设备之前失败，不打开音频设备。
+        for _ in 0..CONTROL_CAPACITY {
+            engine.control(AudioAction::Play).unwrap();
+        }
+        assert!(engine.control(AudioAction::Stop).is_err());
+        *lock(&engine.latest) = LatestFeatures {
+            features: AudioFeatures {
+                active: true,
+                ..Default::default()
+            },
+            received_at: Instant::now(),
+            generation: CONTROL_CAPACITY as u64,
+            stop_epoch: 0,
+        };
+        assert!(engine.latest().active);
+
+        let controls_guard = lock(&engine.controls);
+        let features_guard = lock(&engine.latest);
+        let snapshot_guard = lock(&engine.snapshot);
+        let (finished, completion) = mpsc::channel();
+        let stop_engine = engine.clone();
+        let stopping = thread::spawn(move || {
+            stop_engine.emergency_stop();
+            let _ = finished.send(());
+        });
+        let result = completion.recv_timeout(Duration::from_secs(2));
+        drop(snapshot_guard);
+        drop(features_guard);
+        drop(controls_guard);
+        stopping.join().unwrap();
+        assert!(result.is_ok(), "紧急停止不得等待控制、特征或快照锁");
+        assert!(
+            !engine.latest().active,
+            "worker 处理停止之前就必须撤销旧特征"
+        );
+
+        while let Ok((action, generation, stop_epoch)) = receiver.try_recv() {
+            worker.handle_control(action, generation, stop_epoch);
+            assert_eq!(engine.snapshot().state, AudioState::Idle);
+            assert_eq!(engine.snapshot().last_error, None);
+        }
+        assert!(worker.stream.is_none());
+        assert!(worker.playback.is_none());
+        assert!(!engine.latest().active);
+    }
+
+    #[test]
+    fn stopped_epoch_drops_stale_pcm_and_new_controls_keep_fifo() {
+        let (engine, receiver, mut worker) = queued_engine();
+        engine.emergency_stop();
+        worker.apply_emergency_stop();
+        assert_eq!(engine.snapshot().state, AudioState::Idle);
+        engine.control(AudioAction::Pause).unwrap();
+        engine
+            .control(AudioAction::Seek { position_ms: 125 })
+            .unwrap();
+        engine
+            .control(AudioAction::SetPlaybackOptions {
+                loop_enabled: true,
+                speaker_enabled: false,
+            })
+            .unwrap();
+        let (action, generation, stop_epoch) = receiver.try_recv().unwrap();
+        assert!(matches!(action, AudioAction::Pause));
+        assert_eq!(stop_epoch, 1);
+        worker.handle_control(action, generation, stop_epoch);
+        assert_eq!(engine.snapshot().state, AudioState::Paused);
+        let (action, generation, stop_epoch) = receiver.try_recv().unwrap();
+        assert!(matches!(action, AudioAction::Seek { position_ms: 125 }));
+        worker.handle_control(action, generation, stop_epoch);
+        assert_eq!(engine.snapshot().position_ms, 125);
+        let (action, generation, stop_epoch) = receiver.try_recv().unwrap();
+        worker.handle_control(action, generation, stop_epoch);
+        assert!(engine.snapshot().loop_enabled);
+        assert!(!engine.snapshot().speaker_enabled);
+
+        // 模拟停止后显式重启产生的新流；旧 PCM 即使普通代次相同也不能进入新流。
+        lock(&engine.snapshot).state = AudioState::Playing;
+        let generation = engine.generation.load(Ordering::Acquire);
+        worker
+            .consume(AudioBlock {
+                generation,
+                stop_epoch: 0,
+                rate: 48_000,
+                samples: vec![[0.5, 0.5]; 4800],
+                received_at: Instant::now(),
+            })
+            .unwrap();
+        assert!(!engine.latest().active);
+        assert_eq!(engine.snapshot().level_left, 0.0);
+        worker
+            .consume(AudioBlock {
+                generation,
+                stop_epoch: 1,
+                rate: 48_000,
+                samples: vec![[0.5, 0.5]; 4800],
+                received_at: Instant::now(),
+            })
+            .unwrap();
+        assert!(engine.latest().active);
+        assert_eq!(engine.snapshot().level_left, 0.5);
+    }
+
+    #[test]
+    fn emergency_stop_mutes_speaker_callback_without_waiting_for_worker() {
+        let stop_epoch = AtomicU64::new(0);
+        let mut output = [0.75f32, -0.25];
+        assert!(!mute_cancelled_output(&mut output, &stop_epoch, 0));
+        assert_eq!(output, [0.75, -0.25]);
+        stop_epoch.fetch_add(1, Ordering::AcqRel);
+        assert!(mute_cancelled_output(&mut output, &stop_epoch, 0));
+        assert_eq!(output, [0.0, 0.0]);
+        let mut signed_output = [20_000i16, -12_000];
+        assert!(mute_cancelled_output(&mut signed_output, &stop_epoch, 0));
+        assert_eq!(signed_output, [0, 0]);
+        let mut unsigned_output = [0u16, u16::MAX];
+        assert!(mute_cancelled_output(&mut unsigned_output, &stop_epoch, 0));
+        assert_eq!(unsigned_output, [<u16 as cpal::Sample>::EQUILIBRIUM; 2]);
+    }
+
     fn capture_worker(mode: AudioMode) -> Worker {
         Worker::new(
             Arc::new(Mutex::new(LatestFeatures {
                 features: AudioFeatures::silent(),
                 received_at: Instant::now(),
                 generation: 0,
+                stop_epoch: 0,
             })),
             Arc::new(Mutex::new(AudioSnapshot {
                 mode,
@@ -1002,6 +1257,7 @@ mod tests {
                 ..Default::default()
             })),
             Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
         )
     }
@@ -1012,6 +1268,7 @@ mod tests {
         worker
             .consume(AudioBlock {
                 generation: 0,
+                stop_epoch: 0,
                 rate: 48_000,
                 samples: vec![[0.5, -0.25]; 4800],
                 received_at: Instant::now(),
@@ -1028,6 +1285,7 @@ mod tests {
         worker
             .consume(AudioBlock {
                 generation: 0,
+                stop_epoch: 0,
                 rate: 48_000,
                 samples: vec![[0.25, -0.5]; 4800],
                 received_at: Instant::now(),
@@ -1041,6 +1299,7 @@ mod tests {
         worker
             .consume(AudioBlock {
                 generation: 0,
+                stop_epoch: 0,
                 rate: 48_000,
                 samples: vec![[1.0, 1.0]; 4800],
                 received_at: Instant::now(),
@@ -1062,7 +1321,7 @@ mod tests {
     fn desktop_callback_gap_discards_old_partial_audio() {
         let (sender, receiver) = mpsc::sync_channel(1);
         let (errors, _) = mpsc::sync_channel(1);
-        let mut collector = BlockCollector::new(8000, 7, sender, errors);
+        let mut collector = BlockCollector::new(8000, 7, 0, sender, errors);
         collector.push([1.0, 1.0]);
         collector.last_callback = Instant::now() - Duration::from_secs(1);
         collector.begin_callback();
@@ -1159,6 +1418,7 @@ mod tests {
             },
             received_at: Instant::now() - Duration::from_secs(1),
             generation: 0,
+            stop_epoch: 0,
         };
         assert!(!engine.latest().active);
         engine.shutdown();
@@ -1169,7 +1429,7 @@ mod tests {
     fn pcm_queue_is_bounded_and_reports_overflow() {
         let (sender, receiver) = mpsc::sync_channel(1);
         let (errors, error_receiver) = mpsc::sync_channel(1);
-        let mut collector = BlockCollector::new(8000, 7, sender, errors);
+        let mut collector = BlockCollector::new(8000, 7, 0, sender, errors);
         for _ in 0..1600 {
             collector.push([0.0, 0.0]);
         }
@@ -1191,10 +1451,12 @@ mod tests {
                 },
                 received_at: Instant::now(),
                 generation: 7,
+                stop_epoch: 0,
             })),
             snapshot: Arc::new(Mutex::new(AudioSnapshot::default())),
             running: Arc::new(AtomicBool::new(true)),
             generation: Arc::new(AtomicU64::new(7)),
+            stop_epoch: Arc::new(AtomicU64::new(0)),
         };
         assert!(engine.latest().active);
         engine.control(AudioAction::Pause).unwrap();
@@ -1222,6 +1484,7 @@ mod tests {
             features: AudioFeatures::silent(),
             received_at: Instant::now(),
             generation: 0,
+            stop_epoch: 0,
         }));
         let snapshot = Arc::new(Mutex::new(AudioSnapshot {
             state: AudioState::Recording,
@@ -1233,11 +1496,13 @@ mod tests {
             snapshot.clone(),
             Arc::new(AtomicBool::new(true)),
             Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
         );
         worker.recording = Some(Recording::new(48_000).unwrap());
         worker
             .consume(AudioBlock {
                 generation: 0,
+                stop_epoch: 0,
                 rate: 48_000,
                 samples: vec![[0.5, 0.5]; 4800],
                 received_at: Instant::now(),

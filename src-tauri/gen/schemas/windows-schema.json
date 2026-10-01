@@ -243,10 +243,28 @@
           "markdownDescription": "Enables the get_hub_snapshot command without any pre-configured scope."
         },
         {
+          "description": "Enables the get_mcp_config command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-mcp-config",
+          "markdownDescription": "Enables the get_mcp_config command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_runtime_info command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-runtime-info",
+          "markdownDescription": "Enables the get_runtime_info command without any pre-configured scope."
+        },
+        {
           "description": "Enables the import_custom_waveforms command without any pre-configured scope.",
           "type": "string",
           "const": "allow-import-custom-waveforms",
           "markdownDescription": "Enables the import_custom_waveforms command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the parse_waveform_files command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-parse-waveform-files",
+          "markdownDescription": "Enables the parse_waveform_files command without any pre-configured scope."
         },
         {
           "description": "Enables the refresh_pairing command without any pre-configured scope.",
@@ -423,10 +441,28 @@
           "markdownDescription": "Denies the get_hub_snapshot command without any pre-configured scope."
         },
         {
+          "description": "Denies the get_mcp_config command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-mcp-config",
+          "markdownDescription": "Denies the get_mcp_config command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_runtime_info command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-runtime-info",
+          "markdownDescription": "Denies the get_runtime_info command without any pre-configured scope."
+        },
+        {
           "description": "Denies the import_custom_waveforms command without any pre-configured scope.",
           "type": "string",
           "const": "deny-import-custom-waveforms",
           "markdownDescription": "Denies the import_custom_waveforms command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the parse_waveform_files command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-parse-waveform-files",
+          "markdownDescription": "Denies the parse_waveform_files command without any pre-configured scope."
         },
         {
           "description": "Denies the refresh_pairing command without any pre-configured scope.",

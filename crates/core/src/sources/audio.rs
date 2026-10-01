@@ -27,7 +27,9 @@ pub(super) const MAX_SAMPLE_RATE: u32 = 192_000;
 pub const AUDIO_FILE_EXTENSIONS: &[&str] = &["mp3", "flac", "wav", "m4a", "aac", "ogg"];
 pub const VIDEO_FILE_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "mkv", "webm"];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum AudioInputChannel {
     Left,
@@ -46,7 +48,7 @@ impl AudioInputChannel {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AudioChannelConfig {
     pub enabled: bool,

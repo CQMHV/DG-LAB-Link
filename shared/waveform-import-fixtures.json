@@ -1,0 +1,74 @@
+[
+    {
+        "name": "呼吸.pulse",
+        "content": "Dungeonlab+pulse:自定义呼吸=0,0,0,1,1/0-0,100-0,50-0,0-0",
+        "presetName": "自定义呼吸",
+        "frames": [
+            "0A0A0A0A00643200"
+        ]
+    },
+    {
+        "name": "三点.pulse",
+        "content": "dungeonlab+pulse:=0,0,0,1,1/0-0,50-0,100-0",
+        "presetName": "三点",
+        "frames": [
+            "0A0A0A0A00326464"
+        ]
+    },
+    {
+        "name": "渐进.pulse",
+        "content": "Dungeonlab+pulse:渐进=0,18,6,2,1/0-0,20-0,50-0,100-0",
+        "presetName": "渐进",
+        "frames": [
+            "0A5D738400143264",
+            "94A5B5C600143264",
+            "CFD7E0E800143264"
+        ]
+    },
+    {
+        "name": "循环.pulse",
+        "content": "Dungeonlab+pulse:循环=5,18,8,3,1/10-0,40-0,70-0",
+        "presetName": "循环",
+        "frames": [
+            "3C9BD13C0A28460A",
+            "9BD13C9B28460A28",
+            "D13C9BD1460A2846",
+            "3C9BD13C0A28460A",
+            "9BD13C9B28460A28",
+            "D1D1D1D146464646"
+        ]
+    },
+    {
+        "name": "阶梯.pulse",
+        "content": "Dungeonlab+pulse:阶梯=8,18,9,4,1/0-0,30-0,100-0",
+        "presetName": "阶梯",
+        "frames": [
+            "5A5A5A76001E6400",
+            "76768A8A1E64001E",
+            "8A9F9F9F64001E64",
+            "B3B3B3C7001E6400",
+            "C7C7D2D21E64001E",
+            "D2DCDCDC64001E64",
+            "E6E6E6F0001E6400",
+            "F0F0F0F01E646464"
+        ]
+    },
+    {
+        "name": "组合.pulse",
+        "content": "Dungeonlab+pulse:组合=0,0,0,1,0/0-0,100-0+section+9,15,5,2,1/0-0,25-0,75-0,100-0+section+0,0,0,1,1/0-0,100-0",
+        "presetName": "组合",
+        "frames": [
+            "6473829100194B64",
+            "A0AFBECB00194B64",
+            "0A0A0A0A00646464"
+        ]
+    },
+    {
+        "name": "边界.pulse",
+        "content": "Dungeonlab+pulse:边界=-1,99,0,2,1/-1-0,100.6-0,55.5-0,0-0",
+        "presetName": "边界",
+        "frames": [
+            "0A84B5D700643800"
+        ]
+    }
+]

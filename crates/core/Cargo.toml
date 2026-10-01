@@ -1,0 +1,26 @@
+[package]
+name = "dg-lab-link-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cpal = "0.18.2"
+futures-util.workspace = true
+rustfft = "6.4.1"
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "std"] }
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+symphonia = { version = "0.6.1", features = ["aac", "alac", "mp3", "isomp4"] }
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+tokio-util.workspace = true
+url = "2.5.8"
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tokio = { workspace = true, features = ["test-util"] }

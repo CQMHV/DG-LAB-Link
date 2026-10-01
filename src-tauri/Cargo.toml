@@ -1,5 +1,5 @@
 [package]
-name = "dg-lab-link"
+name = "dg-lab-link-gui"
 version = "0.1.0"
 description = "可扩展的 DG-LAB 波形连接中枢"
 authors = ["DG-LAB Link Contributors"]
@@ -14,22 +14,14 @@ crate-type = ["lib", "cdylib", "staticlib"]
 tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
-cpal = "0.18.2"
-futures-util = "0.3.34"
+dg-lab-link-core = { path = "../crates/core" }
+dg-lab-link-runtime = { path = "../crates/runtime" }
 rfd = "0.17.2"
-rustfft = "6.4.1"
-rustls = { version = "0.23.43", default-features = false, features = ["ring", "std"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-symphonia = { version = "0.6.1", features = ["aac", "alac", "mp3", "isomp4"] }
 tauri = { version = "2.11.5", features = ["tray-icon"] }
 tauri-plugin-autostart = "2.5.1"
-thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
-tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-native-roots"] }
-tokio-util = { version = "0.7.19", features = ["rt"] }
-url = "2.5.8"
-uuid = { version = "1.24.0", features = ["v4", "serde"] }
 
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "sync", "test-util", "time"] }
