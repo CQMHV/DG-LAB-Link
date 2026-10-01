@@ -199,7 +199,7 @@ export interface TouchInput {
     deviceId: string;
     ownerId: string;
     sequence: number;
-    pointers: { id: number; x: number; y: number; cell: number | null }[];
+    pointers: { id: number; x: number; y: number; cell: number | null; channel?: HubChannel }[];
 }
 
 export interface AudioChannelConfig {

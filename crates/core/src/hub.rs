@@ -17,7 +17,7 @@ use crate::model::{Channel, WaveFrame};
 use crate::sources::audio::{
     AudioAction, AudioChannelConfig, AudioEngine, AudioMappingRuntime, AudioSnapshot,
 };
-use crate::sources::touch::{TouchConfig, TouchInput, TouchRuntime};
+use crate::sources::touch::{TouchConfig, TouchInput, TouchRuntime, validate_pointer_channels};
 use crate::sources::{WaveSource, WaveformConfig, builtin_registry};
 use crate::transport::v4::devices_get_request;
 #[cfg(test)]
@@ -516,7 +516,7 @@ impl HubHandle {
         })
         .await
     }
-    pub fn update_touch_input(&self, input: TouchInput) -> Result<(), HubError> {
+    pub fn update_touch_input(&self, mut input: TouchInput) -> Result<(), HubError> {
         let snapshot = self.snapshots.borrow();
         let device = snapshot
             .devices
@@ -543,6 +543,23 @@ impl HubHandle {
         {
             return Err(HubError::InvalidSourceConfig(
                 "触控坐标或触点数量无效".to_owned(),
+            ));
+        }
+        validate_pointer_channels(&input.pointers)
+            .map_err(|error| HubError::InvalidSourceConfig(error.to_string()))?;
+        let had_pointers = !input.pointers.is_empty();
+        input.pointers.retain(|pointer| {
+            pointer.channel.is_none_or(|channel| {
+                let source_id = match channel {
+                    Channel::A => &device.source_id_a,
+                    Channel::B => &device.source_id_b,
+                };
+                source_id.as_deref() == Some(TOUCH_SOURCE_ID)
+            })
+        });
+        if had_pointers && input.pointers.is_empty() {
+            return Err(HubError::SourceUnavailable(
+                "触点目标通道未启用触控源".to_owned(),
             ));
         }
         let mut mailbox = self
@@ -572,7 +589,11 @@ impl HubHandle {
                     .pointers
                     .iter()
                     .zip(&input.pointers)
-                    .any(|(previous, next)| previous.id != next.id || previous.cell != next.cell);
+                    .any(|(previous, next)| {
+                        previous.id != next.id
+                            || previous.cell != next.cell
+                            || previous.channel != next.channel
+                    });
             if transition {
                 if slot.transitions.len() >= MAX_TOUCH_TRANSITIONS {
                     if input.pointers.is_empty() {
@@ -1779,6 +1800,22 @@ impl HubRuntime {
     }
 
     fn reset_changed_inputs(&mut self, device: &DeviceKey, channels: &[Channel]) {
+        if let Some(slot) = self
+            .touch_mailbox
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get_mut(&device.control_id())
+        {
+            let keep_pointer = |pointer: &crate::sources::touch::TouchPointer| {
+                pointer
+                    .channel
+                    .is_none_or(|channel| !channels.contains(&channel))
+            };
+            slot.latest.pointers.retain(keep_pointer);
+            for (input, _) in &mut slot.transitions {
+                input.pointers.retain(keep_pointer);
+            }
+        }
         for channel in channels {
             if let Some(runtime) = self.touch_runtimes.get_mut(device) {
                 runtime.reset_channel(*channel);
@@ -4960,6 +4997,7 @@ mod tests {
                 x: 0.5,
                 y: 0.5,
                 cell: None,
+                channel: None,
             }],
         };
         assert!(matches!(
@@ -4981,6 +5019,289 @@ mod tests {
         runtime.reset_device_inputs(&device);
         assert!(!runtime.touch_runtimes[&device].has_active_input(std::time::Instant::now()));
         assert!(runtime.touch_mailbox.lock().unwrap().is_empty());
+    }
+
+    fn targeted_touch_pointer(
+        channel: Channel,
+        id: i64,
+        cell: Option<usize>,
+    ) -> crate::sources::touch::TouchPointer {
+        crate::sources::touch::TouchPointer {
+            id,
+            x: 0.33,
+            y: 0.33,
+            cell,
+            channel: Some(channel),
+        }
+    }
+
+    #[tokio::test]
+    async fn touch_mailbox_rejects_invalid_targets_without_replacing_valid_input() {
+        let (hub, mut runtime) = create_hub("wss://example.test/v4".to_owned());
+        install_test_device(&mut runtime, "app-1", "slot-a", 10);
+        let device = runtime.selected_device.clone().unwrap();
+        runtime
+            .set_device_channel_source(device.control_id(), Channel::A, TOUCH_SOURCE_ID.to_owned())
+            .await
+            .unwrap();
+        runtime.start_output(&device.control_id()).unwrap();
+        let a = targeted_touch_pointer(Channel::A, 1, None);
+        let b = targeted_touch_pointer(Channel::B, 2, None);
+        let mut input = TouchInput {
+            device_id: device.control_id(),
+            owner_id: "window-1".to_owned(),
+            sequence: 1,
+            pointers: vec![a.clone()],
+        };
+        hub.update_touch_input(input.clone()).unwrap();
+        input.sequence = 2;
+        input.pointers = vec![b.clone()];
+        assert!(matches!(
+            hub.update_touch_input(input.clone()),
+            Err(HubError::SourceUnavailable(_))
+        ));
+        let mut unspecified = b;
+        unspecified.channel = None;
+        for invalid in [
+            vec![a.clone(), unspecified],
+            vec![a.clone(), targeted_touch_pointer(Channel::A, 2, None)],
+            vec![a.clone(), targeted_touch_pointer(Channel::B, 1, None)],
+        ] {
+            input.pointers = invalid;
+            assert!(matches!(
+                hub.update_touch_input(input.clone()),
+                Err(HubError::InvalidSourceConfig(_))
+            ));
+        }
+        let mailbox = runtime.touch_mailbox.lock().unwrap();
+        let slot = &mailbox[&device.control_id()];
+        assert_eq!(slot.latest.sequence, 1);
+        assert_eq!(slot.latest.pointers, vec![a]);
+        assert_eq!(slot.transitions.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn touch_mailbox_preserves_retarget_transition_instead_of_coalescing_it_with_motion() {
+        let (hub, mut runtime) = create_hub("wss://example.test/v4".to_owned());
+        install_test_device(&mut runtime, "app-1", "slot-a", 10);
+        let device = runtime.selected_device.clone().unwrap();
+        for channel in Channel::ALL {
+            runtime
+                .set_device_channel_source(device.control_id(), channel, TOUCH_SOURCE_ID.to_owned())
+                .await
+                .unwrap();
+        }
+        runtime.start_output(&device.control_id()).unwrap();
+        let mut input = TouchInput {
+            device_id: device.control_id(),
+            owner_id: "window-1".to_owned(),
+            sequence: 1,
+            pointers: vec![targeted_touch_pointer(Channel::A, 1, Some(0))],
+        };
+        hub.update_touch_input(input.clone()).unwrap();
+        input.sequence = 2;
+        input.pointers[0].channel = Some(Channel::B);
+        hub.update_touch_input(input.clone()).unwrap();
+        input.sequence = 3;
+        input.pointers[0].x = 0.5;
+        hub.update_touch_input(input).unwrap();
+        let mailbox = runtime.touch_mailbox.lock().unwrap();
+        let slot = &mailbox[&device.control_id()];
+        assert_eq!(
+            slot.transitions
+                .iter()
+                .map(|(input, _)| (input.sequence, input.pointers[0].channel))
+                .collect::<Vec<_>>(),
+            [(1, Some(Channel::A)), (2, Some(Channel::B))]
+        );
+        assert_eq!(slot.latest.sequence, 3);
+    }
+
+    async fn expect_touch_channel_clear(
+        queues: &mut crate::transport::SessionQueues,
+        expected: Channel,
+    ) {
+        let crate::transport::SessionCommand::Stop {
+            channel,
+            zero,
+            reply,
+            ..
+        } = queues.safety.recv().await.unwrap()
+        else {
+            panic!("expected channel waveform clear");
+        };
+        assert_eq!(channel, Some(expected));
+        assert!(!zero, "releasing a touch must preserve base intensity");
+        reply.send(Ok(())).unwrap();
+    }
+
+    #[tokio::test]
+    async fn independent_touch_release_and_rebind_clear_only_changed_channel() {
+        let (hub, mut runtime) = create_hub("wss://example.test/v4".to_owned());
+        let device = install_isolation_device(
+            &mut runtime,
+            "ble:independent-touch",
+            InitializationState::Ready,
+        );
+        let (session, mut queues) = crate::transport::session_channel(8);
+        runtime
+            .sessions
+            .insert(device.connection_id.clone(), session.clone());
+        for channel in Channel::ALL {
+            runtime
+                .set_device_channel_source(device.control_id(), channel, TOUCH_SOURCE_ID.to_owned())
+                .await
+                .unwrap();
+        }
+        runtime.touch_config.free_waveforms[0].frames =
+            vec!["0A0A0A0A14141414".to_owned(), "0A0A0A0A28282828".to_owned()];
+        runtime.touch_config.free_waveforms[1].frames = [
+            "1414141432323232",
+            "141414143C3C3C3C",
+            "1414141446464646",
+            "1414141450505050",
+            "141414145A5A5A5A",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        runtime.start_output(&device.control_id()).unwrap();
+        let generation = runtime.operation_generation;
+        let a = targeted_touch_pointer(Channel::A, 1, Some(0));
+        let b = targeted_touch_pointer(Channel::B, 2, Some(1));
+        let mut input = TouchInput {
+            device_id: device.control_id(),
+            owner_id: "window-1".to_owned(),
+            sequence: 1,
+            pointers: vec![b.clone()],
+        };
+        hub.update_touch_input(input.clone()).unwrap();
+        runtime.input_tick().await;
+        let frames = runtime
+            .touch_runtimes
+            .get_mut(&device)
+            .unwrap()
+            .next_frames(std::time::Instant::now());
+        assert_eq!(frames[0], WaveFrame::silent());
+        assert_eq!(frames[1].samples()[0].pulse_intensity(), 50);
+        input.sequence = 2;
+        input.pointers.push(a.clone());
+        hub.update_touch_input(input.clone()).unwrap();
+        runtime.input_tick().await;
+        let frames = runtime
+            .touch_runtimes
+            .get_mut(&device)
+            .unwrap()
+            .next_frames(std::time::Instant::now());
+        assert_eq!(frames[0].samples()[0].pulse_intensity(), 20);
+        assert_eq!(frames[1].samples()[0].pulse_intensity(), 60);
+
+        install_isolation_pending(&mut runtime, &device);
+        runtime.pending_wave_operations.insert(
+            "wave-b".to_owned(),
+            PendingWaveOperation {
+                device: device.clone(),
+                channel: Channel::B,
+                generation,
+                sent_at: Instant::now(),
+            },
+        );
+        for channel in Channel::ALL {
+            session
+                .try_send(
+                    DeviceOperation::Wave {
+                        request_id: channel.to_string(),
+                        slot_id: device.slot_id.clone(),
+                        channel,
+                        frame: WaveFrame::silent(),
+                    },
+                    generation,
+                )
+                .unwrap();
+        }
+        let crate::transport::SessionCommand::Operation(mut a_operation) =
+            queues.commands.try_recv().unwrap()
+        else {
+            panic!("expected queued A waveform");
+        };
+        let crate::transport::SessionCommand::Operation(mut b_operation) =
+            queues.commands.try_recv().unwrap()
+        else {
+            panic!("expected queued B waveform");
+        };
+        input.sequence = 3;
+        input.pointers = vec![b.clone()];
+        hub.update_touch_input(input.clone()).unwrap();
+        tokio::join!(
+            runtime.input_tick(),
+            expect_touch_channel_clear(&mut queues, Channel::A)
+        );
+        // Keep this assertion about channel generation independent of the 100ms queue age limit.
+        a_operation.queued_at = Instant::now();
+        b_operation.queued_at = Instant::now();
+        assert!(!session.is_current(&a_operation));
+        assert!(session.is_current(&b_operation));
+        assert_eq!(runtime.operation_generation, generation);
+        assert!(runtime.pending_wave_operations.contains_key("wave-b"));
+        assert!(
+            !runtime
+                .pending_wave_operations
+                .contains_key(&format!("wave-{}", device.connection_id))
+        );
+        let frames = runtime
+            .touch_runtimes
+            .get_mut(&device)
+            .unwrap()
+            .next_frames(std::time::Instant::now());
+        assert_eq!(frames[0], WaveFrame::silent());
+        assert_eq!(frames[1].samples()[0].pulse_intensity(), 70);
+
+        input.sequence = 4;
+        input.pointers.push(a);
+        hub.update_touch_input(input.clone()).unwrap();
+        runtime.input_tick().await;
+        let frames = runtime
+            .touch_runtimes
+            .get_mut(&device)
+            .unwrap()
+            .next_frames(std::time::Instant::now());
+        assert_eq!(frames[1].samples()[0].pulse_intensity(), 80);
+        // A pending combined input must not revive A after A changes source.
+        input.sequence = 5;
+        hub.update_touch_input(input.clone()).unwrap();
+        let (result, ()) = tokio::join!(
+            runtime.set_device_channel_source(
+                device.control_id(),
+                Channel::A,
+                AUDIO_SOURCE_ID.to_owned()
+            ),
+            expect_touch_channel_clear(&mut queues, Channel::A)
+        );
+        result.unwrap();
+        // Renewing from an older UI snapshot still containing A must keep B alive.
+        input.sequence = 6;
+        hub.update_touch_input(input).unwrap();
+        assert_eq!(
+            runtime.touch_mailbox.lock().unwrap()[&device.control_id()]
+                .latest
+                .pointers,
+            vec![b]
+        );
+        runtime.input_tick().await;
+        let frames = runtime
+            .touch_runtimes
+            .get_mut(&device)
+            .unwrap()
+            .next_frames(std::time::Instant::now());
+        assert_eq!(frames[0], WaveFrame::silent());
+        assert_eq!(frames[1].samples()[0].pulse_intensity(), 90);
+        b_operation.queued_at = Instant::now();
+        assert!(session.is_current(&b_operation));
+        assert!(runtime.pending_wave_operations.contains_key("wave-b"));
+        assert_eq!(runtime.operation_generation, generation);
+        assert_eq!(runtime.snapshot.device.as_ref().unwrap().intensity_a, 30);
+        assert_eq!(runtime.snapshot.device.as_ref().unwrap().intensity_b, 20);
+        assert_eq!(runtime.snapshot.output.state, OutputState::Running);
+        assert!(queues.safety.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -5053,6 +5374,7 @@ mod tests {
                 x: 0.5,
                 y: 0.5,
                 cell: None,
+                channel: None,
             }],
         };
         hub.update_touch_input(input.clone()).unwrap();
@@ -5074,6 +5396,7 @@ mod tests {
             x: 0.5,
             y: 0.5,
             cell: Some(1),
+            channel: None,
         });
         hub.update_touch_input(input).unwrap();
         {

@@ -116,6 +116,8 @@ pub struct TouchPointer {
     pub x: f64,
     pub y: f64,
     pub cell: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<Channel>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -252,8 +254,57 @@ impl TouchRuntime {
             sequence: input.sequence,
             updated_at: now,
         });
+        let previously_explicit = self
+            .pointers
+            .iter()
+            .any(|pointer| pointer.channel.is_some());
         self.pointers.clone_from(&input.pointers);
 
+        if self
+            .pointers
+            .iter()
+            .any(|pointer| pointer.channel.is_some())
+        {
+            for (index, channel) in self.channels.iter_mut().enumerate() {
+                let pointer_id = self
+                    .pointers
+                    .iter()
+                    .find(|pointer| pointer.channel == Some(Channel::ALL[index]))
+                    .map(|pointer| pointer.id);
+                if channel.pointer_id != pointer_id {
+                    *channel = TouchChannel {
+                        pointer_id,
+                        ..TouchChannel::default()
+                    };
+                }
+            }
+        } else {
+            if previously_explicit {
+                self.channels = Default::default();
+            }
+            self.assign_routed_pointers();
+        }
+
+        for channel in &mut self.channels {
+            let Some(pointer) = self
+                .pointers
+                .iter()
+                .find(|pointer| Some(pointer.id) == channel.pointer_id)
+            else {
+                continue;
+            };
+            let selection = select_pointer(&self.config, pointer);
+            if channel.selection != Some(selection) {
+                channel.selection = Some(selection);
+                channel.cursor = 0;
+                channel.gradient_zone = 0;
+                channel.gradient_value = 100.0;
+            }
+        }
+        Ok(())
+    }
+
+    fn assign_routed_pointers(&mut self) {
         for channel in &mut self.channels {
             if !self
                 .pointers
@@ -301,24 +352,6 @@ impl TouchRuntime {
                 TouchRouting::Separate => unreachable!(),
             }
         }
-
-        for channel in &mut self.channels {
-            let Some(pointer) = self
-                .pointers
-                .iter()
-                .find(|pointer| Some(pointer.id) == channel.pointer_id)
-            else {
-                continue;
-            };
-            let selection = select_pointer(&self.config, pointer);
-            if channel.selection != Some(selection) {
-                channel.selection = Some(selection);
-                channel.cursor = 0;
-                channel.gradient_zone = 0;
-                channel.gradient_value = 100.0;
-            }
-        }
-        Ok(())
     }
 
     pub fn next_frames(&mut self, now: Instant) -> [WaveFrame; 2] {
@@ -458,6 +491,8 @@ impl TouchRuntime {
     /// 解绑一个通道时保留另一个通道的触点与播放进度。
     pub fn reset_channel(&mut self, channel: Channel) {
         self.channels[channel.as_v4() as usize] = TouchChannel::default();
+        self.pointers
+            .retain(|pointer| pointer.channel != Some(channel));
     }
 
     fn clear_touch_state(&mut self) {
@@ -489,7 +524,13 @@ impl TouchRuntime {
         {
             return Err(SourceError::Runtime("触控状态不属于当前设备".to_owned()));
         }
-        let max_pointers = if self.config.routing == TouchRouting::Separate {
+        validate_pointer_channels(&input.pointers)?;
+        let max_pointers = if self.config.routing == TouchRouting::Separate
+            || input
+                .pointers
+                .iter()
+                .any(|pointer| pointer.channel.is_some())
+        {
             2
         } else {
             1
@@ -503,7 +544,7 @@ impl TouchRuntime {
             TouchMode::Free => 8,
             TouchMode::Rhythm => self.config.grid_size * self.config.grid_size,
         };
-        for (index, pointer) in input.pointers.iter().enumerate() {
+        for pointer in &input.pointers {
             if !pointer.x.is_finite()
                 || !pointer.y.is_finite()
                 || !(0.0..=1.0).contains(&pointer.x)
@@ -518,15 +559,39 @@ impl TouchRuntime {
                     "触控波形格超出当前面板范围".to_owned(),
                 ));
             }
-            if input.pointers[..index]
-                .iter()
-                .any(|existing| existing.id == pointer.id)
-            {
-                return Err(SourceError::Runtime("触点标识不能重复".to_owned()));
-            }
         }
         Ok(())
     }
+}
+
+pub(crate) fn validate_pointer_channels(pointers: &[TouchPointer]) -> Result<(), SourceError> {
+    if pointers.len() > 2 {
+        return Err(SourceError::Runtime("触控最多允许 2 个触点".to_owned()));
+    }
+    let explicit = pointers
+        .first()
+        .is_some_and(|pointer| pointer.channel.is_some());
+    for (index, pointer) in pointers.iter().enumerate() {
+        if pointer.channel.is_some() != explicit {
+            return Err(SourceError::Runtime(
+                "不能混用指定通道和未指定通道的触点".to_owned(),
+            ));
+        }
+        if pointers[..index]
+            .iter()
+            .any(|existing| existing.id == pointer.id)
+        {
+            return Err(SourceError::Runtime("触点标识不能重复".to_owned()));
+        }
+        if pointer.channel.is_some()
+            && pointers[..index]
+                .iter()
+                .any(|existing| existing.channel == pointer.channel)
+        {
+            return Err(SourceError::Runtime("每个通道最多允许 1 个触点".to_owned()));
+        }
+    }
+    Ok(())
 }
 
 fn select_pointer(config: &TouchConfig, pointer: &TouchPointer) -> Selection {
@@ -652,7 +717,13 @@ mod tests {
     }
 
     fn pointer(id: i64, x: f64, y: f64, cell: Option<usize>) -> TouchPointer {
-        TouchPointer { id, x, y, cell }
+        TouchPointer {
+            id,
+            x,
+            y,
+            cell,
+            channel: None,
+        }
     }
 
     fn waveform(frames: &[&str]) -> WaveformConfig {
@@ -661,6 +732,170 @@ mod tests {
             preset_name: "测试".to_owned(),
             frames: frames.iter().map(|frame| (*frame).to_owned()).collect(),
         }
+    }
+
+    fn channel_pointer(
+        channel: Channel,
+        id: i64,
+        x: f64,
+        y: f64,
+        cell: Option<usize>,
+    ) -> TouchPointer {
+        TouchPointer {
+            channel: Some(channel),
+            ..pointer(id, x, y, cell)
+        }
+    }
+
+    #[test]
+    fn explicit_channels_ignore_routing_and_start_b_independently_before_a() {
+        let now = Instant::now();
+        for routing in [
+            TouchRouting::A,
+            TouchRouting::B,
+            TouchRouting::Sync,
+            TouchRouting::Separate,
+            TouchRouting::Alternate,
+        ] {
+            let mut runtime = TouchRuntime::new(TouchConfig {
+                routing,
+                ..TouchConfig::default()
+            })
+            .unwrap();
+            let b = channel_pointer(Channel::B, 1, 0.33, 0.0, None);
+            runtime.update(&input(1, vec![b.clone()]), now).unwrap();
+            assert_eq!(runtime.active_touch_channels(now), [false, true]);
+            assert_eq!(runtime.next_frames(now)[0], WaveFrame::silent());
+
+            let a = channel_pointer(Channel::A, 2, 0.0, 0.33, None);
+            runtime.update(&input(2, vec![b, a]), now).unwrap();
+            let frames = runtime.next_frames(now);
+            assert_eq!(frames[0].samples()[0], WaveSample::new(10, 0).unwrap());
+            assert_eq!(frames[1].samples()[0], WaveSample::new(100, 100).unwrap());
+        }
+    }
+
+    #[test]
+    fn independent_cells_preserve_other_channel_cursor_on_down_reorder_and_release() {
+        let now = Instant::now();
+        let mut config = TouchConfig::default();
+        config.free_waveforms[0] =
+            waveform(&["0A0A0A0A14141414", "0A0A0A0A1E1E1E1E", "0A0A0A0A28282828"]);
+        config.free_waveforms[1] = waveform(&[
+            "1414141432323232",
+            "141414143C3C3C3C",
+            "1414141446464646",
+            "1414141450505050",
+        ]);
+        let mut runtime = TouchRuntime::new(config).unwrap();
+        let b = channel_pointer(Channel::B, 1, 0.0, 0.0, Some(1));
+        let a = channel_pointer(Channel::A, 2, 0.0, 0.0, Some(0));
+        runtime.update(&input(1, vec![b.clone()]), now).unwrap();
+        assert_eq!(
+            runtime.next_frames(now)[1].samples()[0],
+            WaveSample::new(20, 50).unwrap()
+        );
+        runtime
+            .update(&input(2, vec![b.clone(), a.clone()]), now)
+            .unwrap();
+        let frames = runtime.next_frames(now);
+        assert_eq!(frames[0].samples()[0], WaveSample::new(10, 20).unwrap());
+        assert_eq!(frames[1].samples()[0], WaveSample::new(20, 60).unwrap());
+        runtime.update(&input(3, vec![a, b.clone()]), now).unwrap();
+        let frames = runtime.next_frames(now);
+        assert_eq!(frames[0].samples()[0].pulse_intensity(), 30);
+        assert_eq!(frames[1].samples()[0].pulse_intensity(), 70);
+        runtime.update(&input(4, vec![b]), now).unwrap();
+        let frames = runtime.next_frames(now);
+        assert_eq!(frames[0], WaveFrame::silent());
+        assert_eq!(frames[1].samples()[0].pulse_intensity(), 80);
+        assert_eq!(runtime.touch_intents(now), [None, Some((1, Some(1)))]);
+        runtime.update(&input(5, vec![]), now).unwrap();
+        assert_eq!(runtime.next_frames(now), [WaveFrame::silent(); 2]);
+    }
+
+    #[test]
+    fn retargeting_same_pointer_clears_old_channel_and_restarts_selection() {
+        let now = Instant::now();
+        let mut config = TouchConfig::default();
+        config.free_waveforms[0] = waveform(&["0A0A0A0A14141414", "0A0A0A0A28282828"]);
+        let mut runtime = TouchRuntime::new(config).unwrap();
+        let mut pointer = channel_pointer(Channel::A, 1, 0.0, 0.0, Some(0));
+        runtime
+            .update(&input(1, vec![pointer.clone()]), now)
+            .unwrap();
+        runtime.next_frames(now);
+        pointer.channel = Some(Channel::B);
+        runtime.update(&input(2, vec![pointer]), now).unwrap();
+        let frames = runtime.next_frames(now);
+        assert_eq!(frames[0], WaveFrame::silent());
+        assert_eq!(frames[1].samples()[0].pulse_intensity(), 20);
+        assert_eq!(runtime.touch_intents(now), [None, Some((1, Some(0)))]);
+    }
+
+    #[test]
+    fn reset_explicit_channel_removes_its_pointer_without_restarting_other_channel() {
+        let now = Instant::now();
+        let mut config = TouchConfig::default();
+        config.free_waveforms[0] = waveform(&["0A0A0A0A14141414", "0A0A0A0A28282828"]);
+        let mut runtime = TouchRuntime::new(config).unwrap();
+        let a = channel_pointer(Channel::A, 1, 0.0, 0.0, Some(0));
+        let b = channel_pointer(Channel::B, 2, 0.0, 0.0, Some(0));
+        runtime.update(&input(1, vec![a.clone(), b]), now).unwrap();
+        runtime.next_frames(now);
+        runtime.reset_channel(Channel::B);
+        assert_eq!(runtime.pointers, vec![a.clone()]);
+        runtime.update(&input(2, vec![a]), now).unwrap();
+        let frames = runtime.next_frames(now);
+        assert_eq!(frames[0].samples()[0].pulse_intensity(), 40);
+        assert_eq!(frames[1], WaveFrame::silent());
+    }
+
+    #[test]
+    fn invalid_pointer_channels_and_ids_do_not_mutate_valid_input() {
+        let now = Instant::now();
+        let mut runtime = TouchRuntime::new(TouchConfig::default()).unwrap();
+        let a = channel_pointer(Channel::A, 1, 0.33, 0.33, None);
+        let b = channel_pointer(Channel::B, 2, 0.33, 0.33, None);
+        runtime
+            .update(&input(1, vec![a.clone(), b.clone()]), now)
+            .unwrap();
+        for invalid in [
+            vec![a.clone(), pointer(2, 0.0, 0.0, None)],
+            vec![a.clone(), channel_pointer(Channel::A, 2, 0.0, 0.0, None)],
+            vec![a.clone(), channel_pointer(Channel::B, 1, 0.0, 0.0, None)],
+            vec![a.clone(), b, channel_pointer(Channel::A, 3, 0.0, 0.0, None)],
+        ] {
+            assert!(runtime.update(&input(2, invalid), now).is_err());
+            assert_eq!(
+                runtime.touch_intents(now),
+                [Some((1, None)), Some((2, None))]
+            );
+        }
+        runtime.update(&input(2, vec![a]), now).unwrap();
+        assert_eq!(runtime.active_touch_channels(now), [true, false]);
+    }
+
+    #[test]
+    fn channel_serialization_keeps_unspecified_inputs_and_routing_supported() {
+        let now = Instant::now();
+        let legacy: TouchPointer =
+            serde_json::from_value(serde_json::json!({"id":1,"x":0.33,"y":0.33,"cell":null}))
+                .unwrap();
+        assert_eq!(legacy.channel, None);
+        assert!(
+            serde_json::to_value(&legacy)
+                .unwrap()
+                .get("channel")
+                .is_none()
+        );
+        let mut explicit = legacy.clone();
+        explicit.channel = Some(Channel::B);
+        assert_eq!(serde_json::to_value(&explicit).unwrap()["channel"], "b");
+        let mut runtime = TouchRuntime::new(TouchConfig::default()).unwrap();
+        runtime.update(&input(1, vec![explicit]), now).unwrap();
+        runtime.update(&input(2, vec![legacy]), now).unwrap();
+        assert_eq!(runtime.active_touch_channels(now), [true, true]);
     }
 
     #[test]

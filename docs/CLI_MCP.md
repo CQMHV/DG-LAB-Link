@@ -76,7 +76,7 @@ $device = "<devices 返回的 controlId>"
 & $cli safety set --file .\safety.json
 ```
 
-触控输入包含 `deviceId`（设备 controlId）、`ownerId`、递增 `sequence` 和 `pointers`。每个触点含 `id`、归一化 `x` / `y`、可选 `cell`；释放时提交空 `pointers`，持续触控必须在一秒租期内续租。核心限制活动所有者，过期或乱序输入不会复活触点。
+触控输入包含 `deviceId`（设备 controlId）、`ownerId`、递增 `sequence` 和 `pointers`。每个触点含 `id`、归一化 `x` / `y`、可选 `cell` 和可选 `channel`（`a` / `b`）。指定 `channel` 时每路最多一个触点，两路可同时独立控制，不受共享 `routing` 影响；不指定时按 `TouchConfig.routing` 分配。一次输入不可混用这两种方式。释放单路时只移除该路触点并保留另一触点，全部释放时提交空 `pointers`；持续触控必须在一秒租期内续租。核心限制活动所有者，过期或乱序输入不会复活触点。
 
 音频播放、麦克风、桌面监听、录音和映射均在核心 Rust 工作线程执行。文件或录音保存路径相对于调用 CLI 的工作目录解析为绝对路径；MCP 的路径须直接提供绝对路径。
 
