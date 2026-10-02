@@ -76,3 +76,18 @@ notice, including the BSD terms for code inherited from rumble, is included at
 [docs/licenses/btleplug-LICENSE.md](docs/licenses/btleplug-LICENSE.md).
 The dependency is compiled only for Windows. GATT and protocol code are
 separated so future platform backends can reuse the device session.
+
+## Native plugin package dependencies
+
+Local `.dglabplugin` ZIP archives use [zip 8.6.0](https://github.com/zip-rs/zip2),
+licensed under MIT. The complete upstream text is included at
+[docs/licenses/zip-LICENSE.txt](docs/licenses/zip-LICENSE.txt).
+Only Store and Deflate are enabled. Deflate uses the Rust backend of
+[flate2 1.1.9](https://github.com/rust-lang/flate2-rs), dual-licensed under MIT or
+Apache-2.0. Both texts are included at
+[docs/licenses/flate2-MIT.txt](docs/licenses/flate2-MIT.txt) and
+[docs/licenses/flate2-APACHE-2.0.txt](docs/licenses/flate2-APACHE-2.0.txt).
+
+The preinstalled touch/audio plugins and Rust plugin SDK are project code under
+AGPL-3.0-only. Public protocol documentation does not certify third-party plugin
+publishers; package manifests declare their own publisher and license.

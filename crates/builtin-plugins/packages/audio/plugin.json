@@ -1,0 +1,9 @@
+{
+    "id": "cn.dglab.link.audio",
+    "version": "0.1.0",
+    "protocolVersion": 1,
+    "name": "音频",
+    "publisher": "DG-LAB Link",
+    "license": "AGPL-3.0-only",
+    "executable": "dg-lab-link-audio.exe"
+}

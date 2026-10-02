@@ -1,0 +1,9 @@
+{
+    "id": "example.pulse-source",
+    "version": "1.0.0",
+    "protocolVersion": 1,
+    "name": "示例波形输入源",
+    "publisher": "DG-LAB Link SDK Example",
+    "license": "AGPL-3.0-only",
+    "executable": "pulse-source.exe"
+}
