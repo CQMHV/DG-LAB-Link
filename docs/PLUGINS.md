@@ -12,7 +12,7 @@ DG-LAB Link 以插件包、输入源实例和通道绑定组织输入源。固�
 {
     "id": "example.pulse-source",
     "version": "1.0.0",
-    "protocolVersion": 1,
+    "protocolVersion": 2,
     "name": "示例输入源",
     "publisher": "Example Developer",
     "license": "AGPL-3.0-only",
@@ -26,7 +26,7 @@ DG-LAB Link 以插件包、输入源实例和通道绑定组织输入源。固�
 
 一个包可创建多个实例；每个实例有独立进程、配置和数据目录。最多同时运行 32 个实例，注册表最多保留 128 个实例，全局最多 64 个输出通道绑定。core 重启只加载实例定义；首次使用、打开插件界面或显式启动时才运行插件。插件异常退出不自动重启，故障只影响其绑定。
 
-更新先停止关联实例，使用新版本的 `migrate` 将旧配置迁移并校验，通过后一次提交包和配置。失败保留旧包、旧配置；设备输出不自动恢复。卸载默认保留实例定义、配置和数据，重新安装相同 ID 可继续使用；显式删除数据同时清除实例。首次初始化才创建预装包和默认实例；用户卸载预装包后不会在下次启动时自动安装。
+更新先锁定包生命周期和关联实例集合，再停止关联实例，使用新版本的 `migrate` 将旧配置迁移并校验，通过后一次提交包和配置。期间创建、启动、删除和使用该包实例返回 `plugin_busy`，不能混用旧进程与新包目录。失败保留旧包、旧配置；设备输出不自动恢复。卸载先隔离包目录，失败恢复目录和注册表并允许重试。卸载默认保留实例定义、配置和数据，重新安装相同 ID 可继续使用；显式删除数据同时清除实例。首次初始化才创建预装包和默认实例；用户卸载预装包后不会在下次启动时自动安装。
 
 插件进程不是核心持有者。core 正常退出时并行通知插件关闭，随后终止超时子进程；Windows Job Object 在核心异常退出时收回插件子进程树。普通设备停止仅停止设备输出，插件采集和界面仍继续工作。
 
@@ -35,12 +35,12 @@ DG-LAB Link 以插件包、输入源实例和通道绑定组织输入源。固�
 SDK 位于 `crates/plugin-sdk`，包名 `dg-lab-link-plugin-sdk`。协议与语言无关，可以自行实现，不要求使用 Rust。stdin/stdout 专用于私有 IPC，日志写 stderr。消息为 **4 字节 little-endian 无符号长度 + UTF-8 JSON**，单条上限 1 MiB，禁止输出普通文本到 stdout。
 
 ```json
-{"type":"request","id":1,"method":"ui","params":{"surface":"control","bindingId":"device/a"}}
+{"type":"request","id":1,"method":"ui","operation_epoch":4,"params":{"surface":"control","bindingId":"<不透明绑定 UUID>"}}
 {"type":"response","id":1,"result":{"title":"控制","nodes":[]},"error":null}
-{"type":"notification","method":"frame","params":{"bindingId":"device/a","generation":3,"sequence":7,"frame":{"samples":[{"frequency":100,"pulseIntensity":20},{"frequency":100,"pulseIntensity":20},{"frequency":100,"pulseIntensity":20},{"frequency":100,"pulseIntensity":20}]}}}
+{"type":"notification","method":"frame","operation_epoch":null,"params":{"bindingId":"<不透明绑定 UUID>","generation":3,"sequence":7,"frame":{"samples":[{"frequency":100,"pulseIntensity":20},{"frequency":100,"pulseIntensity":20},{"frequency":100,"pulseIntensity":20},{"frequency":100,"pulseIntensity":20}]}}}
 ```
 
-请求和响应可以由任一侧发出，`id` 只在发起方范围内唯一。错误保持 `{code,message}`。core 请求方法如下：
+请求和响应可以由任一侧发出，`id` 只在发起方范围内唯一。错误保持 `{code,message}`。版本 2 的请求和通知带可空 `operation_epoch`；SDK 为每次动作／输入保留宿主给出的上下文，异步克隆不会自动更新。`bindingId` 为不透明 UUID，不可由设备和通道拼接；换源后旧 ID 不再有效。core 请求方法如下：
 
 | 方法 | 参数与行为 |
 | --- | --- |
@@ -62,20 +62,40 @@ core 校验绑定归属、通道代次、进程身份与递增序列号，保存
 插件通过 `context.business_call` 发出 `core.call`，参数为公开类型化业务命令，和 GUI、CLI、两种 MCP 调用同一个 `ControlService`：
 
 ```json
-{"type":"request","id":8,"method":"core.call","params":{"command":"get_hub_snapshot"}}
+{"type":"request","id":8,"method":"core.call","operation_epoch":4,"params":{"command":"get_hub_snapshot"}}
 ```
 
 设备写操作必须给出明确设备 ID。`clear_device_channel` 清空指定通道的旧波形，保留基础强度与输出活动，返回 `{bindingId,generation}`；该结果表示宿主已隔离旧帧并排队清理，不代表设备 RPC 已确认。插件不能绕过领域校验或直接获取 Relay/GATT 句柄；它可调用所有公开核心业务能力，第一方没有额外权限。同实例正在处理界面或配置时，重入该实例返回 `queue_busy`，不等待形成 RPC 死锁。
 
+停止会撤销旧操作上下文。旧动作／输入派生的异步 `core.call` 若会恢复输出、连接或调整强度，返回 `queue_busy`，不得自动重试。长期插件 HTTP 服务或采集服务应在**新的外部业务事件到达时**调用 `context.begin_operation().await?`，取得新的上下文副本，再将其传入该事件的异步任务。原上下文不改变；禁止为了重试停止前的旧任务而调用此方法。私有 `core.begin_operation` 参数为 `null`，返回 `{"operationEpoch":4}`，与反向业务请求共用容量和超时。单纯读取状态和普通通道清理不要求可恢复活动的上下文。
+
+实例和绑定配置分别拥有 `revision`。公共 `set_source_config` 必须带当前 `expectedRevision`；冲突返回 `config_conflict`，不会启动插件或应用陈旧值。成功保存递增版本；新绑定从零开始，包配置迁移也递增实例版本。`source_action` 的 `configure`／`configure_binding` 名称为宿主保留入口；配置须使用公共事务命令，不能通过离散动作绕过版本检查。插件收到的私有 `configure`／`configure_binding` 校验和回滚流程保持一致。
+
+实现逐通道配置的插件还需在私有 `action` 方法中处理以下 `ActionParams`；宿主先以 `validateOnly:true` 校验，再以 `false` 应用，失败时用同一形状重新应用旧配置。验证阶段不得改变运行状态，应用阶段按 `bindingId` 更新该通道。下例只展示消息形状，`config` 必须符合目标插件的配置格式。未实现此能力的插件可返回 `unsupported_action`；SDK 的 `pulse-source` 示例和 Rust 模板只实现实例配置，音频插件提供通道配置实现。
+
+宿主在整个绑定事务（包括 Hub 提交）中持有同一个实例锁和会话。并发停止返回 `queue_busy`；应用或提交失败在原会话内回滚，恢复失败停止该实例并报告 `rollback_failed`，不会为回滚重新创建进程。
+
+```json
+{
+    "action": "configure_binding",
+    "bindingId": "<不透明绑定 UUID>",
+    "value": {
+        "bindingId": "<同一绑定 UUID>",
+        "config": { "gain": 1.0 },
+        "validateOnly": true
+    }
+}
+```
+
 ## 语义界面
 
-所有控件向全部插件公开，GUI 统一渲染，不执行插件 HTML、JavaScript 或 CSS。文档为 `{title,nodes,actions,revision}`；节点为 `{id,type,label?,value?,configKey?,action?,input?,props,children}`，节点 ID 必须唯一。最多 512 个节点、16 层、128 个动作。配置草稿由 GUI 保存，提交时调用配置事务；刷新不会覆盖正在编辑的值。
+所有控件向全部插件公开，GUI 统一渲染，不执行插件 HTML、JavaScript 或 CSS。文档为 `{title,nodes,actions,revision}`；节点为 `{id,type,label?,value?,configKey?,action?,input?,props,children}`，节点 ID 必须唯一。最多 512 个节点、16 层、128 个动作。配置草稿由 GUI 保存，提交时携带最初读取的配置版本；刷新不会覆盖正在编辑的值，冲突时显示重新加载入口。静态 UI 读取按实例有界排队，GUI 合并相同读取并按 source／surface／binding／revision 缓存；离散写操作不自动重试。
 
 公共节点类型包括 `page/section/stack/group/form/list`、`text/status/key_value/progress/divider`、`button/switch/text_field/integer_field/number_field/select/slider`，以及 `xy_pad/grid/audio_player/meter/curve/waveform_picker/file_field`。
 
-`props` 声明控件属性，例如 slider 的 `min/max/step`、select 的选项、曲线的坐标点和触控板的布局。`configKey` 指定配置字段，`action` 指定提交或离散动作，`input` 指定持续输入动作。动作描述包含 `{id,label,description,paramsSchema}`，CLI/MCP 可先读取描述，再经统一 `source_action` 调用。`bindingId` 将通道面板与设备通道关联，配置页面使用实例上下文。文件选择返回绝对路径。
+`props` 声明控件属性，例如 slider 的 `min/max/step`、select 的选项、曲线的坐标点和触控板的布局。`configKey` 指定配置字段，`action` 指定提交或离散动作，`input` 指定持续输入动作。动作描述包含 `{id,label,description,paramsSchema}`，CLI/MCP 可先读取描述；`configure` 表单提交经带 `expectedRevision` 的 `set_source_config`，其他离散动作经 `source_action`。`bindingId` 将通道面板与设备通道关联，配置页面使用实例上下文。文件选择返回绝对路径。
 
-首版控件契约如下；所有节点都可用 `props.disabled` 禁用交互。字段置于 `form` 中时通过 `configKey` 更新表单草稿；字段置于表单外时把新值交给其 `action`。配置字段名是当前对象的直接键，不解析点分隔路径。
+首版控件契约如下；所有节点都可用 `props.disabled` 禁用交互，容器和表单的禁用状态向子控件及提交按钮传播。字段置于 `form` 中时通过 `configKey` 更新表单草稿；字段置于表单外时把新值交给其 `action`。配置字段名是当前对象的直接键，不解析点分隔路径。离散动作参数和配置允许任意 JSON 值，具体语义由插件 Schema 和校验决定。
 
 | 节点 | `value` 与公开 `props` |
 | --- | --- |
@@ -106,7 +126,37 @@ cargo run -p dg-lab-link-plugin-runtime --bin dg-lab-link-plugin-pack -- tmp/exa
 
 在“输入源 → 插件管理”选择该包安装，再创建输入源实例并将设备 A/B 通道绑定到实例。也可经 CLI 类型化 `call` 调用 `install_plugin`、`create_source`、`set_device_channel_source` 等命令；GUI、CLI、HTTP MCP、stdio MCP 共用相同命令与状态。
 
+打包输出必须位于输入目录之外，包含 Windows 路径别名、大小写与符号链接解析后的实际路径检查。打包先写同级临时文件，完成后原子发布；失败不会截断输入清单、入口 exe 或已有输出包。宿主与 SDK 协议必须匹配；版本 1 包需修改清单并使用版本 2 SDK 重建。已经安装版本 1 包的配置目录按下节重新建立，不能直接原地更新。
+
 独立 Rust 项目模板在 `crates/plugin-sdk/templates/rust`。可在仓库内直接执行 `cargo build --manifest-path crates/plugin-sdk/templates/rust/Cargo.toml --release`。复制到其他目录后修改 `dg-lab-link-plugin-sdk` 的路径依赖，修改清单 ID、发布者和入口，并将编译后的 `custom-source.exe` 与清单放在同一打包目录。SDK 与示例遵循本项目 AGPL-3.0-only；插件自己的许可证由清单声明，第三方开发者自行选择是否复用 SDK 或独立实现公开协议。
+
+## 破坏性升级
+
+协议版本 2 不兼容旧 profile 中登记的版本 1 插件。core 在启动时校验插件注册表，遇到版本 1 清单会拒绝启动，因此无法在该 profile 中执行 `plugins update`。先退出旧 GUI、CLI 和 MCP 会话，备份整个旧配置目录，再在新的空 profile 安装版本 2 包、重新创建实例和设备绑定。不要直接复制旧 `registry.json`，也不要只修改旧包的协议数字而继续使用版本 1 exe。
+
+CLI 的全局 `--config-dir` 显式指定 profile。例如在仓库根目录，完成上述版本 2 SDK 示例构建和打包后：
+
+```powershell
+$cli = '.\src-tauri\target\release\dg-lab-link-cli.exe'
+$profile = Join-Path $env:APPDATA 'cn.dglab.link.v2'
+$holder = & $cli --config-dir $profile serve --background --json | ConvertFrom-Json
+& $cli --config-dir $profile plugins install .\tmp\example-source.dglabplugin --json
+$source = & $cli --config-dir $profile sources create example.pulse-source --name '恢复的示例实例' --json | ConvertFrom-Json
+# 旧配置应先整理成符合新插件格式的 JSON，通过公共事务恢复
+$instance = & $cli --config-dir $profile sources list --json | ConvertFrom-Json | Where-Object id -EQ $source.id
+& $cli --config-dir $profile sources config $source.id --expected-revision $instance.revision --file .\restored-config.json --json
+& $cli --config-dir $profile connections connect --transport v4 --json
+& $cli --config-dir $profile connections pairing ws-v4 --json
+# 完成 App 配对后读取新设备 controlId，再重新建立通道绑定
+& $cli --config-dir $profile devices --json
+$device = '<新 devices 返回的 controlId>'
+& $cli --config-dir $profile sources bind --device $device --channel a $source.id --json
+& $cli --config-dir $profile sources bind --device $device --channel b $source.id --json
+& $cli --config-dir $profile mcp config --transport stdio --json
+& $cli --config-dir $profile holders release $holder.holderId --json
+```
+
+新 profile 必须是未使用过的目录；旧 core 未退出时，新 profile 的默认端口也可能被占用。MCP 使用 `--config-dir` 指定同一目录，或采用上述 `mcp config` 返回的命令与参数。GUI 当前固定使用默认目录（Windows 为 `%APPDATA%/cn.dglab.link`），没有 profile 启动参数；需要继续使用 GUI 时，备份并移走旧默认目录，再启动新版 GUI 创建新的默认 profile，CLI/MCP 随后使用默认目录。插件数据和配置的恢复需由用户明确处理并经新插件校验，旧实例 ID、绑定 ID 和活动输出不自动恢复。
 
 ## 依赖与验证
 

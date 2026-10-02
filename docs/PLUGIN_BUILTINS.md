@@ -13,7 +13,7 @@
 
 实例配置为原有 `TouchConfig`：自由与律动模式、通道分配、网格、坐标轴、强度渐变、映射曲线、快捷波形和背景波形。默认波形跟随插件编译，无网络运行依赖。
 
-公共持续输入动作 `update_touch_input` 接收 `bindingId`、`owner`、单调 `sequence` 及 `value.pointers`。输入身份及一秒租期由插件管理；不同通道绑定拥有独立租期。释放、取消或租期到期后停止触点波形，按配置继续背景波形。兼容动作接收原有 `TouchInput`，可同时控制设备双通道。
+公共持续输入动作 `update_touch_input` 必须接收 `bindingId`、`owner`、单调 `sequence` 及 `value.pointers`；每次调用明确针对一个通道绑定。输入身份及一秒租期由插件管理；不同通道绑定拥有独立租期。释放、取消或租期到期后停止触点波形，按配置继续背景波形。配置使用带版本校验的公共 `set_source_config`，不提供绕过持久事务的配置动作。
 
 每个设备通道的播放游标和映射独立。普通停止更新绑定活动状态与代次，只撤销该绑定旧触点，不停用实例。重新启动需要新的有效触点输入。触点身份、波形格、释放及租期变化通过公共 `clear_device_channel` 清理该路旧队列；每绑定一个在途清理，其他路继续。失败记录 `inputErrors`，不自动重发。状态发布 `touchConfig`。
 
@@ -21,11 +21,11 @@
 
 实例初始为空对象，保持 idle；创建实例不打开麦克风或桌面采集。可设置 `defaultChannelConfig` 作为新通道的默认映射，绑定配置采用原有 `AudioChannelConfig`。
 
-`audio_control` 动作接受原有 `AudioAction`，包括本地音频／视频音轨、麦克风、录音、Windows 桌面回环、播放／暂停／停止／定位、录音保存及循环和扬声器选项。相对音频或录音路径在插件入口转为绝对路径。
+`audio_control` 动作接受原有 `AudioAction`，包括本地音频／视频音轨、麦克风、录音、Windows 桌面回环、播放／暂停／停止／定位、录音保存及循环和扬声器选项。相对音频或录音路径以插件可执行文件所在目录为基准，在插件入口转为绝对路径；CLI/MCP 应直接提供绝对路径，不以调用者工作目录推断。
 
 采集、解码及音频输出在独立工作线程运行。控制队列与 PCM 队列有界，FFT 特征采用最新值，超过 500ms 的特征不复用；每帧由四个 25ms 窗口的 RMS 与 Hann 窗 FFT 生成。每个通道独立保存自适应和映射状态。
 
-`configure_binding` 与兼容 `set_audio_config` 支持通道配置；`validateOnly` 只校验，不更改运行状态。状态发布 `audio` 和 `audioBindings`。普通设备停止不关闭音频采集或播放；显式音频停止动作与核心退出分别负责停止和清理音频资源。
+通道配置经带 `bindingId` 和 `expectedRevision` 的公共 `set_source_config` 完成；宿主内部调用 `configure_binding`，`validateOnly` 只校验，不更改运行状态。状态发布 `audio` 和 `audioBindings`。普通设备停止不关闭音频采集或播放；显式音频停止动作与核心退出分别负责停止和清理音频资源。
 
 ## 界面与测试
 

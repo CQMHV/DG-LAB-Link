@@ -9,13 +9,13 @@
 - GUI、`dg-lab-link-cli`、stdio MCP 和 Streamable HTTP MCP 使用同一 `ControlService`、Hub、波形库、配置校验和安全停止链路。两种 MCP 传输由 `dg-lab-link-mcp` 提供；HTTP 仅监听本机，使用随机 Bearer 令牌。
 - GUI 进程、常驻 CLI、一次性 CLI 和 stdio MCP 进程持有核心；最后一个持有者退出后安全清理并关闭核心。缩到托盘继续持有，独立设备窗口不增加持有者；HTTP MCP 请求本身不持有核心。
 - 同时连接 Socket V4、Socket V3 Relay 和多台郊狼 3.0 BLE；WS 各一条连接，Windows 直接蓝牙可扫描、初始化和按设备配置参数，V3 与 V4 独立配对。见 [传输接入说明](docs/TRANSPORTS.md)。
-- 同步多个 APP 下的全部设备槽位、强度和通道状态；按设备独立开始和停止输出，同时输出最多 32 台。
+- Socket V4 同步多个 APP 下的全部设备槽位、强度和通道状态；按设备独立开始和停止输出，同时输出最多 32 台。
 - 可选开启“同步所有设备”，在设备页明确选择基准设备后对齐所有在线设备的 A/B 强度，并在后续调整中保持相同目标值；默认关闭。
 - 固定波形由核心提供；触控和音频改为预装原生插件。第三方可制作 `.dglabplugin` 本地安装包，创建多个独立输入源实例，与预装插件使用同一协议、业务接口和语义控件。见 [插件开发与安装](docs/PLUGINS.md)。
-- 触控模式支持自由坐标面板、八个波形快捷格、2×2 / 3×3 / 4×4 律动网格，坐标轴交换、经典曲线、渐变强度和背景波形。控制台的 A/B 面板位于各自通道内，可同时独立触控；未指定通道的外部输入支持 A / B / 同步 / 分离 / 交替路由。鼠标、触屏和笔共用 Pointer Events；松手或触控租期到期会清理目标通道旧波形，基础强度保留。配置保存在本地。
+- 触控模式支持自由坐标面板、八个波形快捷格、2×2 / 3×3 / 4×4 律动网格，坐标轴交换、经典曲线、渐变强度和背景波形。控制台的 A/B 面板位于各自通道内，可同时独立触控；外部输入通过公共 `source_input` 明确指定通道的 `bindingId`。鼠标、触屏和笔共用 Pointer Events；松手或触控租期到期会清理目标通道旧波形，基础强度保留。配置保存在本地。
 - 音频模式支持本地音频与视频音轨播放、循环、扬声器开关、实时麦克风、录音回放与 WAV 保存。视频支持 MP4、M4V、MOV、MKV、WebM，自动选择默认的可解码音轨；默认编码不受支持时选择第一条可解码音轨。支持 AAC、MP3、FLAC、ALAC、PCM、Vorbis 等音轨，暂不支持 Opus、AC-3/E-AC-3；无音轨或不支持的编码会显示错误。音量映射相对波形强度，指定频段的频谱峰值映射输出周期；每台设备的 A/B 可独立选择音频声道、增益、固定或自适应阈值、迟滞、频段和映射曲线。录音期间只保存声音，回放时产生波形。导入音轨最多一小时，视频文件上限 2 GB，压缩音频文件上限 200 MB；WAV 允许一小时录音对应的有界 PCM 容量。音频采集、播放、分析在 Rust 工作线程运行。浏览器开发预览只演示界面状态，实际声音功能在桌面端运行。
 - 音频源还提供第四种“桌面音频”模式，在 Windows 上监听默认播放设备的系统声音并共用现有通道映射。静音期间清除旧特征并保持监听，声音恢复后自动继续；多声道的其他声道混入左右两路。点击“停止桌面监听”、切换声音模式、显式停止插件或退出都会清理采集；更换默认播放设备或设备失效会停止并提示重新开启。桌面采集不会把声音再次播放或自动保存录音。
-- 输入源页面可设置新接入设备 A/B 共用的默认输入源，也可选择“每次询问”而不自动分配；每台设备可在自己的仪表盘标签中分别选择 A、B 通道输入源，也可开启 A/B 源同步。开启后两路立即重置为当前默认源，之后修改任一路都会同步到另一路。固定波形游标和音频映射按设备通道独立维护，触控按绑定维护触点与路由。控制台可直接切换控制焦点，或将任意标签拉出为一台设备一个独立窗口，切换和关闭设备窗口都不会停止其他设备。
+- 设置页面可设置新接入设备 A/B 共用的默认输入源，也可选择“每次询问”而不自动分配；每台设备可在自己的仪表盘标签中分别选择 A、B 通道输入源，也可开启 A/B 源同步。开启后两路立即重置为当前默认源，之后修改任一路都会同步到另一路。固定波形游标和音频映射按设备通道独立维护，触控按绑定维护触点。控制台可直接切换窗口本地焦点，或将任意标签拉出为一台设备一个独立窗口，切换和关闭设备窗口都不会停止其他设备。
 - 支持输出启停与可选的连接超时自动断开（默认关闭，默认时长 60 分钟）；每条连接独立计时，到期只停止所属设备并断开该连接。A/B 通道强度上限以设备通过协议上报的数值为准，连接超时与手机反向控制设置会持久保存。
 - 普通停止清空目标设备波形并保留基础强度，不停止插件、音频采集或播放。断开清理输出，最后持有者退出清理全部链路并归零。
 - 黑金 DG-LAB 风格控制台，包含输入源、设备、运行记录和设置页面。设备页提供多协议设备总览，连接与蓝牙发现统一从“添加设备”或“管理连接”进入；底部操作栏管理当前设备输出，输入源页面分为“我的输入源”和“插件管理”。布局和验证记录见 [UI 验收报告](docs/UI_REDESIGN_QA.md)。
@@ -52,7 +52,7 @@ cargo build -p dg-lab-link-core-server -p dg-lab-link-cli -p dg-lab-link-mcp -p 
 ```powershell
 $cli = ".\src-tauri\target\debug\dg-lab-link-cli.exe"
 $holder = & $cli serve --background --json | ConvertFrom-Json
-& $cli relay connect --json
+& $cli connections connect --transport v4 --json
 & $cli watch
 # Ctrl+C 结束 watch，后台持有者仍保持核心
 & $cli holders release $holder.holderId --json
@@ -103,8 +103,8 @@ npm run build:client
 npm run build:simulator
 npm run check:waveforms
 cargo fmt --all -- --check
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --features dg-lab-link-plugin-runtime/test-fixtures
+cargo clippy --workspace --all-targets --features dg-lab-link-plugin-runtime/test-fixtures -- -D warnings
 ```
 
 `npm run build` 是 `build:client` 的别名。`npm run build:headless` 联合构建调试 core、CLI、MCP 和预装插件包，`npm run build:headless:release` 构建相同的生产程序及插件包；`build:cli`、`build:cli:release` 分别是上述命令的别名。内置波形提交在 `shared/official-waveforms.json` 中；只有更新波形依赖时才需要运行 `npm run generate:waveforms`，Rust 构建不需要 Node.js。
@@ -119,7 +119,7 @@ npm run tauri -- build
 
 架构边界见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，连接真实设备前请逐项执行 [docs/REAL_DEVICE_CHECKLIST.md](docs/REAL_DEVICE_CHECKLIST.md)。
 
-共享核心的历史验证见 [CLI/MCP 验证记录](docs/CLI_MCP_TEST_REPORT.md)；插件化本次验证与未验证项见 [插件验收记录](docs/PLUGIN_ACCEPTANCE.md)。
+共享核心的历史验证见 [CLI/MCP 验证记录](docs/CLI_MCP_TEST_REPORT.md)和[插件验收记录](docs/PLUGIN_ACCEPTANCE.md)；当前架构重整、接口变更和未验证项见 [架构验收记录](docs/ARCHITECTURE_ACCEPTANCE.md)。
 
 ## 协议说明
 

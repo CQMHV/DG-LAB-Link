@@ -10,7 +10,7 @@
 
 开启郊狼 3.0 并断开手机 APP 的蓝牙连接后，点击“扫描蓝牙设备”，选择结果中的设备连接。扫描只更新发现结果，不自动连接或开启输出。蓝牙不可用、权限不足或初始化失败时显示错误，WS 会话可继续运行。
 
-新连接设备完成初始化后出现在设备列表，可在仪表盘标签页或独立窗口使用同一套强度、输入源、触控、音频与输出控件。蓝牙设备卡片的“蓝牙参数”提供软上限、频率平衡、强度平衡及受固件支持限制的旋钮保护配置。参数成功下发后持久保存；失败时由核心恢复旧配置，恢复失败则停止该设备并报告错误。
+新连接设备完成初始化后出现在设备列表，可在仪表盘标签页或独立窗口使用同一套强度、输入源插件与输出控件；触控、音频等界面由插件提供。设备焦点只保存在各自窗口中，CLI/MCP 不切换 GUI 焦点。蓝牙设备卡片的“蓝牙参数”提供软上限、频率平衡、强度平衡及受固件支持限制的旋钮保护配置。参数成功下发后持久保存；失败时由核心恢复旧配置，恢复失败则停止该设备并报告错误。
 
 手机反向控制设置只作用于 Socket V4／V3。蓝牙直连始终接纳 B1 中的实际强度，包括实体旋钮调整；关闭全设备同步时只影响自身，开启时沿用显式基准设备的同步规则。
 
@@ -31,7 +31,7 @@ $holder = & $cli serve --background --json | ConvertFrom-Json
 & $cli devices --json
 ```
 
-`connections connect` 默认 V4。旧的 `relay connect`、`relay disconnect` 和 `pairing` 仍只操作 V4；断开 V4 不影响 V3 或蓝牙。默认 V3 端点为 `wss://ws.dungeon-lab.cn/`。
+`connections connect` 默认 V4。连接管理统一使用 `connections`，断开和刷新配对显式指定 `connectionId`；断开 V4 不影响 V3 或蓝牙。默认 V3 端点为 `wss://ws.dungeon-lab.cn/`。
 
 ```powershell
 # 只断开 V3，然后持久保存自定义 Relay 端点
@@ -42,15 +42,18 @@ $holder = & $cli serve --background --json | ConvertFrom-Json
 & $cli connections pairing ws-v3 --refresh --json
 ```
 
-也可使用 `connections connect --transport v3 --endpoint <url>`。`connections list` 返回 `connectionId`、`transport`、连接状态、端点和配对信息；`status`／`watch` 快照新增 `connections`、`bluetooth` 和每台设备的连接来源、能力、初始化及参数状态。旧 `connection` 字段继续表示 V4。
+也可使用 `connections connect --transport v3 --endpoint <url>`。`connections list` 返回 `connectionId`、`transport`、连接状态、端点和配对信息；`status`／`watch` 快照使用 `connections` 和 `devices` 数组，包含 `bluetooth` 发现结果、设备连接来源、能力、初始化及参数状态。快照不包含当前 GUI 焦点或单设备投影。
 
-三种标识用途不同，不能互换：
+连接、设备和输入源绑定的标识用途不同，不能互换：
 
 | 标识 | 来源 | 用途 |
 | --- | --- | --- |
 | `connectionId` | `connections list`、快照 `connections` | 断开连接、刷新 WS 配对 |
 | 蓝牙发现 `deviceId` | `bluetooth scan`、快照 `bluetooth` | 首次或重新连接蓝牙设备 |
 | 设备 `controlId` | `devices`、快照 `devices` | 强度、输出、输入源、同步、蓝牙断开及参数配置 |
+| 输入源 `bindingId` | 快照 `devices[].bindingIdA/B`、`sourceBindings[].bindingId` | 指定通道的插件 UI、配置、动作和持续输入 |
+
+`bindingId` 是核心生成的 UUID，应原样使用，不从 `controlId` 和通道推断。替换输入源或重新绑定后读取新 ID。实例配置使用 `sources config <sourceId> --expected-revision <实例 revision>`；带 `--binding <bindingId>` 时必须使用对应 `sourceBindings` 条目的 `revision`。配置可以是任意 JSON，具体格式由插件校验；触控和音频操作使用同一套 `sources action/input`，示例见 [CLI 与本机 MCP](CLI_MCP.md)。
 
 ```powershell
 & $cli bluetooth scan --duration-ms 3000 --json
@@ -95,7 +98,7 @@ $device = "<蓝牙设备的 controlId>"
 
 ## MCP 与状态解释
 
-两种 MCP 传输开放相同的业务工具和参数 Schema。新增工具为 `get_connections`、`connect_transport`、`disconnect_connection`、`refresh_connection_pairing`、`set_relay_endpoint`、`scan_bluetooth`、`connect_bluetooth`、`disconnect_bluetooth`、`get_bluetooth_config` 和 `set_bluetooth_config`；现有强度、波形、触控、音频和停止工具适用于所有设备。
+两种 MCP 传输开放相同的业务工具和参数 Schema。连接工具为 `get_connections`、`connect_transport`、`disconnect_connection`、`refresh_connection_pairing`、`set_relay_endpoint`、`scan_bluetooth`、`connect_bluetooth`、`disconnect_bluetooth`、`get_bluetooth_config` 和 `set_bluetooth_config`；强度、固定波形和停止工具适用于所有设备，插件操作统一使用 `get_source_ui`、`set_source_config`、`source_action` 和 `source_input`。`connect_transport` 使用 `{ "transport": "ws_v4" }` 或 `{ "transport": "ws_v3" }`，蓝牙使用 `connect_bluetooth`。
 
 新增只读资源 `dglab://connections` 返回所有连接，`dglab://bluetooth` 返回最近一次主动扫描结果。读取资源不会触发扫描或连接。`dglab://status`、`dglab://devices`、`dglab://sources` 和 `dglab://logs` 沿用共享数据源。
 
