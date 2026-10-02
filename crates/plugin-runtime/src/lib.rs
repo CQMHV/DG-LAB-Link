@@ -8,6 +8,7 @@ mod process;
 pub use dg_lab_link_plugin_sdk::*;
 pub use frames::LatestFrameStore;
 pub use manager::{
-    InstalledPlugin, PluginManager, PluginRuntimeSnapshot, SourceState, SourceStatus,
+    PluginCatalogSnapshot, PluginManager, PluginRuntimeSnapshot, SourceRuntimeState, SourceState,
+    SourceStatus,
 };
 pub use process::{BusinessFuture, BusinessHandler};

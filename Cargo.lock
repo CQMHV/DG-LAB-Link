@@ -975,7 +975,7 @@ name = "dg-lab-link-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
- "dg-lab-link-core",
+ "dg-lab-link-contracts",
  "dg-lab-link-runtime",
  "serde",
  "serde_json",
@@ -986,10 +986,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "dg-lab-link-contracts"
+version = "0.1.0"
+dependencies = [
+ "dg-lab-link-plugin-sdk",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "uuid",
+]
+
+[[package]]
 name = "dg-lab-link-core"
 version = "0.1.0"
 dependencies = [
  "btleplug",
+ "dg-lab-link-contracts",
  "dg-lab-link-plugin-runtime",
  "dg-lab-link-plugin-sdk",
  "futures-util",
@@ -1022,7 +1035,7 @@ dependencies = [
 name = "dg-lab-link-gui"
 version = "0.1.0"
 dependencies = [
- "dg-lab-link-core",
+ "dg-lab-link-contracts",
  "dg-lab-link-runtime",
  "rfd",
  "serde",
@@ -1039,6 +1052,8 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "clap",
+ "dg-lab-link-builtin-plugins",
+ "dg-lab-link-contracts",
  "dg-lab-link-core",
  "dg-lab-link-plugin-runtime",
  "dg-lab-link-runtime",
@@ -1091,6 +1106,8 @@ name = "dg-lab-link-runtime"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "dg-lab-link-builtin-plugins",
+ "dg-lab-link-contracts",
  "dg-lab-link-core",
  "dirs 6.0.0",
  "futures-util",

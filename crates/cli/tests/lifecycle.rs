@@ -182,7 +182,27 @@ fn concurrent_background_holders_share_core_and_release_individually() {
     assert_eq!(first["runtime"]["pid"], second["runtime"]["pid"]);
 
     let status = value(run(directory, &["status"]));
-    assert_eq!(status["connection"]["state"], "disconnected");
+    let connections = status["connections"].as_array().unwrap();
+    assert_eq!(connections.len(), 2);
+    for id in ["ws-v4", "ws-v3"] {
+        let connection = connections
+            .iter()
+            .find(|connection| connection["connectionId"] == id)
+            .expect("both WebSocket transports appear in the shared snapshot");
+        assert_eq!(connection["state"], "disconnected");
+    }
+    for retired in [
+        "connection",
+        "device",
+        "channels",
+        "inputModes",
+        "selectedDeviceId",
+    ] {
+        assert!(
+            status.get(retired).is_none(),
+            "retired snapshot projection {retired}"
+        );
+    }
     assert_eq!(status["outputDeviceCount"], 0);
     let secret_free = value(run(directory, &["mcp", "config"]));
     assert!(!secret_free.to_string().contains(&config.token));
@@ -199,8 +219,8 @@ fn concurrent_background_holders_share_core_and_release_individually() {
     assert_eq!(changed_config.token, config.token);
     // Changing only the separate HTTP listener does not reconnect or stop the core.
     assert_eq!(
-        value(run(directory, &["status"]))["connection"]["state"],
-        "disconnected"
+        value(run(directory, &["status"]))["connections"],
+        status["connections"]
     );
 
     let rejected = run(directory, &["call", "get_app_preferences"]);

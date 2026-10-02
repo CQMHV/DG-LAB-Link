@@ -50,6 +50,7 @@ impl NativePlugin {
                 id,
                 method: method.to_owned(),
                 params,
+                operation_epoch: Some(0),
             },
         )
         .await
@@ -63,7 +64,9 @@ impl NativePlugin {
                 } if response_id == id => {
                     return error.map_or(Ok(result), |error| Err(error.code));
                 }
-                Message::Request { id, method, params } => {
+                Message::Request {
+                    id, method, params, ..
+                } => {
                     self.core_requests.push_back((id, method, params));
                 }
                 _ => {}
@@ -73,7 +76,7 @@ impl NativePlugin {
 
     async fn initialize(&mut self, plugin_id: &str) -> Value {
         self.call("initialize",json!({
-            "protocolVersion":1,
+            "protocolVersion":dg_lab_link_plugin_sdk::PROTOCOL_VERSION,
             "source":{"id":"source-test","pluginId":plugin_id,"name":"test","enabled":true,"config":{}},
             "dataDirectory":std::env::temp_dir().to_string_lossy(),
         })).await.unwrap()
@@ -84,7 +87,9 @@ impl NativePlugin {
             let request = match self.core_requests.pop_front() {
                 Some(request) => Some(request),
                 None => match self.message().await {
-                    Message::Request { id, method, params } => Some((id, method, params)),
+                    Message::Request {
+                        id, method, params, ..
+                    } => Some((id, method, params)),
                     _ => None,
                 },
             };
@@ -149,7 +154,7 @@ async fn touch_native_process_has_independent_channel_leases_and_emits_frames() 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     while seen.len() < 2 {
         assert!(tokio::time::Instant::now() < deadline);
-        if let Message::Notification { method, params } = plugin.message().await
+        if let Message::Notification { method, params, .. } = plugin.message().await
             && method == "frame"
         {
             let notification: FrameNotification = serde_json::from_value(params).unwrap();
@@ -197,7 +202,7 @@ async fn touch_clear_uses_public_api_preserves_other_channel_and_replacement_con
     // A waits for its own clear response; a slow host never stalls B's tick.
     let mut b_frames = 0;
     while b_frames < 3 {
-        if let Message::Notification { method, params } = plugin.message().await
+        if let Message::Notification { method, params, .. } = plugin.message().await
             && method == "frame"
             && params["bindingId"] == "opaque-b"
         {
@@ -213,7 +218,7 @@ async fn touch_clear_uses_public_api_preserves_other_channel_and_replacement_con
         .unwrap();
     plugin.reply_clear(clear, "opaque-a", 2).await;
     loop {
-        if let Message::Notification { method, params } = plugin.message().await
+        if let Message::Notification { method, params, .. } = plugin.message().await
             && method == "frame"
             && params["bindingId"] == "opaque-a"
             && params["generation"] == 2
@@ -249,7 +254,7 @@ async fn touch_clear_uses_public_api_preserves_other_channel_and_replacement_con
     .await
     .unwrap();
     loop {
-        if let Message::Notification { method, params } = plugin.message().await
+        if let Message::Notification { method, params, .. } = plugin.message().await
             && method == "status"
             && params["inputErrors"]["opaque-a"] == "test clear failure"
         {
@@ -260,7 +265,7 @@ async fn touch_clear_uses_public_api_preserves_other_channel_and_replacement_con
     while b_frames < 3 {
         match plugin.message().await {
             Message::Request { .. } => panic!("failed clear was automatically retried"),
-            Message::Notification { method, params }
+            Message::Notification { method, params, .. }
                 if method == "frame" && params["bindingId"] == "opaque-b" =>
             {
                 b_frames += 1
@@ -306,7 +311,7 @@ async fn audio_native_process_exposes_idle_modes_channel_config_and_decoded_file
         .join("src/sources/audio/testdata/video-aac.mp4");
     plugin.call("action",json!({"action":"audio_control","value":{"action":{"type":"loadFile","path":fixture.to_string_lossy()}}})).await.unwrap();
     loop {
-        if let Message::Notification { method, params } = plugin.message().await
+        if let Message::Notification { method, params, .. } = plugin.message().await
             && method == "status"
             && params["audio"]["fileName"] == "video-aac.mp4"
         {

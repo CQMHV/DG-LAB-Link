@@ -7,7 +7,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message};
@@ -90,6 +90,7 @@ pub enum RelayClientError {
 enum RelayCommand {
     Connect {
         endpoint: String,
+        generation: u64,
         reply: oneshot::Sender<Result<(), RelayClientError>>,
     },
     Disconnect {
@@ -117,16 +118,29 @@ pub struct RelayClientHandle {
     safety_commands: mpsc::Sender<RelayCommand>,
     shutdown: CancellationToken,
     operation_floor: Arc<AtomicU64>,
+    operation_changed: Arc<Notify>,
     wave_floors: WaveFloors,
     device_floors: DeviceFloors,
 }
 
 impl RelayClientHandle {
     pub async fn connect(&self, endpoint: impl Into<String>) -> Result<(), RelayClientError> {
+        self.connect_at(
+            endpoint.into(),
+            self.operation_floor.load(Ordering::Acquire),
+        )
+        .await
+    }
+    pub(crate) async fn connect_at(
+        &self,
+        endpoint: String,
+        generation: u64,
+    ) -> Result<(), RelayClientError> {
         let (reply, response) = oneshot::channel();
         self.commands
             .send(RelayCommand::Connect {
-                endpoint: endpoint.into(),
+                endpoint,
+                generation,
                 reply,
             })
             .await
@@ -136,7 +150,7 @@ impl RelayClientHandle {
 
     pub async fn disconnect(&self) -> Result<(), RelayClientError> {
         let (reply, response) = oneshot::channel();
-        self.commands
+        self.safety_commands
             .send(RelayCommand::Disconnect { reply })
             .await
             .map_err(|_| RelayClientError::Stopped)?;
@@ -270,8 +284,23 @@ impl RelayClientHandle {
         slot_id: &str,
         channel: Channel,
         request: Value,
-        _operation_generation: u64,
+        operation_generation: u64,
     ) -> Result<(), RelayClientError> {
+        self.request_clear_wave_channel(client_id, slot_id, channel, request, operation_generation)?
+            .await
+    }
+
+    pub(crate) fn request_clear_wave_channel(
+        &self,
+        client_id: &str,
+        slot_id: &str,
+        channel: Channel,
+        request: Value,
+        _operation_generation: u64,
+    ) -> Result<
+        impl std::future::Future<Output = Result<(), RelayClientError>> + Send + 'static,
+        RelayClientError,
+    > {
         {
             let mut floors = self
                 .wave_floors
@@ -286,8 +315,7 @@ impl RelayClientHandle {
         }
         // This barrier is narrower than a device stop: strength adjustments and
         // the other channel remain valid even when their generation is older.
-        self.safety_write(client_id.into(), vec![request], None)
-            .await
+        self.request_safety_write(client_id.into(), vec![request], None)
     }
 
     pub async fn safety_stop(
@@ -310,8 +338,26 @@ impl RelayClientHandle {
         requests: Vec<Value>,
         operation_generation: u64,
     ) -> Result<(), RelayClientError> {
-        let client_id = client_id.into();
-        let scope = (client_id.clone(), slot_id.into());
+        self.request_stop_device(
+            client_id.into(),
+            slot_id.into(),
+            requests,
+            operation_generation,
+        )?
+        .await
+    }
+
+    pub(crate) fn request_stop_device(
+        &self,
+        client_id: String,
+        slot_id: String,
+        requests: Vec<Value>,
+        operation_generation: u64,
+    ) -> Result<
+        impl std::future::Future<Output = Result<(), RelayClientError>> + Send + 'static,
+        RelayClientError,
+    > {
+        let scope = (client_id.clone(), slot_id);
         {
             let mut floors = self
                 .device_floors
@@ -323,7 +369,7 @@ impl RelayClientHandle {
             let floor = floors.entry(scope).or_default();
             *floor = (*floor).max(operation_generation);
         }
-        self.safety_write(client_id, requests, None).await
+        self.request_safety_write(client_id, requests, None)
     }
 
     fn message_scope(&self, client_id: &str, data: &Value) -> Option<(DeviceScope, u64)> {
@@ -350,6 +396,19 @@ impl RelayClientHandle {
         requests: Vec<Value>,
         global_generation: Option<u64>,
     ) -> Result<(), RelayClientError> {
+        self.request_safety_write(client_id, requests, global_generation)?
+            .await
+    }
+
+    fn request_safety_write(
+        &self,
+        client_id: String,
+        requests: Vec<Value>,
+        global_generation: Option<u64>,
+    ) -> Result<
+        impl std::future::Future<Output = Result<(), RelayClientError>> + Send + 'static,
+        RelayClientError,
+    > {
         let (reply, response) = oneshot::channel();
         self.safety_commands
             .try_send(RelayCommand::SafetyStop {
@@ -363,10 +422,12 @@ impl RelayClientHandle {
                 mpsc::error::TrySendError::Closed(_) => RelayClientError::Stopped,
             })?;
 
-        timeout(SAFETY_ACK_TIMEOUT, response)
-            .await
-            .map_err(|_| RelayClientError::Transport("等待安全停止写入确认超时".to_owned()))?
-            .map_err(|_| RelayClientError::Stopped)?
+        Ok(async move {
+            timeout(SAFETY_ACK_TIMEOUT, response)
+                .await
+                .map_err(|_| RelayClientError::Transport("等待安全停止写入确认超时".to_owned()))?
+                .map_err(|_| RelayClientError::Stopped)?
+        })
     }
 
     pub fn shutdown_now(&self) {
@@ -378,6 +439,7 @@ impl RelayClientHandle {
             .operation_floor
             .fetch_max(operation_generation, Ordering::AcqRel);
         if operation_generation > previous {
+            self.operation_changed.notify_waiters();
             self.wave_floors
                 .write()
                 .unwrap_or_else(|error| error.into_inner())
@@ -392,6 +454,16 @@ impl RelayClientHandle {
     }
 }
 
+struct RelaySharedState {
+    shutdown: CancellationToken,
+    operation_floor: Arc<AtomicU64>,
+    operation_changed: Arc<Notify>,
+    wave_floors: WaveFloors,
+    device_floors: DeviceFloors,
+}
+
+type PendingConnect = (String, u64, oneshot::Sender<Result<(), RelayClientError>>);
+
 pub fn spawn_relay_client(
     event_sender: mpsc::Sender<RelayEvent>,
     command_capacity: usize,
@@ -400,6 +472,7 @@ pub fn spawn_relay_client(
     let (safety_sender, safety_receiver) = mpsc::channel(SAFETY_COMMAND_CAPACITY);
     let shutdown = CancellationToken::new();
     let operation_floor = Arc::new(AtomicU64::new(0));
+    let operation_changed = Arc::new(Notify::new());
     let wave_floors = Arc::new(RwLock::new(BTreeMap::new()));
     let device_floors = Arc::new(RwLock::new(BTreeMap::new()));
     let handle = RelayClientHandle {
@@ -407,6 +480,7 @@ pub fn spawn_relay_client(
         safety_commands: safety_sender,
         shutdown: shutdown.clone(),
         operation_floor: Arc::clone(&operation_floor),
+        operation_changed: Arc::clone(&operation_changed),
         wave_floors: Arc::clone(&wave_floors),
         device_floors: Arc::clone(&device_floors),
     };
@@ -414,10 +488,13 @@ pub fn spawn_relay_client(
         command_receiver,
         safety_receiver,
         event_sender,
-        shutdown,
-        operation_floor,
-        wave_floors,
-        device_floors,
+        RelaySharedState {
+            shutdown,
+            operation_floor,
+            operation_changed,
+            wave_floors,
+            device_floors,
+        },
     ));
     (handle, task)
 }
@@ -426,6 +503,7 @@ enum SessionExit {
     Disconnected,
     Reconnect {
         endpoint: String,
+        generation: u64,
         reply: oneshot::Sender<Result<(), RelayClientError>>,
     },
     Shutdown,
@@ -435,23 +513,31 @@ async fn run_relay_client(
     mut commands: mpsc::Receiver<RelayCommand>,
     mut safety_commands: mpsc::Receiver<RelayCommand>,
     events: mpsc::Sender<RelayEvent>,
-    shutdown: CancellationToken,
-    operation_floor: Arc<AtomicU64>,
-    wave_floors: WaveFloors,
-    device_floors: DeviceFloors,
+    shared: RelaySharedState,
 ) {
-    let mut pending_connect: Option<(String, oneshot::Sender<Result<(), RelayClientError>>)> = None;
+    let RelaySharedState {
+        shutdown,
+        operation_floor,
+        operation_changed,
+        wave_floors,
+        device_floors,
+    } = shared;
+    let mut pending_connect: Option<PendingConnect> = None;
     let mut minimum_operation_generation = 0_u64;
 
     loop {
-        let (endpoint, reply) = match pending_connect.take() {
+        let (endpoint, generation, reply) = match pending_connect.take() {
             Some(pending) => pending,
             None => match tokio::select! {
                 biased;
                 _ = shutdown.cancelled() => break,
                 command = receive_command(&mut safety_commands, &mut commands) => command,
             } {
-                Some(RelayCommand::Connect { endpoint, reply }) => (endpoint, reply),
+                Some(RelayCommand::Connect {
+                    endpoint,
+                    generation,
+                    reply,
+                }) => (endpoint, generation, reply),
                 Some(RelayCommand::Disconnect { reply }) => {
                     let _ = reply.send(Ok(()));
                     continue;
@@ -483,6 +569,13 @@ async fn run_relay_client(
             },
         };
 
+        let changed = operation_changed.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        if generation < operation_floor.load(Ordering::Acquire) {
+            let _ = reply.send(Err(RelayClientError::Stopped));
+            continue;
+        }
         let endpoint = match validate_endpoint(&endpoint) {
             Ok(endpoint) => endpoint,
             Err(error) => {
@@ -511,6 +604,11 @@ async fn run_relay_client(
             _ = shutdown.cancelled() => {
                 let _ = reply.send(Err(RelayClientError::Stopped));
                 break;
+            }
+            _ = &mut changed => {
+                let _ = reply.send(Err(RelayClientError::Stopped));
+                emit(&events, RelayEvent::Disconnected { reason: "连接请求已失效".into(), retryable: false }).await;
+                continue;
             }
             connection = timeout(CONNECT_TIMEOUT, connect_async(&endpoint)) => connection,
         };
@@ -566,8 +664,12 @@ async fn run_relay_client(
         )
         .await
         {
-            SessionExit::Reconnect { endpoint, reply } => {
-                pending_connect = Some((endpoint, reply));
+            SessionExit::Reconnect {
+                endpoint,
+                generation,
+                reply,
+            } => {
+                pending_connect = Some((endpoint, generation, reply));
             }
             SessionExit::Disconnected => {}
             SessionExit::Shutdown => break,
@@ -676,7 +778,8 @@ async fn run_session(
                         retryable = false;
                         break;
                     }
-                    Some(RelayCommand::Connect { endpoint, reply }) => {
+                    Some(RelayCommand::Connect { endpoint, generation, reply }) => {
+                        if generation < operation_floor.load(Ordering::Acquire) { let _ = reply.send(Err(RelayClientError::Stopped)); continue; }
                         let _ = close_socket(&mut socket).await;
                         emit(
                             events,
@@ -686,7 +789,7 @@ async fn run_session(
                             },
                         )
                         .await;
-                        return SessionExit::Reconnect { endpoint, reply };
+                        return SessionExit::Reconnect { endpoint, generation, reply };
                     }
                     None => {
                         let _ = close_socket(&mut socket).await;

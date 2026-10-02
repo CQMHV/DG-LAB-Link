@@ -4,6 +4,8 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
 import { __emitMockSnapshot, __resetMockBridge, connectBluetooth, getHubSnapshot, scanBluetooth } from "../lib/bridge";
+import { asObject } from "../lib/json";
+import type { AudioSnapshot } from "../lib/contracts";
 import { SafetyActionBar } from "./SafetyActionBar";
 
 beforeEach(() => {
@@ -27,7 +29,7 @@ describe("设备输出操作栏", () => {
     it("普通停止保留强度及音频采集，其他设备继续输出", async () => {
         const initial = await getHubSnapshot();
         initial.devices[0].outputActive = true; initial.devices[1].outputActive = true;
-        initial.outputDeviceCount = 2; initial.inputModes.audio.state = "capturing";
+        initial.outputDeviceCount = 2; (asObject(initial.sources.find((source) => source.id === "source-audio")!.state).audio as AudioSnapshot).state = "capturing";
         __emitMockSnapshot(initial);
         const user = userEvent.setup(); render(<App />);
         await user.click(await screen.findByRole("button", { name: "停止 郊狼 3.0 的波形输出" }));
@@ -36,7 +38,7 @@ describe("设备输出操作栏", () => {
             expect(snapshot.devices[0].outputActive).toBe(false);
             expect(snapshot.devices[1].outputActive).toBe(true);
             expect(snapshot.devices[0].intensityA).toBe(initial.devices[0].intensityA);
-            expect(snapshot.inputModes.audio.state).toBe("capturing");
+            expect((asObject(snapshot.sources.find((source) => source.id === "source-audio")!.state).audio as AudioSnapshot).state).toBe("capturing");
         });
     });
     it("设备详情的键盘导航包含蓝牙参数折叠入口", async () => {

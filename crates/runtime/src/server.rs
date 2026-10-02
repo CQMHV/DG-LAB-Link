@@ -58,24 +58,6 @@ pub(crate) struct Shared {
 #[derive(Clone, Copy)]
 pub(crate) struct CommandEpoch(pub u64);
 
-pub(crate) fn may_resume_output(command: &ControlCommand) -> bool {
-    matches!(
-        command,
-        ControlCommand::StartOutput { .. }
-            | ControlCommand::AdjustIntensity { .. }
-            | ControlCommand::UpdateTouchInput { .. }
-            | ControlCommand::SourceInput { .. }
-            | ControlCommand::AudioControl { .. }
-            | ControlCommand::SetSyncAllDevices { .. }
-            | ControlCommand::ConnectRelay
-            | ControlCommand::RefreshPairing
-            | ControlCommand::ConnectTransport { .. }
-            | ControlCommand::RefreshConnectionPairing { .. }
-            | ControlCommand::ConnectBluetooth { .. }
-            | ControlCommand::SetBluetoothConfig { .. }
-    )
-}
-
 impl Shared {
     fn new(service: ControlService, config: LocalConfig, directory: PathBuf) -> Arc<Self> {
         Arc::new(Self {
@@ -136,8 +118,8 @@ impl Shared {
             &self.normal_requests
         };
         let _permit = semaphore.try_acquire().map_err(|_| busy())?;
-        let gated = command.is_safety() || may_resume_output(&command);
-        let resume = may_resume_output(&command);
+        let gated = command.is_safety() || command.may_resume_output();
+        let resume = command.may_resume_output();
         let mut first_poll = true;
         let mut execution = std::pin::pin!(self.service.execute(command));
         let guarded_execution = std::future::poll_fn(|context| {
@@ -647,7 +629,7 @@ async fn websocket(mut socket: WebSocket, state: Arc<Shared>) {
                 } else {
                     responses.clone()
                 };
-                let epoch = if !safety && may_resume_output(&command) {
+                let epoch = if !safety && command.may_resume_output() {
                     let Some(epoch) = request.command_epoch else {
                         if queue
                             .try_send((
@@ -736,6 +718,7 @@ async fn write_socket(
 ) {
     let mut snapshots = state.service.subscribe();
     let mut epochs = state.epoch_updates.subscribe();
+    let mut catalogue = Vec::new();
     epochs.mark_changed();
     loop {
         let (mut response, close_after) = tokio::select! {
@@ -750,7 +733,11 @@ async fn write_socket(
             outgoing = responses.recv() => match outgoing { Some(outgoing) => outgoing, None => break },
             result = snapshots.changed() => {
                 if result.is_err() { break; }
-                (Response::Snapshot { snapshot: Box::new(snapshots.borrow_and_update().clone()) }, false)
+                {
+                    let mut update = snapshots.borrow_and_update().clone();
+                    let configs = compact_source_configs(&mut update, &mut catalogue);
+                    (Response::Snapshot { snapshot: Box::new(update), configs }, false)
+                }
             },
         };
         if let Response::Result { command_epoch, .. } = &mut response {
@@ -778,6 +765,41 @@ async fn write_socket(
     }
     let _ = timeout(SOCKET_WRITE_TIMEOUT, writer.close()).await;
     cancelled.cancel();
+}
+
+type CatalogueIdentity = Vec<(String, u64, Arc<Value>)>;
+fn compact_source_configs(
+    snapshot: &mut dg_lab_link_contracts::hub::HubSnapshot,
+    previous: &mut CatalogueIdentity,
+) -> Option<BTreeMap<String, Arc<Value>>> {
+    let changed =
+        snapshot.sources.len() != previous.len()
+            || snapshot.sources.iter().zip(previous.iter()).any(
+                |(source, (id, revision, config))| {
+                    &source.id != id
+                        || source.revision != *revision
+                        || !Arc::ptr_eq(&source.config, config)
+                },
+            );
+    let configs = changed.then(|| {
+        snapshot
+            .sources
+            .iter()
+            .map(|source| (source.id.clone(), source.config.clone()))
+            .collect()
+    });
+    if changed {
+        *previous = snapshot
+            .sources
+            .iter()
+            .map(|source| (source.id.clone(), source.revision, source.config.clone()))
+            .collect();
+    }
+    let empty = Arc::new(serde_json::json!({}));
+    for source in &mut snapshot.sources {
+        source.config = empty.clone();
+    }
+    configs
 }
 
 fn busy() -> ControlError {
@@ -921,7 +943,6 @@ impl tokio::io::AsyncWrite for LimitedStream {
 mod tests {
     use super::*;
     use dg_lab_link_core::model::Channel;
-    use dg_lab_link_core::sources::audio::AudioAction;
 
     fn shared() -> (Arc<Shared>, dg_lab_link_core::hub::HubRuntime, PathBuf) {
         let directory = std::env::temp_dir().join(format!("dglab-runtime-test-{}", Uuid::new_v4()));
@@ -933,6 +954,35 @@ mod tests {
             runtime,
             directory,
         )
+    }
+
+    #[test]
+    fn realtime_snapshots_send_source_configuration_only_when_changed() {
+        let (state, _runtime, directory) = shared();
+        let mut full = state.service.snapshot();
+        full.sources[0].config = Arc::new(json!({"large": "x".repeat(500_000)}));
+        let mut catalogue = Vec::new();
+        let mut first = full.clone();
+        let configs = compact_source_configs(&mut first, &mut catalogue).unwrap();
+        assert!(Arc::ptr_eq(
+            &configs[&full.sources[0].id],
+            &full.sources[0].config
+        ));
+        assert!(serde_json::to_vec(&first).unwrap().len() < 10_000);
+        let mut next = full.clone();
+        next.output.frames_sent += 1;
+        assert!(compact_source_configs(&mut next, &mut catalogue).is_none());
+        full.sources[0].revision += 1;
+        full.sources[0].config = Arc::new(json!({"gain":7}));
+        assert_eq!(
+            compact_source_configs(&mut full, &mut catalogue)
+                .unwrap()
+                .values()
+                .next()
+                .unwrap()["gain"],
+            7
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[tokio::test]
@@ -948,27 +998,38 @@ mod tests {
                 channel: Channel::A,
                 delta: 1,
             },
-            ControlCommand::AudioControl {
-                action: AudioAction::Play,
+            ControlCommand::SourceAction {
+                source_id: "plugin".into(),
+                params: dg_lab_link_contracts::ActionParams {
+                    action: "play".into(),
+                    ..Default::default()
+                },
             },
             ControlCommand::SetSyncAllDevices {
                 device_id: "device".to_owned(),
                 enabled: true,
             },
-            ControlCommand::ConnectRelay,
-            ControlCommand::RefreshPairing,
+            ControlCommand::ConnectTransport {
+                transport: dg_lab_link_contracts::transport::TransportKind::WsV4,
+                endpoint: None,
+            },
+            ControlCommand::RefreshConnectionPairing {
+                connection_id: "ws-v4".into(),
+            },
         ] {
             let epoch = state.accept_command(false);
             // A received WS request can remain unpolled in its spawned task.
             let delayed_command = state.execute_received(command, epoch);
             state
-                .execute(ControlCommand::DisconnectRelay)
+                .execute(ControlCommand::DisconnectConnection {
+                    connection_id: "ws-v4".into(),
+                })
                 .await
                 .unwrap();
             assert_eq!(delayed_command.await.unwrap_err().code, "queue_busy");
         }
         assert_eq!(
-            state.service.snapshot().connection.state,
+            state.service.snapshot().connections[0].state,
             dg_lab_link_core::hub::ConnectionState::Disconnected
         );
         state.service.shutdown().await.unwrap();
@@ -997,7 +1058,9 @@ mod tests {
         );
         timeout(
             Duration::from_secs(1),
-            state.execute(ControlCommand::DisconnectRelay),
+            state.execute(ControlCommand::DisconnectConnection {
+                connection_id: "ws-v4".into(),
+            }),
         )
         .await
         .unwrap()

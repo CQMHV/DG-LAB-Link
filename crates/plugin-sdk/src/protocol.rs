@@ -41,6 +41,8 @@ pub enum Message {
         id: u64,
         method: String,
         params: Value,
+        #[serde(default)]
+        operation_epoch: Option<u64>,
     },
     Response {
         id: u64,
@@ -52,6 +54,8 @@ pub enum Message {
     Notification {
         method: String,
         params: Value,
+        #[serde(default)]
+        operation_epoch: Option<u64>,
     },
 }
 
@@ -122,6 +126,7 @@ mod tests {
             id: 7,
             method: "ui".into(),
             params: serde_json::json!({"surface":"control"}),
+            operation_epoch: Some(42),
         };
         write_message(&mut first, &expected).await.unwrap();
         let actual = read_message(&mut second).await.unwrap().unwrap();

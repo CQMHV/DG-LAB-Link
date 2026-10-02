@@ -5,7 +5,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import type {
     AppPreferences,
     AudioAction,
-    AudioChannelConfig,
+    AudioSnapshot,
     BleParameters,
     BluetoothDevice,
     TransportKind,
@@ -16,13 +16,13 @@ import type {
     McpConfig,
     RuntimeInfo,
     SafetyUpdate,
-    TouchConfig,
     TouchInput,
     WaveformConfig,
     SourceActionParams,
     SourceInputParams,
     SourceSnapshot,
 } from "./contracts";
+import { asObject } from "./json";
 import { createPluginDemoDocument } from "./pluginDemo";
 import { OFFICIAL_WAVEFORMS } from "./waveforms";
 import type { PluginCommand } from "./plugins";
@@ -54,6 +54,8 @@ const makeLog = (
     message,
     timestamp: now(),
 });
+
+const defaultDemoAudio = (): AudioSnapshot => ({ mode: "file", state: "idle", fileName: null, positionMs: 0, durationMs: 0, levelLeft: 0, levelRight: 0, peakLeftHz: 0, peakRightHz: 0, lastError: null, hasRecording: false, loop: false, speakerEnabled: true });
 
 const createDefaultMockSnapshot = (): HubSnapshot => {
     const primaryDevice = {
@@ -93,6 +95,7 @@ const createDefaultMockSnapshot = (): HubSnapshot => {
         capabilities: defaultV4Capabilities(),
         bleParameters: null,
         configurationStatus: null,
+        bindingIdA: null, bindingIdB: null,
         id: "coyote-020-demo",
         name: "郊狼 2.0",
         type: "COYOTE",
@@ -115,15 +118,6 @@ const createDefaultMockSnapshot = (): HubSnapshot => {
     };
     return {
     revision: 1,
-    connection: {
-        state: "connected",
-        endpoint: "wss://trex.dungeon-lab.cn/v4",
-        controllerId: "7f2ac91e",
-        pairingUrl:
-            "https://dungeon-lab.cn/s/?v=1&action=socket&url=wss%3A%2F%2Ftrex.dungeon-lab.cn%2Fv4%3Ftid%3D7f2ac91e",
-        appCount: 1,
-        lastError: null,
-    },
     connections: [
         {
             connectionId: "ws-v4", transport: "ws_v4", state: "connected",
@@ -138,14 +132,15 @@ const createDefaultMockSnapshot = (): HubSnapshot => {
         },
     ],
     bluetooth: [],
-    device: { ...primaryDevice },
+    sourceBindings: [],
     devices: [{ ...primaryDevice }, { ...secondaryDevice }],
-    selectedDeviceId: primaryDevice.controlId,
     syncAllDevices: false,
     outputDeviceCount: 0,
     sources: [
         {
             id: "source-fixed-waveform",
+            revision: 0,
+            config: {}, state: {}, lastError: null, pluginId: null, runtimeStatus: "running",
             kind: "builtin.fixed_waveform",
             name: "固定波形",
             enabled: true,
@@ -153,10 +148,10 @@ const createDefaultMockSnapshot = (): HubSnapshot => {
             selectedPresetId: null,
             selectedPresetName: null,
         },
-        { id: "source-touch", kind: "plugin", pluginId: "cn.dglab.link.touch", runtimeStatus: "stopped", config: {}, state: {}, name: "触控模式", enabled: true, assignedChannelCount: 0, selectedPresetId: null, selectedPresetName: null },
-        { id: "source-audio", kind: "plugin", pluginId: "cn.dglab.link.audio", runtimeStatus: "stopped", config: {}, state: {}, name: "音频模式", enabled: true, assignedChannelCount: 0, selectedPresetId: null, selectedPresetName: null },
+        { id: "source-touch", revision: 0, kind: "plugin", pluginId: "cn.dglab.link.touch", runtimeStatus: "stopped", lastError: null, config: defaultTouchConfig() as unknown as Record<string, unknown>, state: {}, name: "触控模式", enabled: true, assignedChannelCount: 0, selectedPresetId: null, selectedPresetName: null },
+        { id: "source-audio", revision: 0, kind: "plugin", pluginId: "cn.dglab.link.audio", runtimeStatus: "stopped", lastError: null, config: { defaultChannelConfig: defaultAudioConfig() }, state: { audio: defaultDemoAudio() }, name: "音频模式", enabled: true, assignedChannelCount: 0, selectedPresetId: null, selectedPresetName: null },
     ],
-    plugins: [{ manifest: { id: "cn.dglab.link.touch", version: "0.1.0", protocolVersion: 1, name: "触控输入", publisher: "DG-LAB Link", license: "AGPL-3.0-only", executable: "touch.exe" }, digest: "demo-touch", preinstalled: true }, { manifest: { id: "cn.dglab.link.audio", version: "0.1.0", protocolVersion: 1, name: "音频输入", publisher: "DG-LAB Link", license: "AGPL-3.0-only", executable: "audio.exe" }, digest: "demo-audio", preinstalled: true }],
+    plugins: [{ manifest: { id: "cn.dglab.link.touch", version: "0.1.0", protocolVersion: 2, name: "触控输入", publisher: "DG-LAB Link", license: "AGPL-3.0-only", executable: "touch.exe" }, digest: "demo-touch", preinstalled: true }, { manifest: { id: "cn.dglab.link.audio", version: "0.1.0", protocolVersion: 2, name: "音频输入", publisher: "DG-LAB Link", license: "AGPL-3.0-only", executable: "audio.exe" }, digest: "demo-audio", preinstalled: true }],
     customWaveforms: [
         {
             id: "custom-demo",
@@ -166,32 +161,10 @@ const createDefaultMockSnapshot = (): HubSnapshot => {
         },
     ],
     defaultSourceId: null,
-    inputModes: {
-        touchConfig: defaultTouchConfig(),
-        audio: {
-            mode: "file", state: "idle", fileName: null, positionMs: 0, durationMs: 0,
-            levelLeft: 0, levelRight: 0, peakLeftHz: 0, peakRightHz: 0,
-            lastError: null, hasRecording: false, loop: false, speakerEnabled: true,
-        },
-        audioBindings: [primaryDevice, secondaryDevice].flatMap((device) =>
-            (["a", "b"] as const).map((channel) => ({ deviceId: device.controlId, channel, config: defaultAudioConfig() }))),
-    },
     output: {
         state: "idle",
         framesSent: 1284,
         lastError: null,
-    },
-    channels: {
-        a: {
-            intensity: 5,
-            limit: primaryDevice.intensityLimitA,
-            status: "ready",
-        },
-        b: {
-            intensity: 11,
-            limit: primaryDevice.intensityLimitB,
-            status: "ready",
-        },
     },
     safety: {
         connectionTimeoutEnabled: false,
@@ -250,13 +223,15 @@ const updateMockSnapshot = (
     const next = cloneSnapshot(mockSnapshot);
     next.revision += 1;
     updater(next);
-    for (const device of next.devices) {
-        device.bindingIdA = next.sources.find((source) => source.id === device.sourceIdA)?.pluginId ? `${device.controlId}/a` : null;
-        device.bindingIdB = next.sources.find((source) => source.id === device.sourceIdB)?.pluginId ? `${device.controlId}/b` : null;
-    }
-    for (const source of next.sources) {
-        if (source.pluginId === "cn.dglab.link.touch") { source.config = structuredClone(next.inputModes.touchConfig) as unknown as Record<string, unknown>; source.state = { touchConfig: next.inputModes.touchConfig }; }
-        if (source.pluginId === "cn.dglab.link.audio") source.state = { audio: next.inputModes.audio };
+    const bindings = next.sourceBindings;
+    next.sourceBindings = [];
+    for (const device of next.devices) for (const channel of ["a", "b"] as const) {
+        const sourceId = channel === "a" ? device.sourceIdA : device.sourceIdB;
+        const source = next.sources.find((item) => item.id === sourceId);
+        const previous = bindings.find((item) => item.controlId === device.controlId && item.channel === channel && item.sourceId === sourceId);
+        const bindingId = source?.pluginId ? previous?.bindingId ?? globalThis.crypto.randomUUID() : null;
+        if (channel === "a") device.bindingIdA = bindingId; else device.bindingIdB = bindingId;
+        if (source?.pluginId && bindingId) next.sourceBindings.push(previous ? { ...previous, active: device.outputActive } : { sourceId: source.id, bindingId, controlId: device.controlId, channel, generation: 0, revision: 0, config: source.pluginId === "cn.dglab.link.audio" ? structuredClone((asObject(source.config).defaultChannelConfig ?? defaultAudioConfig()) as Record<string, unknown>) : {}, active: device.outputActive });
     }
     refreshMockSourceCounts(next);
     mockSnapshot = next;
@@ -287,18 +262,7 @@ const refreshMockSourceCounts = (snapshot: HubSnapshot): void => {
     });
 };
 
-const refreshMockDeviceSelection = (snapshot: HubSnapshot): void => {
-    const device = snapshot.devices.find((item) => item.controlId === snapshot.selectedDeviceId)
-        ?? snapshot.devices[0] ?? null;
-    snapshot.device = device ? { ...device } : null;
-    snapshot.selectedDeviceId = device?.controlId ?? null;
-    for (const channel of ["a", "b"] as const) {
-        snapshot.channels[channel] = {
-            intensity: (channel === "a" ? device?.intensityA : device?.intensityB) ?? 0,
-            limit: (channel === "a" ? device?.intensityLimitA : device?.intensityLimitB) ?? 0,
-            status: (channel === "a" ? device?.channelAStatus : device?.channelBStatus) ?? "disconnected",
-        };
-    }
+const refreshMockOutputSummary = (snapshot: HubSnapshot): void => {
     snapshot.outputDeviceCount = snapshot.devices.filter((item) => item.outputActive).length;
     snapshot.output.state = snapshot.outputDeviceCount > 0 ? "running" : "idle";
     refreshMockSourceCounts(snapshot);
@@ -321,10 +285,9 @@ export const connectTransport = async (
         connection.state = "waiting";
         connection.controllerId = transport === "ws_v4" ? "7f2ac91e" : "v3-demo-controller";
         connection.pairingUrl = transport === "ws_v4"
-            ? createDefaultMockSnapshot().connection.pairingUrl
+            ? createDefaultMockSnapshot().connections[0].pairingUrl
             : `https://www.dungeon-lab.com/app-download.php#DGLAB-SOCKET#${encodeURIComponent(`${connection.endpoint}/${connection.controllerId}`)}`;
         connection.lastError = null;
-        if (transport === "ws_v4") snapshot.connection = { ...connection };
     });
 };
 
@@ -338,8 +301,7 @@ export const disconnectConnection = async (connectionId: string): Promise<void> 
         if (!connection) throw new Error("连接不存在");
         Object.assign(connection, { state: "disconnected", controllerId: null, pairingUrl: null, appCount: 0 });
         snapshot.devices = snapshot.devices.filter((device) => device.connectionId !== connectionId);
-        if (connectionId === "ws-v4") snapshot.connection = { ...connection };
-        refreshMockDeviceSelection(snapshot);
+        refreshMockOutputSummary(snapshot);
     });
 };
 
@@ -365,7 +327,6 @@ export const setRelayEndpoint = async (transport: Exclude<TransportKind, "ble">,
         const connection = snapshot.connections.find((item) => item.transport === transport)!;
         if (!["disconnected", "error"].includes(connection.state)) throw new Error("请先断开连接再保存端点");
         connection.endpoint = endpoint;
-        if (transport === "ws_v4") snapshot.connection.endpoint = endpoint;
     });
 };
 
@@ -404,7 +365,7 @@ export const connectBluetooth = async (deviceId: string): Promise<void> => {
             channelAStatus: "unknown" as const, channelBStatus: "unknown" as const,
         };
         snapshot.devices.push(device);
-        refreshMockDeviceSelection(snapshot);
+        refreshMockOutputSummary(snapshot);
     });
 };
 
@@ -437,7 +398,7 @@ export const setBluetoothConfig = async (deviceId: string, config: BleParameters
         device.intensityLimitA = config.maxStrengthA;
         device.intensityLimitB = config.maxStrengthB;
         device.configurationStatus = "sent";
-        refreshMockDeviceSelection(snapshot);
+        refreshMockOutputSummary(snapshot);
     });
 };
 
@@ -505,56 +466,17 @@ export const listenHubSnapshot = async (
     };
 };
 
-export const connectRelay = async (): Promise<void> => {
-    if (isTauriRuntime()) {
-        await invoke("connect_relay");
-        return;
-    }
-
-    updateMockSnapshot((snapshot) => {
-        const defaults = createDefaultMockSnapshot();
-        snapshot.connection = defaults.connection;
-        snapshot.connections = snapshot.connections.map((connection) => connection.connectionId === "ws-v4" ? defaults.connections[0] : connection);
-        snapshot.devices = [...snapshot.devices.filter((device) => device.connectionId !== "ws-v4"), ...defaults.devices];
-        refreshMockDeviceSelection(snapshot);
-        snapshot.connection.lastError = null;
-        prependMockLog(snapshot, "info", "Relay 已重新连接");
-    });
-};
-
-export const disconnectRelay = async (): Promise<void> => {
-    if (isTauriRuntime()) {
-        await invoke("disconnect_relay");
-        return;
-    }
-
-    await disconnectConnection("ws-v4");
-    updateMockSnapshot((snapshot) => {
-        prependMockLog(snapshot, "warning", "已断开 Relay 连接");
-    });
-};
-
-export const refreshConnection = async (): Promise<void> => {
-    if (isTauriRuntime()) {
-        await invoke("refresh_pairing");
-        return;
-    }
-
-    updateMockSnapshot((snapshot) => {
-        prependMockLog(snapshot, "info", "连接状态已刷新");
-    });
-};
 
 export const adjustIntensity = async (
     channel: HubChannel,
     delta: number,
-    deviceId?: string,
+    deviceId: string,
 ): Promise<void> => {
     if (isTauriRuntime()) {
         await invoke("adjust_intensity", {
             channel,
             delta,
-            deviceId: deviceId ?? null,
+            deviceId,
         });
         return;
     }
@@ -563,7 +485,7 @@ export const adjustIntensity = async (
         const roundedDelta = Math.round(delta);
         const selected = snapshot.devices.find(
             (device) =>
-                device.controlId === (deviceId ?? snapshot.selectedDeviceId),
+                device.controlId === deviceId,
         );
         if (!selected) {
             throw new Error("设备尚未连接");
@@ -589,23 +511,7 @@ export const adjustIntensity = async (
                 device.intensityB = target;
             }
         });
-        const selectedIntensity = selected
-            ? channel === "a"
-                ? selected.intensityA
-                : selected.intensityB
-            : snapshot.channels[channel].intensity;
-        const isCurrentControlDevice =
-            snapshot.selectedDeviceId === selected.controlId;
-        if (isCurrentControlDevice) {
-            snapshot.channels[channel].intensity = selectedIntensity;
-        }
-        if (snapshot.device?.controlId === selected.controlId) {
-            if (channel === "a") {
-                snapshot.device.intensityA = selectedIntensity;
-            } else {
-                snapshot.device.intensityB = selectedIntensity;
-            }
-        }
+        const selectedIntensity = channel === "a" ? selected.intensityA : selected.intensityB;
         prependMockLog(
             snapshot,
             "info",
@@ -643,7 +549,7 @@ export const setSyncAllDevices = async (enabled: boolean, deviceId: string): Pro
             });
         }
         snapshot.syncAllDevices = enabled;
-        refreshMockDeviceSelection(snapshot);
+        refreshMockOutputSummary(snapshot);
         prependMockLog(
             snapshot,
             "info",
@@ -690,11 +596,7 @@ export const startOutput = async (deviceId: string): Promise<void> => {
         ).length;
         snapshot.output.lastError = null;
         snapshot.output.framesSent += 1;
-        if (snapshot.device?.controlId === deviceId) {
-            snapshot.device = { ...device };
-            snapshot.channels.a.status = device.channelAStatus;
-            snapshot.channels.b.status = device.channelBStatus;
-        }
+
         prependMockLog(snapshot, "info", `${device.name} 的波形输出已开始`);
     });
 };
@@ -722,11 +624,7 @@ export const stopOutput = async (deviceId: string): Promise<void> => {
             (candidate) => candidate.outputActive,
         ).length;
         snapshot.output.state = snapshot.outputDeviceCount > 0 ? "running" : "idle";
-        if (snapshot.device?.controlId === deviceId) {
-            snapshot.device = { ...device };
-            snapshot.channels.a.status = device.channelAStatus;
-            snapshot.channels.b.status = device.channelBStatus;
-        }
+
         prependMockLog(snapshot, "info", `${device.name} 的波形输出已停止`);
     });
 };
@@ -764,9 +662,7 @@ export const setDeviceChannelSource = async (
         } else {
             device.sourceIdB = sourceId;
         }
-        if (snapshot.device?.controlId === deviceId) {
-            snapshot.device = { ...device };
-        }
+
         refreshMockSourceCounts(snapshot);
         prependMockLog(
             snapshot,
@@ -809,9 +705,7 @@ export const setDeviceChannelSourceSync = async (
                 }
             }
         }
-        if (snapshot.device?.controlId === deviceId) {
-            snapshot.device = { ...device };
-        }
+
         refreshMockSourceCounts(snapshot);
         prependMockLog(
             snapshot,
@@ -881,9 +775,7 @@ export const setFixedWaveform = async (
             device.waveformIdB = config.presetId;
             device.waveformNameB = config.presetName;
         }
-        if (snapshot.device?.controlId === deviceId) {
-            snapshot.device = { ...device };
-        }
+
         prependMockLog(
             snapshot,
             "info",
@@ -951,9 +843,7 @@ export const selectCustomWaveform = async (
             device.waveformIdB = waveform.id;
             device.waveformNameB = waveform.name;
         }
-        if (snapshot.device?.controlId === deviceId) {
-            snapshot.device = { ...device };
-        }
+
         prependMockLog(
             snapshot,
             "info",
@@ -983,12 +873,6 @@ export const deleteCustomWaveform = async (presetId: string): Promise<void> => {
                 device.waveformNameB = null;
             }
         });
-        const selected = snapshot.devices.find(
-            (device) => device.controlId === snapshot.selectedDeviceId,
-        );
-        if (selected) {
-            snapshot.device = { ...selected };
-        }
         prependMockLog(snapshot, "info", "已删除自定义波形");
     });
 };
@@ -1022,34 +906,6 @@ const requireMockFixedWaveformSource = (snapshot: HubSnapshot) => {
     return source;
 };
 
-export const selectDevice = async (deviceId: string): Promise<void> => {
-    if (isTauriRuntime()) {
-        await invoke("select_device", { deviceId });
-        return;
-    }
-
-    updateMockSnapshot((snapshot) => {
-        const device = snapshot.devices.find(
-            (candidate) => candidate.controlId === deviceId,
-        );
-        if (!device) {
-            throw new Error("设备不存在或已断开");
-        }
-        snapshot.selectedDeviceId = deviceId;
-        snapshot.device = { ...device };
-        snapshot.channels.a = {
-            intensity: device.intensityA,
-            limit: device.intensityLimitA,
-            status: device.channelAStatus,
-        };
-        snapshot.channels.b = {
-            intensity: device.intensityB,
-            limit: device.intensityLimitB,
-            status: device.channelBStatus,
-        };
-        prependMockLog(snapshot, "info", `已切换当前控制设备：${device.name}`);
-    });
-};
 
 export const updateSafety = async (update: SafetyUpdate): Promise<void> => {
     if (isTauriRuntime()) {
@@ -1104,20 +960,8 @@ export const getCustomWaveform = async (presetId: string): Promise<WaveformConfi
     return { presetId, presetName: waveform.name, frames: ["0A0A0A0A64646464"] };
 };
 
-export const setTouchConfig = async (config: TouchConfig): Promise<void> => {
-    if (isTauriRuntime()) {
-        await invoke("set_touch_config", { config });
-        return;
-    }
-    mockTouchInput = null;
-    updateMockSnapshot((snapshot) => { snapshot.inputModes.touchConfig = structuredClone(config); });
-};
 
-export const updateTouchInput = async (input: TouchInput): Promise<void> => {
-    if (isTauriRuntime()) {
-        await invoke("update_touch_input", { input });
-        return;
-    }
+const recordDemoInput = async (input: TouchInput): Promise<void> => {
     const device = mockSnapshot.devices.find((candidate) => candidate.controlId === input.deviceId);
     if (input.pointers.length > 0 && (!device?.outputActive ||
         (device.sourceIdA !== "source-touch" && device.sourceIdB !== "source-touch"))) {
@@ -1126,31 +970,10 @@ export const updateTouchInput = async (input: TouchInput): Promise<void> => {
     mockTouchInput = structuredClone(input);
 };
 
-export const setAudioConfig = async (deviceId: string, channel: HubChannel, config: AudioChannelConfig): Promise<void> => {
-    if (isTauriRuntime()) {
-        await invoke("set_audio_config", { deviceId, channel, config });
-        return;
-    }
+
+const updateDemoAudio = async (sourceId: string, action: AudioAction): Promise<void> => {
     updateMockSnapshot((snapshot) => {
-        const binding = snapshot.inputModes.audioBindings.find((item) => item.deviceId === deviceId && item.channel === channel);
-        if (binding) binding.config = structuredClone(config);
-        else snapshot.inputModes.audioBindings.push({ deviceId, channel, config: structuredClone(config) });
-    });
-};
-
-export const chooseAudioFile = async (): Promise<string | null> => isTauriRuntime()
-    ? invoke<string | null>("choose_audio_file") : "演示音频.wav";
-
-export const chooseRecordingDestination = async (): Promise<string | null> => isTauriRuntime()
-    ? invoke<string | null>("choose_recording_destination") : "演示录音.wav";
-
-export const audioControl = async (action: AudioAction): Promise<void> => {
-    if (isTauriRuntime()) {
-        await invoke("audio_control", { action });
-        return;
-    }
-    updateMockSnapshot((snapshot) => {
-        const audio = snapshot.inputModes.audio;
+        const audio = asObject(snapshot.sources.find((item) => item.id === sourceId)!.state).audio as AudioSnapshot;
         audio.lastError = null;
         switch (action.type) {
             case "loadFile":
@@ -1201,8 +1024,6 @@ export const __resetMockBridge = (): void => {
 
 export const __emitMockSnapshot = (snapshot: HubSnapshot): void => {
     mockSnapshot = cloneSnapshot(snapshot);
-    const v4 = mockSnapshot.connections.find((connection) => connection.connectionId === "ws-v4");
-    if (v4) Object.assign(v4, mockSnapshot.connection);
     emitMockSnapshot();
 };
 
@@ -1213,7 +1034,7 @@ export const __setMockStartOutputCompletion = (
 };
 
 export const pluginDemoCall = async (command: PluginCommand): Promise<unknown> => {
-    const params = command.params ?? {};
+    const params: Record<string, unknown> = "params" in command ? command.params : {};
     const sourceId = String(params.sourceId ?? "");
     const source = mockSnapshot.sources.find((item) => item.id === sourceId);
     const requireSource = (): SourceSnapshot => {
@@ -1234,23 +1055,23 @@ export const pluginDemoCall = async (command: PluginCommand): Promise<unknown> =
             const id = "example.sample";
             const existing = snapshot.plugins?.find((item) => item.manifest.id === id);
             if (existing) { if (command.command === "install_plugin") throw new Error("插件已安装，请使用更新"); existing.manifest.version = "0.2.0"; }
-            else { if (command.command === "update_plugin") throw new Error("插件尚未安装"); snapshot.plugins ??= []; snapshot.plugins.push({ manifest: { id, name: "示例插件", version: "0.1.0", protocolVersion: 1, publisher: "示例开发者", license: "MIT", executable: "sample.exe" }, digest: "demo-sample", preinstalled: false }); }
+            else { if (command.command === "update_plugin") throw new Error("插件尚未安装"); snapshot.plugins ??= []; snapshot.plugins.push({ manifest: { id, name: "示例插件", version: "0.1.0", protocolVersion: 2, publisher: "示例开发者", license: "MIT", executable: "sample.exe" }, digest: "demo-sample", preinstalled: false }); }
         }).plugins;
         case "uninstall_plugin": return updateMockSnapshot((snapshot) => {
             const ids = snapshot.sources.filter((item) => item.pluginId === params.pluginId).map((item) => item.id);
             snapshot.plugins = snapshot.plugins?.filter((item) => item.manifest.id !== params.pluginId);
             snapshot.sources = snapshot.sources.filter((item) => !ids.includes(item.id));
             for (const device of snapshot.devices) { if (ids.includes(device.sourceIdA ?? "")) device.sourceIdA = null; if (ids.includes(device.sourceIdB ?? "")) device.sourceIdB = null; if (!device.sourceIdA || !device.sourceIdB) device.outputActive = false; }
-            refreshMockDeviceSelection(snapshot);
+            refreshMockOutputSummary(snapshot);
         });
         case "create_source": {
             const plugin = mockSnapshot.plugins?.find((item) => item.manifest.id === params.pluginId);
             if (!plugin) throw new Error("插件尚未安装");
             const id = `source-${globalThis.crypto?.randomUUID?.() ?? Date.now()}`;
-            updateMockSnapshot((snapshot) => { snapshot.sources.push({ id, kind: "plugin", pluginId: plugin.manifest.id, name: String(params.name), enabled: true, assignedChannelCount: 0, selectedPresetId: null, selectedPresetName: null, runtimeStatus: "stopped", config: {}, state: {} }); });
+            updateMockSnapshot((snapshot) => { snapshot.sources.push({ id, revision: 0, kind: "plugin", pluginId: plugin.manifest.id, name: String(params.name), enabled: true, assignedChannelCount: 0, selectedPresetId: null, selectedPresetName: null, runtimeStatus: "stopped", lastError: null, config: plugin.manifest.id === "cn.dglab.link.touch" ? defaultTouchConfig() : plugin.manifest.id === "cn.dglab.link.audio" ? { defaultChannelConfig: defaultAudioConfig() } : {}, state: plugin.manifest.id === "cn.dglab.link.audio" ? { audio: defaultDemoAudio() } : {} }); });
             return id;
         }
-        case "delete_source": requireSource(); return updateMockSnapshot((snapshot) => { snapshot.sources = snapshot.sources.filter((item) => item.id !== sourceId); for (const device of snapshot.devices) { if (device.sourceIdA === sourceId) device.sourceIdA = null; if (device.sourceIdB === sourceId) device.sourceIdB = null; if (!device.sourceIdA || !device.sourceIdB) device.outputActive = false; } refreshMockDeviceSelection(snapshot); });
+        case "delete_source": requireSource(); return updateMockSnapshot((snapshot) => { snapshot.sources = snapshot.sources.filter((item) => item.id !== sourceId); for (const device of snapshot.devices) { if (device.sourceIdA === sourceId) device.sourceIdA = null; if (device.sourceIdB === sourceId) device.sourceIdB = null; if (!device.sourceIdA || !device.sourceIdB) device.outputActive = false; } refreshMockOutputSummary(snapshot); });
         case "set_source_enabled": case "start_source": case "stop_source": requireSource(); return updateMockSnapshot((snapshot) => {
             const item = snapshot.sources.find((item) => item.id === sourceId)!;
             if (command.command === "set_source_enabled") { item.enabled = Boolean(params.enabled); item.runtimeStatus = item.enabled ? "stopped" : "disabled"; }
@@ -1258,18 +1079,20 @@ export const pluginDemoCall = async (command: PluginCommand): Promise<unknown> =
         });
         case "set_source_config": {
             const item = requireSource();
-            if (item.pluginId === "cn.dglab.link.touch") return setTouchConfig(params.config as unknown as TouchConfig);
-            if (item.pluginId === "cn.dglab.link.audio" && params.bindingId) {
-                const binding = mockSnapshot.devices.flatMap((device) => (["a", "b"] as const).map((channel) => ({ device, channel, id: channel === "a" ? device.bindingIdA : device.bindingIdB }))).find((item) => item.id === params.bindingId);
-                if (!binding) throw new Error("输入源通道绑定已失效");
-                return setAudioConfig(binding.device.controlId, binding.channel, params.config as unknown as AudioChannelConfig);
-            }
-            return updateMockSnapshot((snapshot) => { snapshot.sources.find((item) => item.id === sourceId)!.config = structuredClone(params.config as Record<string, unknown>); });
+            return updateMockSnapshot((snapshot) => {
+                const current = snapshot.sources.find((candidate) => candidate.id === sourceId)!;
+                const target = params.bindingId ? snapshot.sourceBindings.find((binding) => binding.bindingId === params.bindingId && binding.sourceId === sourceId) : current;
+                if (!target) throw new Error("输入源通道绑定已失效");
+                if (params.expectedRevision !== target.revision) throw { code: "config_conflict", message: "配置已由其他入口修改，请重新读取后提交" };
+                target.config = structuredClone(params.config as Record<string, unknown>);
+                target.revision += 1;
+                if (item.pluginId === "cn.dglab.link.touch") mockTouchInput = null;
+            });
         }
         case "source_action": {
             const item = requireSource(); const action = params.params as SourceActionParams;
-            if (action.action === "audio_control") return audioControl(action.value as AudioAction);
-            if (action.action === "configure") return pluginDemoCall({ command: "set_source_config", params: { sourceId: item.id, config: action.value, bindingId: action.bindingId } });
+            if (action.action === "audio_control") return updateDemoAudio(sourceId, action.value as AudioAction);
+            if (["configure", "configure_binding"].includes(action.action)) throw { code: "invalid_command", message: "配置请使用 set_source_config 并提供 expectedRevision" };
             return {};
         }
         case "source_input": {
@@ -1278,7 +1101,7 @@ export const pluginDemoCall = async (command: PluginCommand): Promise<unknown> =
             if (!binding) throw new Error("输入源通道绑定已失效");
             const pointers = (input.value as { pointers: TouchInput["pointers"] }).pointers.map((pointer) => ({ ...pointer, channel: binding.channel }));
             const existing = mockTouchInput?.deviceId === binding.device.controlId ? mockTouchInput.pointers.filter((pointer) => pointer.channel !== binding.channel) : [];
-            return updateTouchInput({ deviceId: binding.device.controlId, ownerId: input.owner, sequence: input.sequence, pointers: [...existing, ...pointers] });
+            return recordDemoInput({ deviceId: binding.device.controlId, ownerId: input.owner, sequence: input.sequence, pointers: [...existing, ...pointers] });
         }
         default: throw new Error(`演示模式不支持命令：${command.command}`);
     }

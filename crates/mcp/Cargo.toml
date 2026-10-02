@@ -8,7 +8,7 @@ rust-version.workspace = true
 [dependencies]
 axum = "0.8.9"
 clap = { version = "4.6.6", features = ["derive"] }
-dg-lab-link-core = { path = "../core" }
+dg-lab-link-contracts = { path = "../contracts" }
 dg-lab-link-runtime = { path = "../runtime" }
 futures-util.workspace = true
 rmcp = { version = "3.4.0", default-features = false, features = ["server", "transport-async-rw", "transport-streamable-http-server"] }
@@ -20,6 +20,9 @@ tokio-util = { workspace = true, features = ["codec", "rt"] }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation"] }
 
 [dev-dependencies]
+dg-lab-link-builtin-plugins = { path = "../builtin-plugins" }
+dg-lab-link-runtime = { path = "../runtime", features = ["server"] }
+dg-lab-link-core = { path = "../core" }
 dg-lab-link-plugin-runtime = { path = "../plugin-runtime" }
 tempfile = "3.27"
 reqwest = { version = "0.13.5", default-features = false, features = ["json"] }

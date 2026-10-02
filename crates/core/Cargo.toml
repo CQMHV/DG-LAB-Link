@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+dg-lab-link-contracts = { path = "../contracts" }
 dg-lab-link-plugin-sdk.workspace = true
 dg-lab-link-plugin-runtime.workspace = true
 futures-util.workspace = true

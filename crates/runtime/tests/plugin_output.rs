@@ -1,13 +1,14 @@
+#![cfg(feature = "server")]
 #![cfg(target_os = "windows")]
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use dg_lab_link_builtin_plugins::sources::touch::{TouchConfig, TouchPointer};
 use dg_lab_link_core::hub::HubSnapshot;
 use dg_lab_link_core::model::Channel;
 use dg_lab_link_core::sources::WaveformConfig;
-use dg_lab_link_core::sources::touch::{TouchConfig, TouchInput, TouchPointer};
 use dg_lab_link_core::{ControlCommand, ControlError};
 use dg_lab_link_runtime::{Client, LocalConfig, run_core};
 use futures_util::{SinkExt, StreamExt};
@@ -29,15 +30,15 @@ struct Core {
 }
 
 impl Core {
-    async fn start(endpoint: String, legacy_touch: bool) -> (Self, Client) {
+    async fn start(endpoint: String, seed_touch: bool) -> (Self, Client) {
         let directory = tempfile::tempdir().unwrap();
-        // Ignore optional bundles beside the test executable. Compatibility
-        // commands address a stable instance ID, so seed only its definition;
-        // installation, activation, IPC and device operations use public APIs.
-        let sources = if legacy_touch {
+        // Ignore optional bundles beside the test executable. Seed an instance
+        // definition; installation, activation, IPC and device operations all
+        // use public APIs.
+        let sources = if seed_touch {
             json!({"source-touch":{
                 "id":"source-touch","pluginId":"cn.dglab.link.touch",
-                "name":"Legacy touch fixture","enabled":true,
+                "name":"Native touch fixture","enabled":true,
                 "config":TouchConfig::default()
             }})
         } else {
@@ -265,7 +266,13 @@ async fn connect(client: &Client) -> String {
         })
         .await
         .unwrap();
-    client.call(ControlCommand::ConnectRelay).await.unwrap();
+    client
+        .call(ControlCommand::ConnectTransport {
+            transport: dg_lab_link_contracts::transport::TransportKind::WsV4,
+            endpoint: None,
+        })
+        .await
+        .unwrap();
     timeout(Duration::from_secs(5), async {
         loop {
             let state = snapshot(client).await;
@@ -340,6 +347,7 @@ async fn third_party_native_frames_reach_v4_and_stop_only_their_binding() {
     client
         .call(ControlCommand::SetSourceConfig {
             source_id: source.clone(),
+            expected_revision: 0,
             config: json!({"frequency":137,"intensity":37}),
             binding_id: None,
         })
@@ -515,7 +523,7 @@ async fn third_party_native_frames_reach_v4_and_stop_only_their_binding() {
 }
 
 #[tokio::test]
-async fn legacy_touch_input_uses_native_plugin_and_stop_discards_old_contacts() {
+async fn native_touch_input_and_stop_discards_old_contacts() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let fixture = tempfile::tempdir().unwrap();
     let package = package(
@@ -533,15 +541,19 @@ async fn legacy_touch_input_uses_native_plugin_and_stop_discards_old_contacts() 
         .await
         .unwrap();
     client
-        .call(ControlCommand::SetTouchConfig {
-            config: TouchConfig {
-                background: Some(WaveformConfig {
+        .call(ControlCommand::SetSourceConfig {
+            source_id: "source-touch".into(),
+            binding_id: None,
+            expected_revision: 0,
+            config: serde_json::to_value(TouchConfig {
+                background: Some(dg_lab_link_builtin_plugins::sources::WaveformConfig {
                     preset_id: "touch-background".into(),
                     preset_name: "Touch background".into(),
                     frames: vec![TOUCH_BACKGROUND.into()],
                 }),
                 ..TouchConfig::default()
-            },
+            })
+            .unwrap(),
         })
         .await
         .unwrap();
@@ -558,12 +570,18 @@ async fn legacy_touch_input_uses_native_plugin_and_stop_discards_old_contacts() 
     })
     .await;
     let idle = capture.requests().len();
-    let touch = |sequence, pointers| ControlCommand::UpdateTouchInput {
-        input: TouchInput {
-            device_id: device.clone(),
-            owner_id: "legacy-window".into(),
+    let binding_id = snapshot(&client).await.devices[0]
+        .binding_id_a
+        .clone()
+        .unwrap();
+    let touch = |sequence, pointers: Vec<TouchPointer>| ControlCommand::SourceInput {
+        source_id: "source-touch".into(),
+        params: dg_lab_link_contracts::InputParams {
+            action: "update_touch_input".into(),
+            value: json!({"pointers":pointers}),
+            binding_id: Some(binding_id.clone()),
+            owner: "native-window".into(),
             sequence,
-            pointers,
         },
     };
     client
@@ -574,15 +592,14 @@ async fn legacy_touch_input_uses_native_plugin_and_stop_discards_old_contacts() 
                 x: 0.5,
                 y: 0.5,
                 cell: None,
-                channel: Some(Channel::A),
+                channel: Some(dg_lab_link_builtin_plugins::model::Channel::A),
             }],
         ))
         .await
         .unwrap();
-    wait_for(
-        "legacy update_touch_input produced nonzero native A",
-        || capture.requests()[idle..].iter().any(is_touch_wave),
-    )
+    wait_for("native source_input produced nonzero native A", || {
+        capture.requests()[idle..].iter().any(is_touch_wave)
+    })
     .await;
     let active = snapshot(&client).await;
     assert_eq!(
@@ -629,7 +646,7 @@ async fn legacy_touch_input_uses_native_plugin_and_stop_discards_old_contacts() 
                 x: 0.5,
                 y: 0.5,
                 cell: None,
-                channel: Some(Channel::A),
+                channel: Some(dg_lab_link_builtin_plugins::model::Channel::A),
             }],
         ))
         .await
@@ -639,7 +656,7 @@ async fn legacy_touch_input_uses_native_plugin_and_stop_discards_old_contacts() 
     })
     .await;
     client.call(ControlCommand::from_call("source_action", json!({
-        "sourceId":"source-touch","params":{"action":"release_owner","value":{"ownerId":"legacy-window"}}
+        "sourceId":"source-touch","params":{"action":"release_owner","value":{"ownerId":"native-window"}}
     })).unwrap()).await.unwrap();
     wait_for("owner release clears queued native A", || {
         capture
@@ -668,7 +685,7 @@ async fn legacy_touch_input_uses_native_plugin_and_stop_discards_old_contacts() 
                 x: 0.5,
                 y: 0.5,
                 cell: None,
-                channel: Some(Channel::A),
+                channel: Some(dg_lab_link_builtin_plugins::model::Channel::A),
             }],
         ))
         .await
@@ -699,6 +716,7 @@ async fn legacy_touch_input_uses_native_plugin_and_stop_discards_old_contacts() 
     assert_eq!(capture.clear_index(Some(1)), None);
     assert_eq!(capture.clear_index(None), None);
 
+    let old_touch_input = client.accept_command(false);
     client
         .call(ControlCommand::StopOutput {
             device_id: device.clone(),
@@ -711,9 +729,15 @@ async fn legacy_touch_input_uses_native_plugin_and_stop_discards_old_contacts() 
     .await;
     let stopped = capture.clear_index(None).unwrap();
     assert_eq!(
-        client.call(touch(5, vec![])).await.unwrap_err().code,
-        "source_unavailable"
+        client
+            .call_received(touch(5, vec![]), old_touch_input)
+            .await
+            .unwrap_err()
+            .code,
+        "queue_busy"
     );
+    // A newly issued release can still retire UI ownership after ordinary stop.
+    client.call(touch(5, vec![])).await.unwrap();
     tokio::time::sleep(Duration::from_millis(350)).await;
     assert!(
         capture.requests()[stopped + 1..]
@@ -745,7 +769,7 @@ async fn legacy_touch_input_uses_native_plugin_and_stop_discards_old_contacts() 
                 x: 0.5,
                 y: 0.5,
                 cell: None,
-                channel: Some(Channel::A),
+                channel: Some(dg_lab_link_builtin_plugins::model::Channel::A),
             }],
         ))
         .await

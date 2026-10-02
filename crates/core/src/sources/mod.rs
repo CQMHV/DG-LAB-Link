@@ -1,14 +1,9 @@
-pub mod audio;
-pub mod mapping;
 mod preset;
 mod registry;
-pub mod touch;
 
 pub use preset::{DEFAULT_WAVEFORM_ID, FixedWaveformFactory, WaveformConfig};
 pub use registry::{SourceDescriptor, SourceError, SourceFactory, SourceRegistry, WaveSource};
 
-/// 固定波形是唯一核心基础输入源；动态输入源由插件管理器提供。
-///
 /// 固定波形是唯一的核心输入源；扩展输入源经原生插件运行，核心不引入
 /// Rust ABI 不稳定的动态库插件。
 pub fn builtin_registry() -> SourceRegistry {

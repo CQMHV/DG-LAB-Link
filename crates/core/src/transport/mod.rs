@@ -3,14 +3,14 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, Instant, timeout};
 use tokio_util::sync::CancellationToken;
 
-use crate::hub::{ChannelStatus, ConnectionState};
 use crate::model::{Channel, WaveFrame};
+
+pub(crate) type StopCompletion =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), TransportError>> + Send>>;
 
 pub mod ble;
 pub(crate) mod event_delivery;
@@ -72,32 +72,53 @@ impl DeviceSession {
         zero: bool,
         generation: u64,
     ) -> Result<(), TransportError> {
+        self.request_stop(address, channel, zero, generation)?.await
+    }
+
+    /// Install the target barrier and enqueue priority cleanup before returning.
+    /// Waiting for a transport write must never cancel already admitted cleanup.
+    pub(crate) fn request_stop(
+        &self,
+        address: &DeviceAddress,
+        channel: Option<Channel>,
+        zero: bool,
+        generation: u64,
+    ) -> Result<StopCompletion, TransportError> {
         match self {
-            Self::Local(handle) => {
-                handle
-                    .stop(address.slot_id.clone(), channel, zero, generation)
-                    .await
-            }
+            Self::Local(handle) => Ok(Box::pin(handle.request_stop(
+                address.slot_id.clone(),
+                channel,
+                zero,
+                generation,
+            )?)),
             Self::V4(handle) => match channel {
-                Some(channel) => handle
-                    .clear_wave_channel(
-                        &address.client_id,
-                        &address.slot_id,
-                        channel,
-                        v4::clear_channel_request(&address.slot_id, channel),
-                        generation,
-                    )
-                    .await
-                    .map_err(relay_error),
-                None => handle
-                    .safety_stop_device(
-                        &address.client_id,
-                        &address.slot_id,
-                        v4::stop_operation_requests(&address.slot_id, zero),
-                        generation,
-                    )
-                    .await
-                    .map_err(relay_error),
+                Some(channel) => {
+                    let completion = handle
+                        .request_clear_wave_channel(
+                            &address.client_id,
+                            &address.slot_id,
+                            channel,
+                            v4::clear_channel_request(&address.slot_id, channel),
+                            generation,
+                        )
+                        .map_err(relay_error)?;
+                    Ok(Box::pin(
+                        async move { completion.await.map_err(relay_error) },
+                    ))
+                }
+                None => {
+                    let completion = handle
+                        .request_stop_device(
+                            address.client_id.clone(),
+                            address.slot_id.clone(),
+                            v4::stop_operation_requests(&address.slot_id, zero),
+                            generation,
+                        )
+                        .map_err(relay_error)?;
+                    Ok(Box::pin(
+                        async move { completion.await.map_err(relay_error) },
+                    ))
+                }
             },
         }
     }
@@ -148,175 +169,7 @@ pub enum TransportAction {
     },
 }
 
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum TransportKind {
-    WsV4,
-    WsV3,
-    Ble,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct DeviceAddress {
-    pub connection_id: String,
-    pub client_id: String,
-    pub slot_id: String,
-}
-impl DeviceAddress {
-    pub fn control_id(&self) -> String {
-        let legacy = format!(
-            "{}:{}{}",
-            self.client_id.len(),
-            self.client_id,
-            self.slot_id
-        );
-        if self.connection_id == V4_CONNECTION_ID {
-            legacy
-        } else {
-            format!("{}:{legacy}", self.connection_id)
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TransportConnectionSnapshot {
-    pub connection_id: String,
-    pub transport: TransportKind,
-    pub state: ConnectionState,
-    pub endpoint: String,
-    pub controller_id: Option<String>,
-    pub pairing_url: Option<String>,
-    pub app_count: usize,
-    pub last_error: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum InitializationState {
-    Initializing,
-    #[default]
-    Ready,
-    Fault,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct DeviceCapabilities {
-    pub battery: bool,
-    pub load_status: bool,
-    pub soft_limits: bool,
-    pub balance: bool,
-    pub wheel_protection: bool,
-    pub standard_mode: bool,
-    pub operation_confirmation: bool,
-}
-impl Default for DeviceCapabilities {
-    fn default() -> Self {
-        Self {
-            battery: true,
-            load_status: true,
-            soft_limits: false,
-            balance: false,
-            wheel_protection: false,
-            standard_mode: false,
-            operation_confirmation: true,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
-pub struct BleParameters {
-    pub max_strength_a: u16,
-    pub max_strength_b: u16,
-    pub frequency_balance_a: u8,
-    pub frequency_balance_b: u8,
-    pub strength_balance_a: u8,
-    pub strength_balance_b: u8,
-    pub wheel_protection_enabled: bool,
-    pub wheel_protection_value: u8,
-}
-impl Default for BleParameters {
-    fn default() -> Self {
-        Self {
-            max_strength_a: 100,
-            max_strength_b: 100,
-            frequency_balance_a: 160,
-            frequency_balance_b: 160,
-            strength_balance_a: 0,
-            strength_balance_b: 0,
-            wheel_protection_enabled: true,
-            wheel_protection_value: 10,
-        }
-    }
-}
-impl BleParameters {
-    pub fn validate(&self) -> Result<(), TransportError> {
-        if self.max_strength_a > 200
-            || self.max_strength_b > 200
-            || !(1..=50).contains(&self.wheel_protection_value)
-        {
-            return Err(TransportError::new(
-                "invalid_ble_parameters",
-                "BLE 上限须为 0..200，旋钮保护值须为 1..50",
-            ));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BluetoothDevice {
-    pub device_id: String,
-    pub name: String,
-    pub rssi: Option<i16>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionDevice {
-    pub id: String,
-    pub slot_id: String,
-    pub name: String,
-    pub device_type: String,
-    pub power: Option<u16>,
-    pub intensity_a: u16,
-    pub intensity_b: u16,
-    pub intensity_limit_a: u16,
-    pub intensity_limit_b: u16,
-    pub channel_a_status: ChannelStatus,
-    pub channel_b_status: ChannelStatus,
-    pub initialization: InitializationState,
-    pub capabilities: DeviceCapabilities,
-    pub ble_parameters: Option<BleParameters>,
-    /// BF has no device acknowledgement: "sent" differs from "confirmed".
-    pub configuration_status: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{message}")]
-pub struct TransportError {
-    pub code: String,
-    pub message: String,
-}
-impl TransportError {
-    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            code: code.into(),
-            message: message.into(),
-        }
-    }
-    pub fn stopped() -> Self {
-        Self::new("transport_stopped", "设备连接已停止")
-    }
-    pub fn busy() -> Self {
-        Self::new("queue_busy", "设备队列繁忙或操作已被停止取代")
-    }
-}
+pub use dg_lab_link_contracts::transport::*;
 
 #[derive(Debug, Clone)]
 pub enum DeviceOperation {
@@ -544,6 +397,19 @@ impl SessionHandle {
         zero: bool,
         generation: u64,
     ) -> Result<(), TransportError> {
+        self.request_stop(slot_id, channel, zero, generation)?.await
+    }
+
+    pub(crate) fn request_stop(
+        &self,
+        slot_id: String,
+        channel: Option<Channel>,
+        zero: bool,
+        generation: u64,
+    ) -> Result<
+        impl std::future::Future<Output = Result<(), TransportError>> + Send + 'static,
+        TransportError,
+    > {
         if let Some(channel) = channel {
             let mut floors = self.wave_floors.write().unwrap_or_else(|e| e.into_inner());
             if floors.len() >= 256 && !floors.contains_key(&(slot_id.clone(), channel)) {
@@ -554,14 +420,25 @@ impl SessionHandle {
         } else {
             self.invalidate_operations(generation);
         }
-        self.request(true, |reply| SessionCommand::Stop {
-            slot_id,
-            channel,
-            zero,
-            generation,
-            reply,
+        let (reply, response) = oneshot::channel();
+        self.safety
+            .try_send(SessionCommand::Stop {
+                slot_id,
+                channel,
+                zero,
+                generation,
+                reply,
+            })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => TransportError::busy(),
+                _ => TransportError::stopped(),
+            })?;
+        Ok(async move {
+            timeout(Duration::from_secs(8), response)
+                .await
+                .map_err(|_| TransportError::new("transport_timeout", "等待设备操作超时"))?
+                .map_err(|_| TransportError::stopped())?
         })
-        .await
     }
     pub fn shutdown_now(&self) {
         self.shutdown.cancel();

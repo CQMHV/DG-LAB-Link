@@ -1,5 +1,5 @@
-use dg_lab_link_core::hub::HubSnapshot;
-use dg_lab_link_core::{ControlCommand, ControlError};
+use dg_lab_link_contracts::hub::HubSnapshot;
+use dg_lab_link_contracts::{ControlCommand, ControlError};
 use dg_lab_link_runtime::{AcceptedCommandEpoch, Client};
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, Implementation, ListResourcesResult,
@@ -63,19 +63,26 @@ pub(crate) fn priority_tool(name: &str, arguments: Value) -> bool {
     ControlCommand::from_call(name, arguments).is_ok_and(|command| command.is_safety())
 }
 
-fn tools() -> Vec<Tool> {
-    ControlCommand::descriptors()
-        .into_iter()
-        .map(|descriptor| {
-            let schema = descriptor
-                .input_schema
-                .as_object()
-                .expect("业务参数 Schema 是对象")
-                .clone();
-            Tool::new(descriptor.name, descriptor.description, schema)
+fn tools() -> &'static [Tool] {
+    static TOOLS: std::sync::OnceLock<Vec<Tool>> = std::sync::OnceLock::new();
+    TOOLS.get_or_init(|| {
+        ControlCommand::descriptors()
+            .iter()
+            .map(|descriptor| {
+                let schema = descriptor
+                    .input_schema
+                    .as_object()
+                    .expect("业务参数 Schema 是对象")
+                    .clone();
+                Tool::new(
+                    descriptor.name.clone(),
+                    descriptor.description.clone(),
+                    schema,
+                )
                 .with_annotations(ToolAnnotations::new().read_only(descriptor.read_only))
-        })
-        .collect()
+            })
+            .collect()
+    })
 }
 
 impl ServerHandler for McpServer {
@@ -98,11 +105,11 @@ impl ServerHandler for McpServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        Ok(ListToolsResult::with_all_items(tools()))
+        Ok(ListToolsResult::with_all_items(tools().to_vec()))
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
-        tools().into_iter().find(|tool| tool.name == name)
+        tools().iter().find(|tool| tool.name == name).cloned()
     }
 
     async fn call_tool(
@@ -251,7 +258,7 @@ mod tests {
             "stop_output",
             json!({"deviceId":"explicit-device"})
         ));
-        assert!(priority_tool("disconnect_relay", json!({})));
+        assert!(!priority_tool("disconnect_relay", json!({})));
         assert!(priority_tool(
             "disconnect_connection",
             json!({"connectionId":"ws-v3"})

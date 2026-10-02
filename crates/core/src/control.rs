@@ -2,9 +2,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use dg_lab_link_plugin_runtime::{BusinessFuture, BusinessHandler, PluginManager};
-use dg_lab_link_plugin_sdk::{ActionParams, InputParams, PluginError, SourceSpec, UiParams};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use dg_lab_link_plugin_sdk::{ActionParams, PluginError, SourceSpec};
+use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::{Mutex, Semaphore, watch};
 
@@ -12,225 +11,11 @@ use crate::hub::{
     HubError, HubHandle, HubRuntime, HubSnapshot, SafetySnapshot,
     create_hub_with_source_preferences,
 };
-use crate::model::Channel;
 use crate::preferences::{PreferencesError, PreferencesState};
 use crate::sources::WaveformConfig;
-use crate::sources::audio::{AudioAction, AudioChannelConfig};
-use crate::sources::touch::{TouchConfig, TouchInput};
-use crate::transport::{BleParameters, DEFAULT_V3_ENDPOINT, TransportAction, TransportKind};
-use crate::waveforms::WaveformFile;
+use crate::transport::{DEFAULT_V3_ENDPOINT, TransportAction, TransportKind};
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(
-    tag = "command",
-    content = "params",
-    rename_all = "snake_case",
-    rename_all_fields = "camelCase",
-    deny_unknown_fields
-)]
-pub enum ControlCommand {
-    GetConnections,
-    ConnectTransport {
-        transport: TransportKind,
-        endpoint: Option<String>,
-    },
-    DisconnectConnection {
-        connection_id: String,
-    },
-    RefreshConnectionPairing {
-        connection_id: String,
-    },
-    SetRelayEndpoint {
-        transport: TransportKind,
-        endpoint: String,
-    },
-    ScanBluetooth {
-        duration_ms: u64,
-    },
-    ConnectBluetooth {
-        device_id: String,
-    },
-    DisconnectBluetooth {
-        device_id: String,
-    },
-    SetBluetoothConfig {
-        device_id: String,
-        config: BleParameters,
-    },
-    GetBluetoothConfig {
-        device_id: String,
-    },
-    GetHubSnapshot,
-    GetAppPreferences,
-    SetCloseToTray {
-        enabled: bool,
-    },
-    SetStartMinimized {
-        enabled: bool,
-    },
-    ConnectRelay,
-    DisconnectRelay,
-    RefreshPairing,
-    AdjustIntensity {
-        device_id: String,
-        channel: Channel,
-        delta: i32,
-    },
-    StartOutput {
-        device_id: String,
-    },
-    ClearDeviceChannel {
-        device_id: String,
-        channel: Channel,
-    },
-    StopOutput {
-        device_id: String,
-    },
-    ListPlugins,
-    InstallPlugin {
-        path: String,
-    },
-    UpdatePlugin {
-        path: String,
-    },
-    UninstallPlugin {
-        plugin_id: String,
-        #[serde(default)]
-        delete_data: bool,
-    },
-    CreateSource {
-        plugin_id: String,
-        name: String,
-    },
-    DeleteSource {
-        source_id: String,
-        #[serde(default)]
-        delete_data: bool,
-    },
-    SetSourceEnabled {
-        source_id: String,
-        enabled: bool,
-    },
-    StartSource {
-        source_id: String,
-    },
-    StopSource {
-        source_id: String,
-    },
-    SetSourceConfig {
-        source_id: String,
-        config: Value,
-        #[serde(default)]
-        binding_id: Option<String>,
-    },
-    GetSourceUi {
-        source_id: String,
-        params: UiParams,
-    },
-    SourceAction {
-        source_id: String,
-        params: ActionParams,
-    },
-    SourceInput {
-        source_id: String,
-        params: InputParams,
-    },
-    SetDeviceChannelSource {
-        device_id: String,
-        channel: Channel,
-        source_id: String,
-    },
-    SetDeviceChannelSourceSync {
-        device_id: String,
-        enabled: bool,
-    },
-    SetDefaultSource {
-        source_id: Option<String>,
-    },
-    SetFixedWaveform {
-        device_id: String,
-        channel: Channel,
-        config: WaveformConfig,
-    },
-    ListWaveforms,
-    GetCustomWaveform {
-        preset_id: String,
-    },
-    SelectWaveform {
-        device_id: String,
-        channel: Channel,
-        preset_id: String,
-    },
-    SelectCustomWaveform {
-        device_id: String,
-        channel: Channel,
-        preset_id: String,
-    },
-    ImportCustomWaveforms {
-        configs: Vec<WaveformConfig>,
-    },
-    ParseWaveformFiles {
-        files: Vec<WaveformFile>,
-    },
-    ImportWaveformFiles {
-        files: Vec<WaveformFile>,
-    },
-    DeleteCustomWaveform {
-        preset_id: String,
-    },
-    ReorderCustomWaveforms {
-        preset_ids: Vec<String>,
-    },
-    SelectDevice {
-        device_id: String,
-    },
-    SetSyncAllDevices {
-        device_id: String,
-        enabled: bool,
-    },
-    UpdateSafety {
-        connection_timeout_enabled: bool,
-        connection_timeout_minutes: i32,
-        allow_app_intensity_control: bool,
-    },
-    SetTouchConfig {
-        config: TouchConfig,
-    },
-    UpdateTouchInput {
-        input: TouchInput,
-    },
-    SetAudioConfig {
-        device_id: String,
-        channel: Channel,
-        config: AudioChannelConfig,
-    },
-    AudioControl {
-        action: AudioAction,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ControlError {
-    pub code: String,
-    pub message: String,
-}
-
-impl ControlError {
-    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            code: code.into(),
-            message: message.into(),
-        }
-    }
-}
-
-impl std::fmt::Display for ControlError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for ControlError {}
+pub use dg_lab_link_contracts::{ControlCommand, ControlError};
 
 impl From<HubError> for ControlError {
     fn from(error: HubError) -> Self {
@@ -241,94 +26,6 @@ impl From<HubError> for ControlError {
 impl From<PreferencesError> for ControlError {
     fn from(error: PreferencesError) -> Self {
         Self::new("preferences_error", error.to_string())
-    }
-}
-
-impl From<std::io::Error> for ControlError {
-    fn from(error: std::io::Error) -> Self {
-        Self::new("io_error", error.to_string())
-    }
-}
-
-pub struct CommandDescriptor {
-    pub name: String,
-    pub description: String,
-    pub input_schema: Value,
-    pub read_only: bool,
-}
-
-impl ControlCommand {
-    pub fn from_call(name: &str, params: Value) -> Result<Self, ControlError> {
-        let mut value = serde_json::json!({"command": name});
-        let unit = matches!(
-            name,
-            "get_hub_snapshot"
-                | "get_connections"
-                | "get_app_preferences"
-                | "connect_relay"
-                | "disconnect_relay"
-                | "refresh_pairing"
-                | "list_plugins"
-                | "list_waveforms"
-        );
-        if !unit || (params != Value::Null && params != serde_json::json!({})) {
-            value["params"] = params;
-        }
-        serde_json::from_value(value)
-            .map_err(|error| ControlError::new("invalid_params", error.to_string()))
-    }
-
-    pub fn is_safety(&self) -> bool {
-        matches!(
-            self,
-            Self::StopOutput { .. }
-                | Self::DisconnectRelay
-                | Self::DisconnectConnection { .. }
-                | Self::DisconnectBluetooth { .. }
-        )
-    }
-
-    pub fn is_business(&self) -> bool {
-        !matches!(
-            self,
-            Self::GetAppPreferences | Self::SetCloseToTray { .. } | Self::SetStartMinimized { .. }
-        )
-    }
-
-    fn persists(&self) -> bool {
-        matches!(
-            self,
-            Self::SetCloseToTray { .. }
-                | Self::SetStartMinimized { .. }
-                | Self::SetDefaultSource { .. }
-                | Self::UpdateSafety { .. }
-                | Self::ImportCustomWaveforms { .. }
-                | Self::ImportWaveformFiles { .. }
-                | Self::DeleteCustomWaveform { .. }
-                | Self::ReorderCustomWaveforms { .. }
-                | Self::SetRelayEndpoint { .. }
-                | Self::SetBluetoothConfig { .. }
-                | Self::ConnectTransport { .. }
-        )
-    }
-
-    pub fn descriptors() -> Vec<CommandDescriptor> {
-        let schema =
-            serde_json::to_value(schemars::schema_for!(Self)).expect("命令 Schema 可序列化");
-        schema["oneOf"].as_array().expect("命令是带标签的枚举").iter().map(|variant| {
-            let name = variant["properties"]["command"]["const"].as_str()
-                .or_else(|| variant["properties"]["command"]["enum"][0].as_str())
-                .expect("命令 Schema 含名称").to_owned();
-            let mut input_schema = variant["properties"]["params"].clone();
-            if input_schema.is_null() {
-                input_schema = serde_json::json!({"type": "object", "properties": {}, "additionalProperties": false});
-            }
-            if let Some(definitions) = schema.get("$defs") {
-                input_schema["$defs"] = definitions.clone();
-            }
-            let read_only = name != "get_source_ui" && (name.starts_with("get_") || name.starts_with("list_") || name == "parse_waveform_files");
-            CommandDescriptor { description: command_description(&name).to_owned(), name, input_schema, read_only }
-        }).filter(|descriptor| !matches!(descriptor.name.as_str(), "get_app_preferences" | "set_close_to_tray" | "set_start_minimized")).collect()
     }
 }
 
@@ -348,10 +45,7 @@ impl ControlService {
         relay_endpoint: String,
     ) -> Result<(Self, HubRuntime), ControlError> {
         crate::initialize_tls();
-        let preferences = PreferencesState::load(config_dir.clone()).unwrap_or_else(|error| {
-            eprintln!("{error}；本次运行使用默认设置");
-            PreferencesState::with_defaults(config_dir.clone())
-        });
+        let preferences = PreferencesState::load(config_dir.clone())?;
         let (connection_timeout_enabled, connection_timeout_minutes, allow_app_intensity_control) =
             preferences.safety_settings();
         let (hub, mut runtime) = create_hub_with_source_preferences(
@@ -404,8 +98,7 @@ impl ControlService {
                 "cn.dglab.link.touch",
                 "source-touch",
                 "触控",
-                serde_json::to_value(self.preferences.touch_config())
-                    .map_err(|e| ControlError::new("invalid_params", e.to_string()))?,
+                serde_json::json!({}),
             ),
             (
                 "cn.dglab.link.audio",
@@ -457,17 +150,40 @@ impl ControlService {
     }
 
     pub async fn execute(&self, command: ControlCommand) -> Result<Value, ControlError> {
+        self.execute_scoped(command, Some(self.hub.safety_generation()))
+            .await
+    }
+
+    async fn execute_scoped(
+        &self,
+        command: ControlCommand,
+        operation_epoch: Option<u64>,
+    ) -> Result<Value, ControlError> {
+        let epoch = operation_epoch.unwrap_or_else(|| self.hub.safety_generation());
+        if command.may_resume_output()
+            && (operation_epoch.is_none() || epoch != self.hub.safety_generation())
+        {
+            return Err(ControlError::new(
+                "queue_busy",
+                "操作上下文已被停止撤销，请重新发起操作",
+            ));
+        }
+        dg_lab_link_plugin_sdk::OPERATION_EPOCH
+            .scope(epoch, self.execute_accepted(command))
+            .await
+    }
+
+    async fn execute_accepted(&self, command: ControlCommand) -> Result<Value, ControlError> {
         let plugin_transaction = matches!(
             &command,
             ControlCommand::SetSourceConfig { .. }
-                | ControlCommand::SetTouchConfig { .. }
                 | ControlCommand::InstallPlugin { .. }
                 | ControlCommand::UpdatePlugin { .. }
                 | ControlCommand::UninstallPlugin { .. }
                 | ControlCommand::CreateSource { .. }
                 | ControlCommand::DeleteSource { .. }
                 | ControlCommand::SetSourceEnabled { .. }
-        ) || matches!(&command, ControlCommand::SourceAction { params, .. } if params.action == "configure");
+        );
         if plugin_transaction {
             let permit = self
                 .configuration_slots
@@ -475,10 +191,14 @@ impl ControlService {
                 .try_acquire_owned()
                 .map_err(|_| ControlError::from(HubError::QueueBusy))?;
             let service = self.clone();
-            return tokio::spawn(async move {
-                let _permit = permit;
-                service.execute_inner(command).await
-            })
+            let epoch = dg_lab_link_plugin_sdk::OPERATION_EPOCH.with(|epoch| *epoch);
+            return tokio::spawn(dg_lab_link_plugin_sdk::OPERATION_EPOCH.scope(
+                epoch,
+                async move {
+                    let _permit = permit;
+                    service.execute_inner(command).await
+                },
+            ))
             .await
             .map_err(|error| ControlError::new("internal_error", error.to_string()))?;
         }
@@ -489,20 +209,23 @@ impl ControlService {
                 .try_acquire_owned()
                 .map_err(|_| ControlError::from(HubError::QueueBusy))?;
             let service = self.clone();
-            let accepted_epoch = self.hub.safety_generation();
+            let accepted_epoch = dg_lab_link_plugin_sdk::OPERATION_EPOCH.with(|epoch| *epoch);
             let may_reconnect = matches!(
                 command,
                 ControlCommand::ConnectTransport { .. } | ControlCommand::SetBluetoothConfig { .. }
             );
             // A disconnected caller must not cancel a partially persisted transaction.
-            return tokio::spawn(async move {
-                let _permit = permit;
-                let _transaction = service.configuration.lock().await;
-                if may_reconnect && accepted_epoch != service.hub.safety_generation() {
-                    return Err(HubError::QueueBusy.into());
-                }
-                service.execute_inner(command).await
-            })
+            return tokio::spawn(dg_lab_link_plugin_sdk::OPERATION_EPOCH.scope(
+                accepted_epoch,
+                async move {
+                    let _permit = permit;
+                    let _transaction = service.configuration.lock().await;
+                    if may_reconnect && accepted_epoch != service.hub.safety_generation() {
+                        return Err(HubError::QueueBusy.into());
+                    }
+                    service.execute_inner(command).await
+                },
+            ))
             .await
             .map_err(|error| ControlError::new("internal_error", error.to_string()))?;
         }
@@ -523,7 +246,14 @@ impl ControlService {
                         if transport == TransportKind::WsV3 {
                             DEFAULT_V3_ENDPOINT.to_owned()
                         } else {
-                            self.snapshot().connection.endpoint
+                            self.snapshot()
+                                .connections
+                                .into_iter()
+                                .find(|connection| connection.transport == transport)
+                                .map(|connection| connection.endpoint)
+                                .unwrap_or_else(|| {
+                                    crate::dglab::client::DEFAULT_RELAY_ENDPOINT.to_owned()
+                                })
                         }
                     });
                 self.set_relay_endpoint(transport, endpoint.clone()).await?;
@@ -628,9 +358,6 @@ impl ControlService {
             GetAppPreferences => return serialize(self.preferences.snapshot(false)),
             SetCloseToTray { enabled } => self.preferences.set_close_to_tray(enabled)?,
             SetStartMinimized { enabled } => self.preferences.set_start_minimized(enabled)?,
-            ConnectRelay => self.hub.connect_relay().await?,
-            DisconnectRelay => self.hub.disconnect_relay().await?,
-            RefreshPairing => self.hub.refresh_pairing().await?,
             AdjustIntensity {
                 device_id,
                 channel,
@@ -669,13 +396,11 @@ impl ControlService {
                 self.hub.start_output(device_id).await?;
             }
             ClearDeviceChannel { device_id, channel } => {
-                let generation = self
+                let (binding_id, generation) = self
                     .hub
                     .clear_device_channel(device_id.clone(), channel)
                     .await?;
-                return Ok(
-                    serde_json::json!({"bindingId":format!("{device_id}/{channel}"),"generation":generation}),
-                );
+                return Ok(serde_json::json!({"bindingId":binding_id,"generation":generation}));
             }
             StopOutput { device_id } => self.hub.stop_output(device_id).await?,
             ListPlugins => return serialize(self.plugins.snapshot().plugins),
@@ -752,7 +477,12 @@ impl ControlService {
                 source_id,
                 config,
                 binding_id,
-            } => return self.configure_source(source_id, config, binding_id).await,
+                expected_revision,
+            } => {
+                return self
+                    .configure_source(source_id, config, binding_id, expected_revision)
+                    .await;
+            }
             GetSourceUi { source_id, params } => {
                 return serialize(
                     self.plugins
@@ -762,10 +492,11 @@ impl ControlService {
                 );
             }
             SourceAction { source_id, params } => {
-                if params.action == "configure" {
-                    return self
-                        .configure_source(source_id, params.value, params.binding_id)
-                        .await;
+                if matches!(params.action.as_str(), "configure" | "configure_binding") {
+                    return Err(ControlError::new(
+                        "invalid_command",
+                        "配置写入请使用带 expectedRevision 的 set_source_config",
+                    ));
                 }
                 let value = self
                     .plugins
@@ -894,7 +625,6 @@ impl ControlService {
                 self.apply_waveform_state(self.preferences.fixed_waveform(), reordered)
                     .await?;
             }
-            SelectDevice { device_id } => self.hub.select_device(device_id).await?,
             SetSyncAllDevices { device_id, enabled } => {
                 self.hub.set_sync_all_devices(device_id, enabled).await?
             }
@@ -930,84 +660,6 @@ impl ControlService {
                     return Err(error.into());
                 }
             }
-            SetTouchConfig { config } => {
-                return self
-                    .configure_source("source-touch".into(), serialize(config)?, None)
-                    .await;
-            }
-            UpdateTouchInput { input } => {
-                let device = self
-                    .snapshot()
-                    .devices
-                    .into_iter()
-                    .find(|device| device.control_id == input.device_id)
-                    .ok_or(HubError::DeviceUnavailable)?;
-                if !device.output_active {
-                    return Err(HubError::SourceUnavailable("请先开始触控输出".into()).into());
-                }
-                self.plugins
-                    .try_input(
-                        "source-touch",
-                        InputParams {
-                            action: "update_touch_input".into(),
-                            value: serialize(&input)?,
-                            binding_id: None,
-                            owner: input.owner_id,
-                            sequence: input.sequence,
-                        },
-                    )
-                    .map_err(plugin_error)?;
-            }
-            SetAudioConfig {
-                device_id,
-                channel,
-                config,
-            } => {
-                config
-                    .validate()
-                    .map_err(|e| ControlError::new("invalid_source_config", e.to_string()))?;
-                let device = self
-                    .snapshot()
-                    .devices
-                    .into_iter()
-                    .find(|device| device.control_id == device_id)
-                    .ok_or(HubError::DeviceUnavailable)?;
-                let (source, binding) = match channel {
-                    Channel::A => (device.source_id_a, device.binding_id_a),
-                    Channel::B => (device.source_id_b, device.binding_id_b),
-                };
-                if source.as_deref() != Some("source-audio") {
-                    return Err(
-                        HubError::SourceUnavailable("目标通道未绑定默认音频实例".into()).into(),
-                    );
-                }
-                return self
-                    .configure_source("source-audio".into(), serialize(config)?, binding)
-                    .await;
-            }
-            AudioControl { action } => {
-                if let AudioAction::LoadFile { path } | AudioAction::SaveRecording { path } =
-                    &action
-                    && !std::path::Path::new(path).is_absolute()
-                {
-                    return Err(ControlError::new(
-                        "invalid_params",
-                        "音频文件和录音保存路径必须为绝对路径",
-                    ));
-                }
-                self.plugins
-                    .action(
-                        "source-audio",
-                        ActionParams {
-                            action: "audio_control".into(),
-                            value: serde_json::json!({"action":action}),
-                            binding_id: None,
-                        },
-                    )
-                    .await
-                    .map_err(plugin_error)?;
-                self.hub.refresh_plugins().await?;
-            }
         }
         Ok(Value::Null)
     }
@@ -1017,6 +669,7 @@ impl ControlService {
         source_id: String,
         config: Value,
         binding_id: Option<String>,
+        expected_revision: u64,
     ) -> Result<Value, ControlError> {
         let live_sources = self
             .plugins
@@ -1055,15 +708,21 @@ impl ControlService {
             if !belongs {
                 return Err(ControlError::new("source_unavailable", "通道绑定已变更"));
             }
-            let previous = self
+            let binding = self
                 .snapshot()
                 .source_bindings
                 .into_iter()
                 .find(|binding| {
                     binding.source_id == source_id && binding.binding.binding_id == binding_id
                 })
-                .map(|binding| binding.binding.config)
-                .unwrap_or_else(|| serde_json::json!({}));
+                .ok_or_else(|| ControlError::new("source_unavailable", "通道绑定已变更"))?;
+            if binding.revision != expected_revision {
+                return Err(ControlError::new(
+                    "config_conflict",
+                    "通道配置已由其他操作修改，请重新读取",
+                ));
+            }
+            let previous = binding.binding.config;
             let make_action = |config: Value, validate_only: bool| ActionParams {
                 action: "configure_binding".into(),
                 value: serde_json::json!({"bindingId":binding_id,"config":config,"validateOnly":validate_only}),
@@ -1097,7 +756,12 @@ impl ControlService {
             };
             if let Err(error) = self
                 .hub
-                .set_plugin_binding_config(source_id.clone(), binding_id.clone(), config)
+                .set_plugin_binding_config(
+                    source_id.clone(),
+                    binding_id.clone(),
+                    config,
+                    expected_revision,
+                )
                 .await
             {
                 if let Err(rollback) = self
@@ -1118,7 +782,7 @@ impl ControlService {
         } else {
             let value = self
                 .plugins
-                .configure(&source_id, config)
+                .configure(&source_id, config, expected_revision)
                 .await
                 .map_err(plugin_error)?;
             self.hub.refresh_plugins().await?;
@@ -1232,7 +896,18 @@ struct CorePluginBusiness {
     service: ControlService,
 }
 impl BusinessHandler for CorePluginBusiness {
-    fn call<'a>(&'a self, _source_id: &'a str, command: Value) -> BusinessFuture<'a> {
+    fn begin_operation<'a>(&'a self, _source_id: &'a str) -> BusinessFuture<'a> {
+        Box::pin(async move {
+            Ok(serde_json::json!({ "operationEpoch": self.service.hub.safety_generation() }))
+        })
+    }
+
+    fn call<'a>(
+        &'a self,
+        _source_id: &'a str,
+        command: Value,
+        operation_epoch: Option<u64>,
+    ) -> BusinessFuture<'a> {
         Box::pin(async move {
             let command: ControlCommand = serde_json::from_value(command)
                 .map_err(|error| PluginError::new("invalid_params", error.to_string()))?;
@@ -1243,7 +918,7 @@ impl BusinessHandler for CorePluginBusiness {
                 ));
             }
             self.service
-                .execute(command)
+                .execute_scoped(command, operation_epoch)
                 .await
                 .map_err(|error| PluginError::new(error.code, error.message))
         })
@@ -1262,98 +937,92 @@ fn rollback_error(error: &PreferencesError, rollback: HubError) -> ControlError 
     )
 }
 
-fn command_description(name: &str) -> &str {
-    match name {
-        "get_hub_snapshot" => "读取共享核心的连接、设备、输入源、输出状态和运行记录。",
-        "connect_relay" => "连接 Socket V4 Relay；连接成功后读取快照中的配对链接。",
-        "disconnect_relay" => "停止 Socket V4 所属设备输出并断开 V4 Relay；其他传输继续运行。",
-        "get_connections" => {
-            "读取 Socket V4、Socket V3 与郊狼 3.0 蓝牙连接状态、connectionId 和 APP 配对链接。"
-        }
-        "connect_transport" => {
-            "连接 ws_v4 或 ws_v3 Relay；endpoint 可省略以使用已保存端点，之后读取连接的配对链接。"
-        }
-        "disconnect_connection" => {
-            "按 connectionId 停止并断开指定连接；仅清理所属设备，其他连接继续运行。"
-        }
-        "refresh_connection_pairing" => {
-            "按 connectionId 刷新 V4 或 V3 APP 配对；会断开该连接已有的 APP 和设备。"
-        }
-        "set_relay_endpoint" => {
-            "持久保存 ws_v4 或 ws_v3 端点；连接运行时先断开，支持 ws:// 与 wss://。"
-        }
-        "scan_bluetooth" => {
-            "主动扫描郊狼 3.0 BLE 广播，durationMs 为扫描毫秒数；结果包含发现 deviceId，不自动连接或输出。"
-        }
-        "connect_bluetooth" => {
-            "连接 scan_bluetooth 返回的 deviceId（蓝牙发现标识，不是 controlId）；完成安全初始化后读取新设备的 controlId。"
-        }
-        "disconnect_bluetooth" => {
-            "按设备 controlId（不是扫描 deviceId）停止并断开指定郊狼 3.0 蓝牙设备；其他设备继续运行。"
-        }
-        "get_bluetooth_config" => {
-            "按设备 controlId（不是扫描 deviceId）读取郊狼 3.0 的持久参数，含软上限、频率/强度平衡与旋钮保护。"
-        }
-        "set_bluetooth_config" => {
-            "按设备 controlId（不是扫描 deviceId）校验、下发并持久保存郊狼 3.0 参数；BF 无设备回执，已下发不等于设备已确认。"
-        }
-        "refresh_pairing" => "刷新配对链接；可能断开已有设备，请先读取状态。",
-        "adjust_intensity" => {
-            "按 deviceId（设备 controlId）和 a/b 通道相对调整强度，受设备上限与同步设置约束。"
-        }
-        "start_output" => "开始指定 deviceId 的输出；两路必须先完成输入源分配。",
-        "clear_device_channel" => {
-            "清空指定设备的一路旧波形，保持基础强度与输出活动；返回绑定代次，不代表设备已确认。"
-        }
-        "stop_output" => "停止指定 deviceId 的输出，其他设备继续运行。",
-        "list_plugins" => "读取已安装插件、版本、发布者和预装来源。",
-        "install_plugin" => "从绝对路径的本地 .dglabplugin 包安装插件。",
-        "update_plugin" => "更新本地插件包；保留实例与配置，停止相关输出，失败回滚。",
-        "uninstall_plugin" => "卸载插件并解除绑定；deleteData 为 true 时清除保存数据。",
-        "create_source" => "从已安装插件创建独立输入源实例。",
-        "delete_source" => "删除实例并解除绑定；deleteData 为 true 时清除数据。",
-        "set_source_enabled" => "持久保存实例启用状态；启用后按需启动。",
-        "start_source" => "启动插件实例进程；设备输出仍需单独开始。",
-        "stop_source" => "停止插件实例和关联通道波形；其他实例继续运行。",
-        "set_source_config" => {
-            "校验并应用配置；无 bindingId 时持久保存实例配置，有 bindingId 时更新当前会话通道配置。"
-        }
-        "get_source_ui" => "按 settings/control surface 读取公开语义界面与动作 Schema。",
-        "source_action" => "调用插件声明的动作；configure 使用核心配置事务。",
-        "source_input" => "提交带 owner、sequence 的持续输入；处理使用独立有界队列。",
-        "update_touch_input" => {
-            "提交触控坐标；ownerId、递增 sequence 和一秒租期限制同 GUI，不续租会释放触点。"
-        }
-        "audio_control" => "控制本机音频播放、采集或录音；文件及录音保存路径必须为绝对路径。",
-        "set_sync_all_devices" => {
-            "开启或关闭全设备强度同步；deviceId 明确指定开启同步时的基准设备。"
-        }
-        "list_waveforms" => "读取内置及自定义波形目录。",
-        "select_waveform" => "按 presetId 为指定设备通道选择内置或自定义波形。",
-        "import_waveform_files" => "解析并导入 .pulse、JSON 或 .pulses 文本，每个文件最多 2 MiB。",
-        "parse_waveform_files" => "解析波形文件文本并返回标准波形，不修改波形库。",
-        "update_safety" => "更新并持久保存连接超时和手机反向强度控制设置。",
-        "set_touch_config" => "校验并持久保存触控配置。",
-        "set_audio_config" => "更新指定设备通道的音频映射。",
-        "set_device_channel_source" => "为指定设备通道绑定一个输入源。",
-        "set_device_channel_source_sync" => "更新指定设备的 A/B 输入源同步设置。",
-        "set_default_source" => "更新并保存新设备默认输入源；null 表示每次询问。",
-        "set_fixed_waveform" => "为指定设备通道设置完整固定波形配置。",
-        "import_custom_waveforms" => "批量校验并导入标准自定义波形配置。",
-        "get_custom_waveform" => "读取指定自定义波形完整配置。",
-        "select_custom_waveform" => "为指定设备通道选择自定义波形。",
-        "delete_custom_waveform" => "删除自定义波形并清理引用它的通道。",
-        "reorder_custom_waveforms" => "保存完整自定义波形排序，必须包含全部 ID 且无重复。",
-        "select_device" => "显式切换共享 GUI 控制焦点；其他设备写操作均应直接提供 deviceId。",
-        _ => "共享核心业务操作。",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::dglab::client::DEFAULT_RELAY_ENDPOINT;
     use std::time::Duration;
+
+    #[test]
+    fn malformed_preferences_fail_without_replacing_recoverable_data() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("preferences.json");
+        let original = br#"{"connectionTimeoutMinutes":"broken","customWaveforms":[{"presetId":"recoverable","presetName":"Recoverable","frames":["0A0A0A0A64646464"]}]}"#;
+        std::fs::write(&path, original).unwrap();
+        let result =
+            ControlService::create(directory.path().to_owned(), "ws://127.0.0.1:1/v4".into());
+        assert!(matches!(result, Err(error) if error.code == "preferences_error"));
+        assert_eq!(std::fs::read(path).unwrap(), original);
+        assert!(!directory.path().join("plugins/registry.json").exists());
+    }
+
+    #[tokio::test]
+    async fn plugin_callbacks_keep_their_original_stop_context() {
+        let directory = tempfile::tempdir().unwrap();
+        let (service, runtime) =
+            ControlService::create(directory.path().to_owned(), "ws://127.0.0.1:1/v4".into())
+                .unwrap();
+        let hub = tokio::spawn(runtime.run());
+        let callback = CorePluginBusiness {
+            service: service.clone(),
+        };
+        let old_epoch = service.hub.safety_generation();
+        service
+            .execute(ControlCommand::DisconnectConnection {
+                connection_id: "ws-v4".into(),
+            })
+            .await
+            .unwrap();
+        let start = serde_json::json!({"command":"start_output","params":{"deviceId":"device"}});
+        assert_eq!(
+            callback
+                .call("plugin", start.clone(), Some(old_epoch))
+                .await
+                .unwrap_err()
+                .code,
+            "queue_busy"
+        );
+        assert_eq!(
+            callback
+                .call("plugin", start.clone(), None)
+                .await
+                .unwrap_err()
+                .code,
+            "queue_busy"
+        );
+        let new_context = callback.begin_operation("plugin").await.unwrap();
+        let new_epoch = new_context["operationEpoch"].as_u64().unwrap();
+        assert_eq!(new_epoch, service.hub.safety_generation());
+        assert_ne!(new_epoch, old_epoch);
+        assert_eq!(
+            callback
+                .call("plugin", start.clone(), Some(new_epoch))
+                .await
+                .unwrap_err()
+                .code,
+            "device_unavailable"
+        );
+        assert_eq!(
+            callback
+                .call("plugin", start, Some(old_epoch))
+                .await
+                .unwrap_err()
+                .code,
+            "queue_busy"
+        );
+        assert!(
+            callback
+                .call(
+                    "plugin",
+                    serde_json::json!({"command":"get_hub_snapshot"}),
+                    Some(old_epoch)
+                )
+                .await
+                .is_ok()
+        );
+        service.shutdown().await.unwrap();
+        hub.await.unwrap();
+    }
 
     #[test]
     fn public_calls_require_explicit_devices_and_describe_all_business_commands() {
@@ -1379,7 +1048,7 @@ mod tests {
         assert_eq!(names.len(), descriptors.len());
         assert!(
             names.contains("source_action")
-                && names.contains("audio_control")
+                && !names.contains("audio_control")
                 && names.contains("import_waveform_files")
         );
         let intensity = descriptors
@@ -1479,7 +1148,9 @@ mod tests {
         let _guard = service.configuration.lock().await;
         tokio::time::timeout(
             Duration::from_secs(1),
-            service.execute(ControlCommand::DisconnectRelay),
+            service.execute(ControlCommand::DisconnectConnection {
+                connection_id: crate::transport::V4_CONNECTION_ID.into(),
+            }),
         )
         .await
         .unwrap()
@@ -1599,7 +1270,9 @@ mod tests {
         });
         tokio::task::yield_now().await;
         service
-            .execute(ControlCommand::DisconnectRelay)
+            .execute(ControlCommand::DisconnectConnection {
+                connection_id: crate::transport::V4_CONNECTION_ID.into(),
+            })
             .await
             .unwrap();
         drop(lock);

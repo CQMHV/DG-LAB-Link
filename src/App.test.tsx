@@ -198,10 +198,8 @@ describe("DG-LAB Link 前端", () => {
             __emitMockSnapshot({
                 ...initial,
                 revision: initial.revision + 1,
-                connection: {
-                    ...initial.connection,
-                    lastError: "Relay 握手超时",
-                },
+                connections: initial.connections.map((connection, index) => index === 0 ? { ...connection,
+                    lastError: "Relay 握手超时", } : connection),
             });
         });
 
@@ -217,18 +215,12 @@ describe("DG-LAB Link 前端", () => {
             __emitMockSnapshot({
                 ...initial,
                 revision: initial.revision + 1,
-                device: initial.device
-                    ? { ...initial.device, channelAStatus: "disabled" }
-                    : null,
+
                 devices: initial.devices.map((device, index) =>
                     index === 0
                         ? { ...device, channelAStatus: "disabled" }
                         : device,
                 ),
-                channels: {
-                    ...initial.channels,
-                    a: { ...initial.channels.a, status: "disabled" },
-                },
             });
         });
 
@@ -248,13 +240,7 @@ describe("DG-LAB Link 前端", () => {
             __emitMockSnapshot({
                 ...initial,
                 revision: initial.revision + 2,
-                device: initial.device
-                    ? {
-                          ...initial.device,
-                          channelAStatus: "disabled",
-                          channelBStatus: "disabled",
-                      }
-                    : null,
+
                 devices: initial.devices.map((device, index) =>
                     index === 0
                         ? {
@@ -264,10 +250,6 @@ describe("DG-LAB Link 前端", () => {
                           }
                         : device,
                 ),
-                channels: {
-                    a: { ...initial.channels.a, status: "disabled" },
-                    b: { ...initial.channels.b, status: "disabled" },
-                },
             });
         });
         expect(
@@ -295,14 +277,10 @@ describe("DG-LAB Link 前端", () => {
         __emitMockSnapshot({
             ...initial,
             revision: initial.revision + 1,
-            connection: {
-                ...initial.connection,
+            connections: initial.connections.map((connection, index) => index === 0 ? { ...connection,
                 state: "waiting",
-                appCount: 0,
-            },
-            device: null,
+                appCount: 0, } : connection),
             devices: [],
-            selectedDeviceId: null,
         });
         render(<App />);
 
@@ -336,9 +314,9 @@ describe("DG-LAB Link 前端", () => {
         const copyButton = screen.getByRole("button", {
             name: "复制配对链接",
         });
-        expect(initial.connection.pairingUrl).toBeTruthy();
+        expect(initial.connections[0].pairingUrl).toBeTruthy();
         expect(
-            screen.queryByText(initial.connection.pairingUrl as string),
+            screen.queryByText(initial.connections[0].pairingUrl as string),
         ).toBeNull();
 
         await waitFor(() => {
@@ -657,7 +635,7 @@ describe("DG-LAB Link 前端", () => {
                 __emitMockSnapshot({
                     ...initial,
                     revision: initial.revision + index + 1,
-                    connection: { ...initial.connection, state },
+                    connections: initial.connections.map((connection, index) => index === 0 ? { ...connection, state } : connection),
                 });
             });
             const status = await screen.findByText(label);
@@ -1246,16 +1224,10 @@ describe("DG-LAB Link 前端", () => {
             __emitMockSnapshot({
                 ...initial,
                 revision: 10,
-                device: initial.device
-                    ? { ...initial.device, intensityA: 42 }
-                    : null,
+
                 devices: initial.devices.map((device, index) =>
                     index === 0 ? { ...device, intensityA: 42 } : device,
                 ),
-                channels: {
-                    ...initial.channels,
-                    a: { ...initial.channels.a, intensity: 42 },
-                },
             });
         });
         await waitFor(() => {
@@ -1269,16 +1241,10 @@ describe("DG-LAB Link 前端", () => {
             __emitMockSnapshot({
                 ...initial,
                 revision: 9,
-                device: initial.device
-                    ? { ...initial.device, intensityA: 7 }
-                    : null,
+
                 devices: initial.devices.map((device, index) =>
                     index === 0 ? { ...device, intensityA: 7 } : device,
                 ),
-                channels: {
-                    ...initial.channels,
-                    a: { ...initial.channels.a, intensity: 7 },
-                },
             });
         });
         expect(
@@ -1413,7 +1379,7 @@ describe("DG-LAB Link 前端", () => {
     it("设备页面只展示状态且不提供设备切换入口", async () => {
         const user = userEvent.setup();
         render(<App />);
-        const selectedDeviceId = (await getHubSnapshot()).selectedDeviceId;
+        const initialRevision = (await getHubSnapshot()).revision;
 
         await user.click(screen.getByRole("button", { name: "设备" }));
         expect(screen.getByText("郊狼 3.0")).toBeTruthy();
@@ -1424,7 +1390,7 @@ describe("DG-LAB Link 前端", () => {
         expect(
             screen.queryByRole("button", { name: "当前控制设备" }),
         ).toBeNull();
-        expect((await getHubSnapshot()).selectedDeviceId).toBe(selectedDeviceId);
+        expect((await getHubSnapshot()).revision).toBe(initialRevision);
     });
 
     it("可以从设备页面在新标签页中打开设备", async () => {

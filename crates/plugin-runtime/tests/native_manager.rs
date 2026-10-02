@@ -10,10 +10,52 @@ use serde_json::{Value, json};
 
 struct Core;
 impl BusinessHandler for Core {
-    fn call<'a>(&'a self, source_id: &'a str, command: Value) -> BusinessFuture<'a> {
+    fn call<'a>(
+        &'a self,
+        source_id: &'a str,
+        command: Value,
+        _operation_epoch: Option<u64>,
+    ) -> BusinessFuture<'a> {
         Box::pin(async move {
             assert_eq!(command["command"], "get_hub_snapshot");
             Ok(json!({"sourceId":source_id,"controlId":"shared-device"}))
+        })
+    }
+}
+
+#[cfg(feature = "test-fixtures")]
+fn fixture_package(root: &Path, version: &str) -> PathBuf {
+    let archive = package(root, version, true);
+    let directory = root.join(format!("payload-{version}"));
+    fs::copy(
+        env!("CARGO_BIN_EXE_dg-lab-link-plugin-fixture"),
+        directory.join("source.exe"),
+    )
+    .unwrap();
+    dg_lab_link_plugin_runtime::package::pack_directory(&directory, &archive).unwrap();
+    archive
+}
+
+#[cfg(feature = "test-fixtures")]
+struct EpochCore(std::sync::atomic::AtomicU64);
+
+#[cfg(feature = "test-fixtures")]
+impl BusinessHandler for EpochCore {
+    fn begin_operation<'a>(&'a self, _: &'a str) -> BusinessFuture<'a> {
+        Box::pin(async move {
+            Ok(json!({"operationEpoch": self.0.load(std::sync::atomic::Ordering::Acquire)}))
+        })
+    }
+    fn call<'a>(&'a self, _: &'a str, command: Value, epoch: Option<u64>) -> BusinessFuture<'a> {
+        Box::pin(async move {
+            assert_eq!(command["command"], "start_output");
+            if epoch != Some(self.0.load(std::sync::atomic::Ordering::Acquire)) {
+                return Err(PluginError::new(
+                    "queue_busy",
+                    "Operation was revoked by stop",
+                ));
+            }
+            Ok(Value::Null)
         })
     }
 }
@@ -133,15 +175,15 @@ async fn third_party_native_package_lazy_start_ui_business_and_configuration_rol
     assert_eq!(response["controlId"], "shared-device");
     assert_eq!(
         manager
-            .configure("first", json!({"frequency":9}))
+            .configure("first", json!({"frequency":9}), 0)
             .await
             .unwrap_err()
             .code,
         "invalid_config"
     );
     let (first, second) = tokio::join!(
-        manager.configure("first", json!({"frequency":120,"intensity":21})),
-        manager.configure("second", json!({"frequency":130,"intensity":22}))
+        manager.configure("first", json!({"frequency":120,"intensity":21}), 0),
+        manager.configure("second", json!({"frequency":130,"intensity":22}), 0)
     );
     first.unwrap();
     second.unwrap();
@@ -150,7 +192,7 @@ async fn third_party_native_package_lazy_start_ui_business_and_configuration_rol
     fs::create_dir(root.join("registry.json")).unwrap();
     assert!(
         manager
-            .configure("first", json!({"frequency":150,"intensity":50}))
+            .configure("first", json!({"frequency":150,"intensity":50}), 1)
             .await
             .is_err()
     );
@@ -196,10 +238,308 @@ async fn update_validates_staged_binary_and_keeps_previous_package_on_failure() 
     assert!(manager.update(bad).await.is_err());
     assert_eq!(manager.snapshot().plugins[0].manifest.version, "1.0.0");
     assert_eq!(manager.snapshot().sources[0].status, SourceStatus::Stopped);
+    assert_eq!(manager.snapshot().sources[0].revision, 0);
     manager.update(good).await.unwrap();
     assert_eq!(manager.snapshot().plugins[0].manifest.version, "3.0.0");
     assert_eq!(manager.snapshot().sources[0].status, SourceStatus::Stopped);
+    assert_eq!(manager.snapshot().sources[0].revision, 1);
     manager.start("first").await.unwrap();
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn two_panels_can_read_one_instance_and_stale_configuration_cannot_overwrite() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = PluginManager::open(temp.path().join("host")).unwrap();
+    manager
+        .install(package(temp.path(), "1", true), false)
+        .await
+        .unwrap();
+    manager.create_source(spec("first")).await.unwrap();
+    let (first, second) = tokio::join!(
+        manager.ui("first", UiParams::default()),
+        manager.ui("first", UiParams::default())
+    );
+    first.unwrap();
+    second.unwrap();
+    manager
+        .configure("first", json!({"frequency":120,"intensity":20}), 0)
+        .await
+        .unwrap();
+    let catalog = manager.cached_catalog_snapshot();
+    assert_eq!(catalog.source_revisions["first"], 1);
+    assert_eq!(catalog.sources[0].config["frequency"], 120);
+    manager.stop("first").await.unwrap();
+    assert_eq!(
+        manager
+            .configure("first", json!({"frequency":130}), 0)
+            .await
+            .unwrap_err()
+            .code,
+        "config_conflict"
+    );
+    let state = &manager.snapshot().sources[0];
+    assert_eq!(state.spec.config["frequency"], 120);
+    assert_eq!(state.revision, 1);
+    assert_eq!(state.status, SourceStatus::Stopped);
+    let reopened = PluginManager::open(temp.path().join("host")).unwrap();
+    assert_eq!(reopened.snapshot().sources[0].revision, 1);
+    manager.shutdown().await;
+}
+
+#[cfg(feature = "test-fixtures")]
+#[tokio::test]
+async fn package_update_and_uninstall_exclude_instance_set_and_usage_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = PluginManager::open(temp.path().join("host")).unwrap();
+    manager
+        .install(fixture_package(temp.path(), "1"), false)
+        .await
+        .unwrap();
+    for id in ["first", "second"] {
+        manager.create_source(spec(id)).await.unwrap();
+        manager.start(id).await.unwrap();
+    }
+    let new_package = fixture_package(temp.path(), "2");
+    let host = manager.clone();
+    let update = tokio::spawn(async move { host.update(new_package).await });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !manager
+            .snapshot()
+            .sources
+            .iter()
+            .any(|source| source.status == SourceStatus::Stopped)
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!update.is_finished());
+    assert_eq!(
+        manager.create_source(spec("late")).await.unwrap_err().code,
+        "plugin_busy"
+    );
+    assert_eq!(
+        manager.start("first").await.unwrap_err().code,
+        "plugin_busy"
+    );
+    assert_eq!(
+        manager
+            .configure("first", json!({}), 0)
+            .await
+            .unwrap_err()
+            .code,
+        "plugin_busy"
+    );
+    assert_eq!(
+        manager.delete_source("first", true).await.unwrap_err().code,
+        "plugin_busy"
+    );
+    assert_eq!(
+        manager.set_enabled("first", false).await.unwrap_err().code,
+        "plugin_busy"
+    );
+    assert_eq!(
+        manager
+            .ui("first", UiParams::default())
+            .await
+            .unwrap_err()
+            .code,
+        "plugin_busy"
+    );
+    update.await.unwrap().unwrap();
+    for source in manager.snapshot().sources {
+        assert_eq!(source.status, SourceStatus::Stopped);
+        assert_eq!(source.spec.config["migrated"], true);
+        assert_eq!(source.revision, 1);
+    }
+    for id in ["first", "second"] {
+        manager.start(id).await.unwrap();
+    }
+    let host = manager.clone();
+    let uninstall =
+        tokio::spawn(async move { host.uninstall("example.pulse-source", false).await });
+    let stopped = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(source) = manager
+                .snapshot()
+                .sources
+                .iter()
+                .find(|source| source.status == SourceStatus::Stopped)
+            {
+                break source.spec.id.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!uninstall.is_finished());
+    assert_eq!(
+        manager.start(&stopped).await.unwrap_err().code,
+        "plugin_busy"
+    );
+    assert_eq!(
+        manager.create_source(spec("late")).await.unwrap_err().code,
+        "plugin_busy"
+    );
+    uninstall.await.unwrap().unwrap();
+    assert!(manager.snapshot().plugins.is_empty());
+    assert!(
+        manager
+            .snapshot()
+            .sources
+            .iter()
+            .all(|source| source.status == SourceStatus::Stopped)
+    );
+    manager.shutdown().await;
+}
+
+#[cfg(feature = "test-fixtures")]
+#[tokio::test]
+async fn queued_ui_does_not_restart_a_source_after_stop() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = PluginManager::open(temp.path().join("host")).unwrap();
+    manager
+        .install(fixture_package(temp.path(), "1"), false)
+        .await
+        .unwrap();
+    manager.create_source(spec("first")).await.unwrap();
+    manager.start("first").await.unwrap();
+    let host = manager.clone();
+    let stop = tokio::spawn(async move { host.stop("first").await });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if manager.snapshot().sources[0].state["shutdownStarted"] == true {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let read = manager.ui("first", UiParams::default());
+    let (read, stopped) = tokio::join!(read, stop);
+    stopped.unwrap().unwrap();
+    assert_eq!(read.unwrap_err().code, "request_cancelled");
+    assert_eq!(manager.snapshot().sources[0].status, SourceStatus::Stopped);
+    manager.shutdown().await;
+}
+
+#[cfg(feature = "test-fixtures")]
+#[tokio::test]
+async fn deferred_native_business_calls_preserve_the_original_operation_epoch() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = PluginManager::open(temp.path().join("host")).unwrap();
+    let core = Arc::new(EpochCore(std::sync::atomic::AtomicU64::new(7)));
+    manager.set_business_handler(core.clone());
+    manager
+        .install(fixture_package(temp.path(), "1"), false)
+        .await
+        .unwrap();
+    manager.create_source(spec("first")).await.unwrap();
+    manager.start("first").await.unwrap();
+    let action = || ActionParams {
+        action: "deferred_business".into(),
+        ..Default::default()
+    };
+    dg_lab_link_plugin_sdk::OPERATION_EPOCH
+        .scope(7, manager.action("first", action()))
+        .await
+        .unwrap();
+    core.0.store(8, std::sync::atomic::Ordering::Release);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while manager.runtime_states()[0].state["deferredResult"] != "queue_busy" {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let external = manager
+        .action(
+            "first",
+            ActionParams {
+                action: "external_business".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(external["originalCode"], "queue_busy");
+    dg_lab_link_plugin_sdk::OPERATION_EPOCH
+        .scope(8, manager.action("first", action()))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while manager.runtime_states()[0].state["deferredResult"] != "ok" {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    manager.set_business_handler(Arc::new(Core));
+    let unsupported = manager
+        .action(
+            "first",
+            ActionParams {
+                action: "external_business".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(unsupported.code, "context_unavailable");
+    manager.shutdown().await;
+    manager.clear_business_handler();
+}
+
+#[tokio::test]
+async fn uninstall_and_delete_restore_directories_when_registry_commit_fails() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("host");
+    let manager = PluginManager::open(&root).unwrap();
+    let installed = manager
+        .install(package(temp.path(), "1", true), false)
+        .await
+        .unwrap();
+    manager.create_source(spec("first")).await.unwrap();
+    let data = root.join("data/first");
+    fs::create_dir_all(&data).unwrap();
+    fs::write(data.join("saved.txt"), "preserve").unwrap();
+    let registry_path = root.join("registry.json");
+    let registry = fs::read(&registry_path).unwrap();
+    fs::remove_file(&registry_path).unwrap();
+    fs::create_dir(&registry_path).unwrap();
+    assert!(
+        manager
+            .uninstall("example.pulse-source", true)
+            .await
+            .is_err()
+    );
+    assert!(installed.directory.join("source.exe").exists());
+    assert_eq!(
+        fs::read_to_string(data.join("saved.txt")).unwrap(),
+        "preserve"
+    );
+    assert_eq!(manager.snapshot().plugins.len(), 1);
+    assert_eq!(manager.snapshot().sources.len(), 1);
+    assert!(manager.delete_source("first", true).await.is_err());
+    assert_eq!(
+        fs::read_to_string(data.join("saved.txt")).unwrap(),
+        "preserve"
+    );
+    assert_eq!(manager.snapshot().sources.len(), 1);
+    fs::remove_dir(&registry_path).unwrap();
+    fs::write(&registry_path, registry).unwrap();
+    manager
+        .uninstall("example.pulse-source", true)
+        .await
+        .unwrap();
+    assert!(!installed.directory.exists());
+    assert!(!data.exists());
+    assert!(manager.snapshot().plugins.is_empty());
+    assert!(manager.snapshot().sources.is_empty());
     manager.shutdown().await;
 }
 

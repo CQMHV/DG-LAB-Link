@@ -3,7 +3,7 @@ use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use dg_lab_link_core::ControlError;
+use dg_lab_link_contracts::ControlError;
 use futures_util::StreamExt;
 use rmcp::model::{
     ClientJsonRpcMessage, ClientNotification, ClientRequest, GetExtensions, JsonRpcError,
@@ -308,7 +308,7 @@ fn core_closed() -> ControlError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dg_lab_link_core::ControlCommand;
+    use dg_lab_link_contracts::ControlCommand;
     use tempfile::TempDir;
     use tokio::io::AsyncReadExt;
 
@@ -366,7 +366,7 @@ mod tests {
     fn request(id: i64, name: &str) -> Vec<u8> {
         let mut bytes = serde_json::to_vec(&json!({
             "jsonrpc": "2.0", "id": id, "method": "tools/call",
-            "params": {"name": name, "arguments": {}}
+            "params": {"name": name, "arguments": if name == "disconnect_connection" { json!({"connectionId":"ws-v4"}) } else { json!({}) }}
         }))
         .unwrap();
         bytes.push(b'\n');
@@ -417,7 +417,7 @@ mod tests {
         peer.write_all(&request(33, "get_hub_snapshot"))
             .await
             .unwrap();
-        peer.write_all(&request(34, "disconnect_relay"))
+        peer.write_all(&request(34, "disconnect_connection"))
             .await
             .unwrap();
         let stop = timeout(Duration::from_secs(1), transport.receive())
@@ -443,7 +443,12 @@ mod tests {
         assert_eq!(stale.code, "queue_busy");
         fixture
             .client
-            .call_received(ControlCommand::DisconnectRelay, epoch)
+            .call_received(
+                ControlCommand::DisconnectConnection {
+                    connection_id: "ws-v4".into(),
+                },
+                epoch,
+            )
             .await
             .unwrap();
         assert!(state.fault.lock().unwrap().is_none());
@@ -478,7 +483,7 @@ mod tests {
             .unwrap()
             .unwrap();
         input
-            .write_all(&request(2, "disconnect_relay"))
+            .write_all(&request(2, "disconnect_connection"))
             .await
             .unwrap();
         timeout(Duration::from_millis(500), async {
@@ -488,7 +493,12 @@ mod tests {
             let epoch = stop.request.extensions().get::<CommandEpoch>().unwrap().0;
             fixture
                 .client
-                .call_received(ControlCommand::DisconnectRelay, epoch)
+                .call_received(
+                    ControlCommand::DisconnectConnection {
+                        connection_id: "ws-v4".into(),
+                    },
+                    epoch,
+                )
                 .await
                 .unwrap();
         })

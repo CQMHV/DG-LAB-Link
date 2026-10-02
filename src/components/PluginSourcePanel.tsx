@@ -2,7 +2,8 @@ import { Component, useEffect, useRef, useState, type PointerEvent, type ReactNo
 import { FileArrowUp, PuzzlePiece, SpinnerGap } from "@phosphor-icons/react";
 import type { AudioSnapshot, HubChannel, MappingPoint, SourceSnapshot, TouchConfig, UiDocument, UiNode, WaveformConfig } from "../lib/contracts";
 import { getErrorMessage } from "../lib/errors";
-import { choosePluginFile, getSourceUi, pluginCall, setSourceConfig, sourceAction, sourceInput } from "../lib/plugins";
+import { asObject } from "../lib/json";
+import { choosePluginFile, getSourceUi, invalidateSourceUi, pluginCall, setSourceConfig, sourceAction, sourceInput } from "../lib/plugins";
 import { AudioPlayer } from "./AudioSourceControls";
 import { MappingCurveEditor } from "./MappingCurveEditor";
 import { TouchBoard } from "./TouchBoard";
@@ -17,7 +18,7 @@ class PluginRenderBoundary extends Component<{ children: ReactNode; identity: st
     }
     render() { return this.state.error ? <p role="alert" className="input-mode-error">插件界面数据无效，请检查插件或更新版本。</p> : this.props.children; }
 }
-const object = (value: unknown): Values => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Values : {};
+const object = asObject;
 const string = (value: unknown, fallback = "") => typeof value === "string" ? value : fallback;
 const numeric = (value: unknown, fallback = 0) => typeof value === "number" && Number.isFinite(value) ? value : fallback;
 const fieldValues = (nodes: UiNode[], base: Values): Values => {
@@ -33,11 +34,12 @@ interface RenderContext {
     bindingId?: string;
     channel?: HubChannel;
     outputDisabled?: boolean;
-    onAction: (action: string, value: unknown) => Promise<void>;
+    onAction: (action: string, value: unknown, expectedRevision?: number) => Promise<void>;
     onInput: (action: string, value: unknown, owner: string, sequence: number) => Promise<void>;
     values?: Values;
     change?: (key: string, value: unknown) => void;
     baseConfig?: Values;
+    configRevision: number;
 }
 
 const WaveformPicker = ({ node, value, disabled, onChange }: { node: UiNode; value: unknown; disabled: boolean; onChange: (value: unknown) => void }) => {
@@ -146,12 +148,15 @@ const SemanticForm = ({ node, context }: { node: UiNode; context: RenderContext 
     const initial = fieldValues(node.children ?? [], { ...base, ...object(node.value) });
     const [values, setValues] = useState(initial);
     const [dirty, setDirty] = useState(false);
+    const [draftRevision, setDraftRevision] = useState(context.configRevision);
+    const [conflict, setConflict] = useState(false);
     const identity = JSON.stringify(initial);
-    useEffect(() => { if (!dirty) setValues(initial); }, [identity, dirty]);
-    return <form className="plugin-form" noValidate aria-label={node.label} onSubmit={(event) => { event.preventDefault(); const payload = prefix ? { ...context.baseConfig, [prefix]: values } : values; void context.onAction(node.action ?? "configure", payload).then(() => setDirty(false)).catch(() => {}); }}>
+    useEffect(() => { if (!dirty) { setValues(initial); setDraftRevision(context.configRevision); } }, [identity, dirty, context.configRevision]);
+    return <form className="plugin-form" noValidate aria-label={node.label} onSubmit={(event) => { event.preventDefault(); if (context.disabled) return; const payload = prefix ? { ...context.baseConfig, [prefix]: values } : values; void context.onAction(node.action ?? "configure", payload, draftRevision).then(() => { setDirty(false); setConflict(false); }).catch((failure) => { if (object(failure).code === "config_conflict") setConflict(true); }); }}>
         {node.label && <h3>{node.label}</h3>}
         <div className="plugin-form-fields">{(node.children ?? []).map((child) => <SemanticNode key={child.id} node={child} context={{ ...context, values, change: (key, value) => { setDirty(true); setValues((current) => ({ ...current, [key]: value })); } }} />)}</div>
         <button className="primary-compact-button" disabled={context.disabled} type="submit">{string(node.props?.submitLabel, "应用配置")}</button>
+        {conflict && <p role="alert">配置已由其他入口修改。<button className="secondary-button" type="button" disabled={context.disabled} onClick={() => { setValues(initial); setDraftRevision(context.configRevision); setDirty(false); setConflict(false); }}>重新载入配置</button></p>}
     </form>;
 };
 
@@ -160,12 +165,11 @@ const SemanticNode = ({ node, context }: { node: UiNode; context: RenderContext 
     const label = node.label ?? node.id;
     const value = node.configKey && context.values && Object.hasOwn(context.values, node.configKey) ? context.values[node.configKey] : node.value;
     const change = (next: unknown) => { if (node.configKey && context.change) context.change(node.configKey, next); else if (node.action) void context.onAction(node.action, next).catch(() => {}); };
-    const children = (node.children ?? []).map((child) => <SemanticNode key={child.id} node={child} context={context} />);
     const options = Array.isArray(props.options) ? props.options as { value: string | number; label: string }[] : [];
     const disabled = context.disabled || props.disabled === true;
     switch (node.type) {
-        case "form": return <SemanticForm node={node} context={context} />;
-        case "page": case "section": case "group": case "stack": case "list": return <section className={`plugin-node plugin-${node.type}`} aria-label={node.label}>{node.label && <h3>{node.label}</h3>}{children}</section>;
+        case "form": return <SemanticForm node={node} context={{ ...context, disabled }} />;
+        case "page": case "section": case "group": case "stack": case "list": return <section className={`plugin-node plugin-${node.type}`} aria-label={node.label}>{node.label && <h3>{node.label}</h3>}{(node.children ?? []).map((child) => <SemanticNode key={child.id} node={child} context={{ ...context, disabled }} />)}</section>;
         case "text": return <p>{string(value, label)}</p>;
         case "status": return <output className="plugin-status">{label}: {string(value, String(value ?? "未知"))}</output>;
         case "key_value": return <dl className="plugin-key-value">{Object.entries(object(value)).map(([key, item]) => <div key={key}><dt>{key}</dt><dd>{String(item ?? "未知")}</dd></div>)}</dl>;
@@ -187,7 +191,7 @@ const SemanticNode = ({ node, context }: { node: UiNode; context: RenderContext 
     }
 };
 
-export const PluginSourcePanel = ({ source, bindingId, channel, surface = "settings", disabled = false }: { source: SourceSnapshot; bindingId?: string; channel?: HubChannel; surface?: "settings" | "control"; disabled?: boolean; revision?: number }) => {
+export const PluginSourcePanel = ({ source, bindingId, bindingConfig, bindingRevision, channel, surface = "settings", disabled = false }: { source: SourceSnapshot; bindingId?: string; bindingConfig?: unknown; bindingRevision?: number; channel?: HubChannel; surface?: "settings" | "control"; disabled?: boolean }) => {
     const [document, setDocument] = useState<UiDocument | null>(null);
     const [documentScope, setDocumentScope] = useState(`${source.id}/${bindingId ?? "settings"}`);
     const [error, setError] = useState<string | null>(null);
@@ -204,26 +208,27 @@ export const PluginSourcePanel = ({ source, bindingId, channel, surface = "setti
     const suspended = !source.enabled || source.runtimeStatus === "faulted" || (lifecycle.current.hasRun && source.runtimeStatus === "stopped");
     const suspendedRef = useRef(suspended);
     suspendedRef.current = suspended;
+    const stateIdentity = JSON.stringify([source.state, source.config, source.runtimeStatus, source.revision, bindingConfig, bindingRevision]);
     const refresh = async (explicitStart = false) => {
         if (!alive.current || (suspendedRef.current && !explicitStart)) return;
         if (fetching.current) { fetchAgain.current = true; return; }
         fetching.current = true;
         const current = ++generation.current;
-        try { const doc = await getSourceUi(source.id, bindingId, surface); if (current === generation.current && (!suspendedRef.current || explicitStart)) { setDocumentScope(identity); setDocument(doc); setError(null); } }
-        catch (failure) { if (current === generation.current) setError(getErrorMessage(failure)); }
+        try { const doc = await getSourceUi(source.id, bindingId, surface, stateIdentity); if (current === generation.current && (!suspendedRef.current || explicitStart)) { setDocumentScope(identity); setDocument(doc); setError(null); } }
+        catch (failure) { if (object(failure).code === "request_cancelled") { if (!suspendedRef.current) fetchAgain.current = true; } else if (current === generation.current) setError(getErrorMessage(failure)); }
         finally {
             fetching.current = false;
             if (fetchAgain.current) { fetchAgain.current = false; void refreshCallback.current(); }
         }
     };
     refreshCallback.current = refresh;
-    const stateIdentity = JSON.stringify([source.state, source.config, source.runtimeStatus]);
     useEffect(() => { alive.current = true; return () => { alive.current = false; generation.current += 1; }; }, []);
-    useEffect(() => { setDocument(null); void refresh(); return () => { generation.current += 1; }; }, [source.id, bindingId, surface]);
-    useEffect(() => { void refresh(); }, [stateIdentity]);
-    const onAction = async (action: string, value: unknown) => {
+    useEffect(() => { if (suspended) { invalidateSourceUi(source.id); generation.current += 1; setError(null); } }, [suspended, source.id]);
+    useEffect(() => { setDocument(null); return () => { generation.current += 1; }; }, [source.id, bindingId, surface]);
+    useEffect(() => { void refresh(); }, [source.id, bindingId, surface, stateIdentity]);
+    const onAction = async (action: string, value: unknown, expectedRevision?: number) => {
         setBusy(true); setError(null);
-        try { if (action === "configure") await setSourceConfig(source.id, value, bindingId); else await sourceAction(source.id, { action, value, bindingId }); await refresh(); }
+        try { if (action === "configure") await setSourceConfig(source.id, value, expectedRevision ?? (bindingId ? bindingRevision! : source.revision), bindingId); else await sourceAction(source.id, { action, value, bindingId }); invalidateSourceUi(source.id); await refresh(); }
         catch (failure) { setError(getErrorMessage(failure)); throw failure; }
         finally { setBusy(false); }
     };
@@ -235,7 +240,7 @@ export const PluginSourcePanel = ({ source, bindingId, channel, surface = "setti
     return <div className="plugin-source-panel" aria-label={`${source.name} 插件控制`}>
         {!visibleDocument && !error && !suspended && <p role="status"><SpinnerGap className="spin" aria-hidden="true" size={17} />读取插件界面…</p>}
         {suspended ? <div className="plugin-suspended"><p>{!source.enabled ? "输入源实例已停用" : source.runtimeStatus === "faulted" ? "插件进程运行异常" : "插件进程已停止"}</p>{source.enabled && <button className="secondary-button" type="button" disabled={busy} onClick={() => { setBusy(true); void pluginCall({ command: "start_source", params: { sourceId: source.id } }).then(() => refresh(true)).catch((failure) => setError(getErrorMessage(failure))).finally(() => setBusy(false)); }}>启动插件进程</button>}</div>
-            : visibleDocument && <PluginRenderBoundary identity={JSON.stringify([identity, visibleDocument])}>{visibleDocument.nodes.map((node) => <SemanticNode key={node.id} node={node} context={{ disabled: !source.enabled || busy || (surface === "settings" && disabled), outputDisabled: surface === "control" && disabled, bindingId, channel, baseConfig: bindingId ? undefined : source.config, onAction, onInput }} />)}</PluginRenderBoundary>}
+            : visibleDocument && <PluginRenderBoundary identity={JSON.stringify([identity, visibleDocument])}>{visibleDocument.nodes.map((node) => <SemanticNode key={node.id} node={node} context={{ disabled: !source.enabled || busy || (surface === "settings" && disabled), outputDisabled: surface === "control" && disabled, bindingId, channel, baseConfig: object(bindingId ? bindingConfig : source.config), configRevision: bindingId ? bindingRevision! : source.revision, onAction, onInput }} />)}</PluginRenderBoundary>}
         {!suspended && visibleDocument && visibleDocument.nodes.length === 0 && <p><PuzzlePiece aria-hidden="true" size={18} />此插件未提供界面，可通过 CLI 或 MCP 调用动作。</p>}
         {(error || source.lastError) && <p className="input-mode-error" role="alert">{error ?? source.lastError}<button className="secondary-button" type="button" onClick={() => void refresh()}>重试</button></p>}
     </div>;

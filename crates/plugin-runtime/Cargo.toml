@@ -5,6 +5,14 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+test-fixtures = []
+
+[[bin]]
+name = "dg-lab-link-plugin-fixture"
+path = "tests/fixtures/source.rs"
+required-features = ["test-fixtures"]
+
 [dependencies]
 dg-lab-link-plugin-sdk = { path = "../plugin-sdk" }
 serde.workspace = true

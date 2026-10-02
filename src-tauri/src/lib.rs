@@ -11,8 +11,8 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 
-use dg_lab_link_core::preferences::AppPreferencesSnapshot;
-use dg_lab_link_core::{ControlCommand, ControlError};
+use dg_lab_link_contracts::preferences::AppPreferencesSnapshot;
+use dg_lab_link_contracts::{ControlCommand, ControlError};
 use dg_lab_link_runtime::{Client, connect_or_spawn, core_executable};
 
 pub(crate) struct RuntimeConfigDir(pub PathBuf);
@@ -117,19 +117,11 @@ pub fn run() {
             commands::plugin_call,
             commands::choose_plugin_package,
             commands::choose_plugin_file,
+            commands::choose_plugin_destination,
             commands::get_runtime_info,
             commands::get_mcp_config,
             commands::parse_waveform_files,
-            commands::update_touch_input,
-            commands::set_touch_config,
-            commands::set_audio_config,
-            commands::audio_control,
             commands::get_custom_waveform,
-            commands::choose_audio_file,
-            commands::choose_recording_destination,
-            commands::connect_relay,
-            commands::disconnect_relay,
-            commands::refresh_pairing,
             commands::get_connections,
             commands::connect_transport,
             commands::disconnect_connection,
@@ -151,7 +143,6 @@ pub fn run() {
             commands::select_custom_waveform,
             commands::delete_custom_waveform,
             commands::reorder_custom_waveforms,
-            commands::select_device,
             commands::set_sync_all_devices,
             commands::update_safety,
         ])

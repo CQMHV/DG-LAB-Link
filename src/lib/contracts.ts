@@ -1,57 +1,6 @@
-export type ConnectionState =
-    | "disconnected"
-    | "connecting"
-    | "waiting"
-    | "connected"
-    | "error";
-
-export type OutputState = "idle" | "running" | "stopped" | "error";
-
-export type ChannelStatus =
-    | "idle"
-    | "ready"
-    | "active"
-    | "disabled"
-    | "disconnected"
-    | "fault"
-    | "unknown";
-
-export type TransportKind = "ws_v4" | "ws_v3" | "ble";
-export type InitializationState = "initializing" | "ready" | "fault";
-
-export interface TransportConnectionSnapshot extends ConnectionSnapshot {
-    connectionId: string;
-    transport: TransportKind;
-}
-
-export interface DeviceCapabilities {
-    battery: boolean;
-    loadStatus: boolean;
-    softLimits: boolean;
-    balance: boolean;
-    wheelProtection: boolean;
-    standardMode: boolean;
-    operationConfirmation: boolean;
-}
-
-export interface BleParameters {
-    maxStrengthA: number;
-    maxStrengthB: number;
-    frequencyBalanceA: number;
-    frequencyBalanceB: number;
-    strengthBalanceA: number;
-    strengthBalanceB: number;
-    wheelProtectionEnabled: boolean;
-    wheelProtectionValue: number;
-}
-
-export interface BluetoothDevice {
-    deviceId: string;
-    name: string;
-    rssi: number | null;
-}
-
-export type LogLevel = "info" | "warning" | "error";
+import type { WaveformConfig } from "./generated/contracts";
+export type { ConnectionState, OutputState, ChannelStatus, TransportKind, InitializationState, TransportConnectionSnapshot, DeviceCapabilities, BleParameters, BluetoothDevice, LogLevel, DeviceSnapshot, SourceSnapshot, WaveformConfig, CustomWaveformSnapshot, OutputSnapshot, SafetySnapshot, LogSnapshot, HubSnapshot, SourceBindingSnapshot, PluginManifest, InstalledPlugin } from "./generated/contracts";
+export type { AppPreferencesSnapshot as AppPreferences } from "./generated/contracts";
 
 export interface RuntimeInfo {
     instanceId: string;
@@ -65,124 +14,7 @@ export interface McpConfig {
     token: string;
 }
 
-export interface ConnectionSnapshot {
-    state: ConnectionState;
-    endpoint: string;
-    controllerId: string | null;
-    pairingUrl: string | null;
-    appCount: number;
-    lastError: string | null;
-}
-
-export interface DeviceSnapshot {
-    controlId: string;
-    connectionId: string;
-    transport: TransportKind;
-    initialization: InitializationState;
-    capabilities: DeviceCapabilities;
-    bleParameters: BleParameters | null;
-    configurationStatus: string | null;
-    bindingIdA?: string | null;
-    bindingIdB?: string | null;
-    id: string | number;
-    name: string;
-    type: string;
-    slotId: string;
-    power: number | null;
-    intensityA: number;
-    intensityB: number;
-    intensityLimitA: number;
-    intensityLimitB: number;
-    sourceIdA: string | null;
-    sourceIdB: string | null;
-    waveformIdA: string | null;
-    waveformIdB: string | null;
-    waveformNameA: string | null;
-    waveformNameB: string | null;
-    sourceSync: boolean;
-    outputActive: boolean;
-    channelAStatus: ChannelStatus;
-    channelBStatus: ChannelStatus;
-}
-
-export interface SourceSnapshot {
-    id: string;
-    kind: string;
-    name: string;
-    enabled: boolean;
-    assignedChannelCount: number;
-    selectedPresetId: string | null;
-    selectedPresetName: string | null;
-    pluginId?: string | null;
-    runtimeStatus?: "stopped" | "starting" | "running" | "faulted" | "disabled";
-    lastError?: string | null;
-    config?: Record<string, unknown>;
-    state?: Record<string, unknown>;
-}
-
-export interface WaveformConfig {
-    presetId: string;
-    presetName: string;
-    frames: string[];
-}
-
-export interface CustomWaveformSnapshot {
-    id: string;
-    name: string;
-    frameCount: number;
-    durationMs: number;
-}
-
-export interface OutputSnapshot {
-    state: OutputState;
-    framesSent: number;
-    lastError: string | null;
-}
-
-export interface ChannelSnapshot {
-    intensity: number;
-    limit: number;
-    status: ChannelStatus;
-}
-
-export interface SafetySnapshot {
-    connectionTimeoutEnabled: boolean;
-    connectionTimeoutMinutes: number;
-    allowAppIntensityControl: boolean;
-}
-
-export interface LogSnapshot {
-    id: string;
-    level: LogLevel;
-    message: string;
-    timestamp: string;
-}
-
-export interface HubSnapshot {
-    revision: number;
-    connection: ConnectionSnapshot;
-    connections: TransportConnectionSnapshot[];
-    bluetooth: BluetoothDevice[];
-    device: DeviceSnapshot | null;
-    devices: DeviceSnapshot[];
-    selectedDeviceId: string | null;
-    syncAllDevices: boolean;
-    outputDeviceCount: number;
-    sources: SourceSnapshot[];
-    plugins?: InstalledPlugin[];
-    customWaveforms: CustomWaveformSnapshot[];
-    defaultSourceId: string | null;
-    inputModes: InputModesSnapshot;
-    output: OutputSnapshot;
-    channels: {
-        a: ChannelSnapshot;
-        b: ChannelSnapshot;
-    };
-    safety: SafetySnapshot;
-    logs: LogSnapshot[];
-}
-
-export type HubChannel = "a" | "b";
+export type HubChannel = import("./generated/contracts").Channel;
 
 export interface MappingPoint {
     x: number;
@@ -248,30 +80,12 @@ export type AudioAction =
     | { type: "setPlaybackOptions"; loop: boolean; speakerEnabled: boolean }
     | { type: "saveRecording"; path: string };
 
-export interface InputModesSnapshot {
-    touchConfig: TouchConfig;
-    audio: AudioSnapshot;
-    audioBindings: { deviceId: string; channel: HubChannel; config: AudioChannelConfig }[];
-}
-
 export interface SafetyUpdate {
     connectionTimeoutEnabled: boolean;
     connectionTimeoutMinutes: number;
     allowAppIntensityControl: boolean;
 }
 
-export interface AppPreferences {
-    closeToTray: boolean;
-    autoStart: boolean;
-    startMinimized: boolean;
-}
-
-export interface PluginManifest {
-    id: string; version: string; protocolVersion: number; name: string; publisher: string; license: string; executable: string;
-}
-export interface InstalledPlugin {
-    manifest: PluginManifest; digest: string; installedAt?: string; preinstalled?: boolean;
-}
 export type UiNodeKind = "page" | "section" | "stack" | "group" | "form" | "list" | "text" | "status" | "key_value" | "progress" | "divider" | "button" | "switch" | "text_field" | "integer_field" | "number_field" | "select" | "slider" | "xy_pad" | "grid" | "audio_player" | "meter" | "curve" | "waveform_picker" | "file_field";
 export interface UiNode {
     id: string; type: UiNodeKind; label?: string; value?: unknown; configKey?: string; action?: string; input?: string; props?: Record<string, unknown>; children?: UiNode[];

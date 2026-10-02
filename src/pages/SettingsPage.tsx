@@ -466,7 +466,7 @@ export const SettingsPage = ({
                     <div className="setting-row-copy">
                         <strong>Socket V4 端点</strong>
                     </div>
-                    <code className="setting-endpoint">{snapshot.connection.endpoint}</code>
+                    <code className="setting-endpoint">{snapshot.connections.find((connection) => connection.transport === "ws_v4")?.endpoint ?? "未配置"}</code>
                 </div>
                 {snapshot.connections.filter((connection) => connection.transport === "ws_v3").map((connection) => (
                     <div className="setting-row" key={connection.connectionId}>
@@ -483,10 +483,10 @@ export const SettingsPage = ({
                     </div>
                     <span
                         className="relay-connection-status"
-                        data-state={snapshot.connection.state}
+                        data-state={(snapshot.connections.find((connection) => connection.transport === "ws_v4")?.state ?? "disconnected")}
                         role="status"
                     >
-                        {relayStateLabels[snapshot.connection.state]}
+                        {relayStateLabels[(snapshot.connections.find((connection) => connection.transport === "ws_v4")?.state ?? "disconnected")]}
                     </span>
                 </div>
                 <div className="relay-note">

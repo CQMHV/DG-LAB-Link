@@ -1,7 +1,6 @@
 //! Shared waveform catalogue and bounded .pulse / JSON import.
 use std::sync::OnceLock;
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -12,12 +11,7 @@ pub const MAX_IMPORT_FILE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_IMPORT_FILES: usize = 128;
 const MAX_FRAMES: usize = 16_384;
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct WaveformFile {
-    pub name: String,
-    pub content: String,
-}
+pub use dg_lab_link_contracts::waveforms::WaveformFile;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

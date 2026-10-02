@@ -3,13 +3,15 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 use dg_lab_link_plugin_sdk::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{
+    Mutex, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, OwnedSemaphorePermit, Semaphore,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::frames::LatestFrameStore;
@@ -20,6 +22,8 @@ const MAX_REGISTRY_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_INPUT_OWNERS: usize = 64;
 const INPUT_SEQUENCE_RETENTION: Duration = Duration::from_secs(10);
 const INPUT_OWNER_IDLE: Duration = Duration::from_secs(1);
+const UI_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_UI_READERS: usize = 8;
 
 struct InputSequence {
     sequence: u64,
@@ -118,16 +122,6 @@ fn invalidated_bindings(previous: &[Binding], current: &[Binding]) -> HashSet<St
         .collect()
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct InstalledPlugin {
-    pub manifest: PluginManifest,
-    pub digest: String,
-    pub preinstalled: bool,
-    #[serde(skip)]
-    pub directory: PathBuf,
-}
-
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
 )]
@@ -145,6 +139,7 @@ pub enum SourceStatus {
 pub struct SourceState {
     #[serde(flatten)]
     pub spec: SourceSpec,
+    pub revision: u64,
     pub status: SourceStatus,
     pub state: Value,
     pub last_error: Option<PluginError>,
@@ -157,6 +152,40 @@ pub struct PluginRuntimeSnapshot {
     pub sources: Vec<SourceState>,
 }
 
+/// Immutable, low-frequency metadata. Cloning the Arc never clones configuration values.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PluginCatalogSnapshot {
+    pub revision: u64,
+    pub plugins: Vec<InstalledPlugin>,
+    pub sources: Vec<SourceSpec>,
+    pub source_revisions: HashMap<String, u64>,
+}
+
+impl PluginCatalogSnapshot {
+    fn from_registry(registry: &Registry, revision: u64) -> Self {
+        let mut plugins: Vec<_> = registry.plugins.values().cloned().collect();
+        plugins.sort_by(|a, b| a.manifest.id.cmp(&b.manifest.id));
+        let mut sources: Vec<_> = registry.sources.values().cloned().collect();
+        sources.sort_by(|a, b| a.id.cmp(&b.id));
+        Self {
+            revision,
+            plugins,
+            sources,
+            source_revisions: registry.revisions.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceRuntimeState {
+    pub id: String,
+    pub revision: u64,
+    pub status: SourceStatus,
+    pub state: Value,
+    pub last_error: Option<PluginError>,
+}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Registry {
@@ -164,6 +193,8 @@ struct Registry {
     plugins: HashMap<String, InstalledPlugin>,
     #[serde(default)]
     sources: HashMap<String, SourceSpec>,
+    #[serde(default)]
+    revisions: HashMap<String, u64>,
     #[serde(default)]
     seeded: HashSet<String>,
 }
@@ -175,6 +206,7 @@ struct LiveEntry {
     session: Option<Session>,
     bindings: Vec<Binding>,
     gate: Arc<Mutex<()>>,
+    ui_readers: Arc<Semaphore>,
     permit: Option<OwnedSemaphorePermit>,
     input_sequences: InputSequenceCache,
     generation: u64,
@@ -191,6 +223,7 @@ impl Default for LiveEntry {
             session: None,
             bindings: Vec::new(),
             gate: Arc::new(Mutex::new(())),
+            ui_readers: Arc::new(Semaphore::new(MAX_UI_READERS)),
             permit: None,
             input_sequences: InputSequenceCache::default(),
             generation: 0,
@@ -203,9 +236,11 @@ impl Default for LiveEntry {
 struct Inner {
     root: PathBuf,
     registry: RwLock<Registry>,
+    catalog: RwLock<Arc<PluginCatalogSnapshot>>,
     live: Arc<RwLock<HashMap<String, LiveEntry>>>,
     commit: Mutex<()>,
     package_transaction: Mutex<()>,
+    package_gates: RwLock<HashMap<String, Weak<tokio::sync::RwLock<()>>>>,
     handler: HandlerSlot,
     frames: LatestFrameStore,
     slots: Arc<Semaphore>,
@@ -254,12 +289,15 @@ impl PluginManager {
             .keys()
             .map(|id| (id.clone(), LiveEntry::default()))
             .collect();
+        let catalog = Arc::new(PluginCatalogSnapshot::from_registry(&registry, 0));
         Ok(Self(Arc::new(Inner {
             root,
             registry: RwLock::new(registry),
+            catalog: RwLock::new(catalog),
             live: Arc::new(RwLock::new(live)),
             commit: Mutex::new(()),
             package_transaction: Mutex::new(()),
+            package_gates: RwLock::new(HashMap::new()),
             handler: Arc::new(RwLock::new(None)),
             frames: LatestFrameStore::default(),
             slots: Arc::new(Semaphore::new(MAX_INSTANCES)),
@@ -304,6 +342,7 @@ impl PluginManager {
                 let entry = live.get(&spec.id);
                 SourceState {
                     spec: spec.clone(),
+                    revision: registry.revisions.get(&spec.id).copied().unwrap_or(0),
                     status: entry.map_or(SourceStatus::Stopped, |entry| entry.status),
                     state: entry.map_or_else(empty_object, |entry| entry.state.clone()),
                     last_error: entry.and_then(|entry| entry.last_error.clone()),
@@ -312,6 +351,35 @@ impl PluginManager {
             .collect();
         sources.sort_by(|first, second| first.spec.id.cmp(&second.spec.id));
         PluginRuntimeSnapshot { plugins, sources }
+    }
+
+    pub fn cached_catalog_snapshot(&self) -> Arc<PluginCatalogSnapshot> {
+        self.0
+            .catalog
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    pub fn runtime_states(&self) -> Vec<SourceRuntimeState> {
+        let registry = self.0.registry.read().unwrap_or_else(|p| p.into_inner());
+        let live = self.0.live.read().unwrap_or_else(|p| p.into_inner());
+        let mut states: Vec<_> = registry
+            .sources
+            .keys()
+            .map(|id| {
+                let entry = live.get(id);
+                SourceRuntimeState {
+                    id: id.clone(),
+                    revision: registry.revisions.get(id).copied().unwrap_or(0),
+                    status: entry.map_or(SourceStatus::Stopped, |entry| entry.status),
+                    state: entry.map_or_else(empty_object, |entry| entry.state.clone()),
+                    last_error: entry.and_then(|entry| entry.last_error.clone()),
+                }
+            })
+            .collect();
+        states.sort_by(|a, b| a.id.cmp(&b.id));
+        states
     }
 
     pub fn frames(&self) -> LatestFrameStore {
@@ -324,6 +392,7 @@ impl PluginManager {
         bindings: &[Binding],
     ) -> Result<(), PluginError> {
         self.ensure_running()?;
+        let _package = self.source_package_read(source_id)?;
         if bindings.len() > MAX_BINDINGS {
             return Err(PluginError::new("invalid_params", "插件绑定数量超过上限"));
         }
@@ -385,6 +454,7 @@ impl PluginManager {
     }
 
     pub async fn start(&self, source_id: &str) -> Result<(), PluginError> {
+        let _package = self.source_package_read(source_id)?;
         let gate = self.gate(source_id)?;
         let _guard = gate
             .try_lock_owned()
@@ -510,26 +580,36 @@ impl PluginManager {
                     session.shutdown().await;
                     return Err(PluginError::new("core_shutting_down", "核心正在关闭"));
                 }
-                let mut live = self
-                    .0
-                    .live
-                    .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                let entry = live.get_mut(source_id).ok_or_else(source_not_found)?;
-                if !session.is_alive() {
-                    entry.status = SourceStatus::Faulted;
-                    entry.permit = None;
-                    return Err(PluginError::new(
-                        "plugin_disconnected",
-                        "插件在初始化后退出",
-                    ));
+                let attached = {
+                    let mut live = self.0.live.write().unwrap_or_else(|p| p.into_inner());
+                    match live.get_mut(source_id) {
+                        Some(entry)
+                            if !self.0.stopping.load(Ordering::Acquire)
+                                && entry.generation == generation =>
+                        {
+                            if !session.is_alive() {
+                                entry.status = SourceStatus::Faulted;
+                                entry.permit = None;
+                                Err(PluginError::new(
+                                    "plugin_disconnected",
+                                    "插件在初始化后退出",
+                                ))
+                            } else {
+                                entry.status = SourceStatus::Running;
+                                entry.last_error = None;
+                                self.0.frames.replace_bindings(source_id, &entry.bindings);
+                                session.update_bindings(entry.bindings.clone(), &HashSet::new());
+                                entry.session = Some(session.clone());
+                                Ok(session.clone())
+                            }
+                        }
+                        _ => Err(PluginError::new("core_shutting_down", "插件启动已取消")),
+                    }
+                };
+                if attached.is_err() {
+                    session.shutdown().await;
                 }
-                entry.status = SourceStatus::Running;
-                entry.last_error = None;
-                self.0.frames.replace_bindings(source_id, &entry.bindings);
-                session.update_bindings(entry.bindings.clone(), &HashSet::new());
-                entry.session = Some(session.clone());
-                Ok(session)
+                attached
             }
             Err(error) => {
                 let mut live = self
@@ -550,7 +630,13 @@ impl PluginManager {
         }
     }
 
-    pub async fn configure(&self, source_id: &str, config: Value) -> Result<Value, PluginError> {
+    pub async fn configure(
+        &self,
+        source_id: &str,
+        config: Value,
+        expected_revision: u64,
+    ) -> Result<Value, PluginError> {
+        let _package = self.source_package_read(source_id)?;
         if serde_json::to_vec(&config)
             .map_err(|error| PluginError::new("invalid_config", error.to_string()))?
             .len()
@@ -563,6 +649,21 @@ impl PluginManager {
             .try_lock_owned()
             .map_err(|_| PluginError::new("queue_busy", "该输入源正在处理其他操作"))?;
         let (old, _) = self.definition(source_id)?;
+        let next_revision = {
+            let registry = self.0.registry.read().unwrap_or_else(|p| p.into_inner());
+            let current = registry.revisions.get(source_id).copied().unwrap_or(0);
+            if current != expected_revision {
+                return Err(PluginError::new(
+                    "config_conflict",
+                    format!(
+                        "配置已更新（当前版本 {current}，提交版本 {expected_revision}），请重新读取"
+                    ),
+                ));
+            }
+            current
+                .checked_add(1)
+                .ok_or_else(|| PluginError::new("invalid_config", "配置版本已达上限"))?
+        };
         let session = self.start_locked(source_id).await?;
         session
             .request(
@@ -598,6 +699,9 @@ impl PluginManager {
             return Err(source_not_found());
         };
         source.config = config;
+        registry
+            .revisions
+            .insert(source_id.to_owned(), next_revision);
         let result = self.save_registry(registry);
         drop(commit);
         if let Err(error) = result {
@@ -652,6 +756,7 @@ impl PluginManager {
         source_id: &str,
         params: ActionParams,
     ) -> Result<Value, PluginError> {
+        let _package = self.source_package_read(source_id)?;
         let gate = self.gate(source_id)?;
         let _guard = gate
             .try_lock_owned()
@@ -666,10 +771,52 @@ impl PluginManager {
     }
 
     pub async fn ui(&self, source_id: &str, params: UiParams) -> Result<UiDocument, PluginError> {
-        let gate = self.gate(source_id)?;
-        let _guard = gate
-            .try_lock_owned()
-            .map_err(|_| PluginError::new("queue_busy", "该输入源正在处理其他操作"))?;
+        let _package = self.source_package_read(source_id)?;
+        let (readers, gate, generation, status) = self
+            .0
+            .live
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(source_id)
+            .map(|entry| {
+                (
+                    entry.ui_readers.clone(),
+                    entry.gate.clone(),
+                    entry.generation,
+                    entry.status,
+                )
+            })
+            .ok_or_else(source_not_found)?;
+        let _reader = readers
+            .try_acquire_owned()
+            .map_err(|_| PluginError::new("queue_busy", "插件界面读取数量超过容量"))?;
+        let _guard = tokio::time::timeout(UI_WAIT_TIMEOUT, gate.clone().lock_owned())
+            .await
+            .map_err(|_| PluginError::new("queue_busy", "等待插件界面读取超时"))?;
+        self.ensure_running()?;
+        let current = self
+            .0
+            .live
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(source_id)
+            .is_some_and(|entry| {
+                let same_generation = entry.generation == generation;
+                // Another queued panel may have performed the first lazy initialization.
+                let initialized = status == SourceStatus::Stopped
+                    && generation.checked_add(1) == Some(entry.generation)
+                    && entry.status == SourceStatus::Running
+                    && !entry.restart_blocked;
+                Arc::ptr_eq(&entry.gate, &gate)
+                    && (same_generation || initialized)
+                    && (status == SourceStatus::Faulted || entry.status != SourceStatus::Faulted)
+            });
+        if !current {
+            return Err(PluginError::new(
+                "request_cancelled",
+                "等待期间输入源已停止或更换，请重新读取界面",
+            ));
+        }
         let value = self
             .start_locked(source_id)
             .await?
@@ -688,6 +835,7 @@ impl PluginManager {
 
     /// Continuous input has a separate latest-wins path; no config/ordinary lock.
     pub fn try_input(&self, source_id: &str, params: InputParams) -> Result<(), PluginError> {
+        let _package = self.source_package_read(source_id)?;
         if params.owner.is_empty()
             || params.owner.len() > 128
             || params.action.is_empty()
@@ -745,6 +893,7 @@ impl PluginManager {
     }
 
     pub async fn stop(&self, source_id: &str) -> Result<(), PluginError> {
+        let _package = self.source_package_read(source_id)?;
         let gate = self.gate(source_id)?;
         let _guard = gate
             .try_lock_owned()
@@ -824,17 +973,36 @@ impl PluginManager {
         path: impl AsRef<Path>,
         preinstalled: bool,
     ) -> Result<InstalledPlugin, PluginError> {
-        let _transaction = self.0.package_transaction.lock().await;
+        self.ensure_running()?;
+        let _transaction = self
+            .0
+            .package_transaction
+            .try_lock()
+            .map_err(|_| package_busy())?;
         let prepared = self.prepare(path.as_ref().to_path_buf()).await?;
+        let _package = match self.package_write(&prepared.manifest.id) {
+            Ok(guard) => guard,
+            Err(error) => {
+                let directory = prepared.directory;
+                let _ = tokio::task::spawn_blocking(move || fs::remove_dir_all(directory)).await;
+                return Err(error);
+            }
+        };
         self.publish_package(prepared, preinstalled, false).await
     }
 
     pub async fn update(&self, path: impl AsRef<Path>) -> Result<InstalledPlugin, PluginError> {
-        let _transaction = self.0.package_transaction.lock().await;
+        self.ensure_running()?;
+        let _transaction = self
+            .0
+            .package_transaction
+            .try_lock()
+            .map_err(|_| package_busy())?;
         let prepared = self.prepare(path.as_ref().to_path_buf()).await?;
         let id = prepared.manifest.id.clone();
         let result =
             async {
+                let _package = self.package_write(&id)?;
                 let old = self
                     .registry_clone()
                     .plugins
@@ -917,6 +1085,14 @@ impl PluginManager {
                 };
                 registry.plugins.insert(id, installed.clone());
                 for source in sources {
+                    let revision = registry
+                        .revisions
+                        .get(&source.id)
+                        .copied()
+                        .unwrap_or(0)
+                        .checked_add(1)
+                        .ok_or_else(|| PluginError::new("invalid_config", "配置版本已达上限"))?;
+                    registry.revisions.insert(source.id.clone(), revision);
                     registry.sources.insert(source.id.clone(), source);
                 }
                 self.save_registry(registry)?;
@@ -931,7 +1107,12 @@ impl PluginManager {
     }
 
     pub async fn uninstall(&self, plugin_id: &str, clear_data: bool) -> Result<(), PluginError> {
-        let _transaction = self.0.package_transaction.lock().await;
+        let _transaction = self
+            .0
+            .package_transaction
+            .try_lock()
+            .map_err(|_| package_busy())?;
+        let _package = self.package_write(plugin_id)?;
         let registry = self.registry_clone();
         if !registry.plugins.contains_key(plugin_id) {
             return Err(PluginError::new("plugin_not_found", "插件未安装"));
@@ -942,18 +1123,38 @@ impl PluginManager {
             .filter(|source| source.plugin_id == plugin_id)
             .map(|source| source.id.clone())
             .collect();
+        let mut guards = Vec::new();
         for id in &sources {
-            self.stop(id).await?;
+            guards.push(
+                self.gate(id)?
+                    .try_lock_owned()
+                    .map_err(|_| package_busy())?,
+            );
+        }
+        for id in &sources {
+            self.stop_locked(id).await;
         }
         let _commit = self.0.commit.lock().await;
+        self.ensure_running()?;
+        let mut paths = vec![self.0.root.join("packages").join(plugin_id)];
+        if clear_data {
+            paths.extend(sources.iter().map(|id| self.0.root.join("data").join(id)));
+        }
+        let quarantined = self.quarantine(paths)?;
         let mut registry = self.registry_clone();
         registry.plugins.remove(plugin_id);
         if clear_data {
             registry
                 .sources
                 .retain(|_, source| source.plugin_id != plugin_id);
+            for id in &sources {
+                registry.revisions.remove(id);
+            }
         }
-        self.save_registry(registry)?;
+        if let Err(error) = self.save_registry(registry) {
+            quarantined.restore()?;
+            return Err(error);
+        }
         if clear_data {
             for id in sources {
                 self.0
@@ -961,22 +1162,14 @@ impl PluginManager {
                     .write()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .remove(&id);
-                self.remove_data(&id)?;
             }
         }
-        let package_directory = self.0.root.join("packages").join(plugin_id);
-        tokio::task::spawn_blocking(move || {
-            if package_directory.exists() {
-                fs::remove_dir_all(package_directory).map_err(io_error)?;
-            }
-            Ok::<(), PluginError>(())
-        })
-        .await
-        .map_err(|error| PluginError::new("plugin_io", error.to_string()))??;
+        quarantined.discard();
         Ok(())
     }
 
     pub async fn create_source(&self, source: SourceSpec) -> Result<SourceState, PluginError> {
+        let _package = self.package_read(&source.plugin_id)?;
         validate_source(&source)?;
         let _commit = self.0.commit.lock().await;
         let mut registry = self.registry_clone();
@@ -990,6 +1183,7 @@ impl PluginManager {
             return Err(PluginError::new("queue_busy", "输入源实例数量超过 128"));
         }
         registry.sources.insert(source.id.clone(), source.clone());
+        registry.revisions.insert(source.id.clone(), 0);
         self.save_registry(registry)?;
         self.0
             .live
@@ -998,6 +1192,7 @@ impl PluginManager {
             .insert(source.id.clone(), LiveEntry::default());
         Ok(SourceState {
             spec: source,
+            revision: 0,
             status: SourceStatus::Stopped,
             state: empty_object(),
             last_error: None,
@@ -1005,6 +1200,7 @@ impl PluginManager {
     }
 
     pub async fn set_enabled(&self, source_id: &str, enabled: bool) -> Result<(), PluginError> {
+        let _package = self.source_package_read(source_id)?;
         let gate = self.gate(source_id)?;
         let _guard = gate
             .try_lock_owned()
@@ -1023,6 +1219,11 @@ impl PluginManager {
     }
 
     pub async fn rename_source(&self, source_id: &str, name: String) -> Result<(), PluginError> {
+        let _package = self.source_package_read(source_id)?;
+        let _guard = self
+            .gate(source_id)?
+            .try_lock_owned()
+            .map_err(|_| PluginError::new("queue_busy", "该输入源正在处理其他操作"))?;
         if name.trim().is_empty() || name.len() > 256 {
             return Err(PluginError::new("invalid_params", "输入源名称无效"));
         }
@@ -1041,25 +1242,37 @@ impl PluginManager {
         source_id: &str,
         clear_data: bool,
     ) -> Result<(), PluginError> {
+        let _package = self.source_package_read(source_id)?;
         let gate = self.gate(source_id)?;
         let _guard = gate
             .try_lock_owned()
             .map_err(|_| PluginError::new("queue_busy", "该输入源正在处理其他操作"))?;
         self.stop_locked(source_id).await;
         let _commit = self.0.commit.lock().await;
+        let quarantined = if clear_data {
+            Some(self.quarantine(vec![self.0.root.join("data").join(source_id)])?)
+        } else {
+            None
+        };
         let mut registry = self.registry_clone();
         registry
             .sources
             .remove(source_id)
             .ok_or_else(source_not_found)?;
-        self.save_registry(registry)?;
+        registry.revisions.remove(source_id);
+        if let Err(error) = self.save_registry(registry) {
+            if let Some(quarantined) = quarantined {
+                quarantined.restore()?;
+            }
+            return Err(error);
+        }
         self.0
             .live
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(source_id);
-        if clear_data {
-            self.remove_data(source_id)?;
+        if let Some(quarantined) = quarantined {
+            quarantined.discard();
         }
         Ok(())
     }
@@ -1121,6 +1334,53 @@ impl PluginManager {
             .ok_or_else(source_not_found)
     }
 
+    fn package_gate(&self, plugin_id: &str) -> Arc<tokio::sync::RwLock<()>> {
+        let mut gates = self
+            .0
+            .package_gates
+            .write()
+            .unwrap_or_else(|p| p.into_inner());
+        // Owned read/write guards retain their Arc. Keep their shared gate, but
+        // reclaim IDs from completed, failed and uninstalled package operations.
+        gates.retain(|_, gate| gate.strong_count() > 0);
+        if let Some(gate) = gates.get(plugin_id).and_then(Weak::upgrade) {
+            return gate;
+        }
+        let gate = Arc::new(tokio::sync::RwLock::new(()));
+        gates.insert(plugin_id.to_owned(), Arc::downgrade(&gate));
+        gate
+    }
+
+    fn package_read(&self, plugin_id: &str) -> Result<OwnedRwLockReadGuard<()>, PluginError> {
+        self.ensure_running()?;
+        self.package_gate(plugin_id)
+            .try_read_owned()
+            .map_err(|_| package_busy())
+    }
+
+    fn source_package_read(
+        &self,
+        source_id: &str,
+    ) -> Result<OwnedRwLockReadGuard<()>, PluginError> {
+        let id = self
+            .0
+            .registry
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .sources
+            .get(source_id)
+            .map(|source| source.plugin_id.clone())
+            .ok_or_else(source_not_found)?;
+        self.package_read(&id)
+    }
+
+    fn package_write(&self, plugin_id: &str) -> Result<OwnedRwLockWriteGuard<()>, PluginError> {
+        self.ensure_running()?;
+        self.package_gate(plugin_id)
+            .try_write_owned()
+            .map_err(|_| package_busy())
+    }
+
     fn ensure_running(&self) -> Result<(), PluginError> {
         if self.0.stopping.load(Ordering::Acquire) {
             return Err(PluginError::new("core_shutting_down", "核心正在关闭"));
@@ -1137,11 +1397,18 @@ impl PluginManager {
     }
 
     fn save_registry(&self, registry: Registry) -> Result<(), PluginError> {
+        self.ensure_running()?;
         let bytes = serde_json::to_vec_pretty(&registry)
             .map_err(|error| PluginError::new("invalid_config", error.to_string()))?;
         if bytes.len() as u64 > MAX_REGISTRY_BYTES {
             return Err(PluginError::new("invalid_config", "插件注册表超过容量限制"));
         }
+        let revision = self
+            .cached_catalog_snapshot()
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| PluginError::new("invalid_config", "插件目录版本已达上限"))?;
+        let catalog = Arc::new(PluginCatalogSnapshot::from_registry(&registry, revision));
         let temporary = self
             .0
             .root
@@ -1155,11 +1422,9 @@ impl PluginManager {
             file.write_all(&bytes).map_err(io_error)?;
             file.sync_all().map_err(io_error)?;
             fs::rename(&temporary, self.0.root.join("registry.json")).map_err(io_error)?;
-            *self
-                .0
-                .registry
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = registry;
+            let mut current = self.0.registry.write().unwrap_or_else(|p| p.into_inner());
+            *current = registry;
+            *self.0.catalog.write().unwrap_or_else(|p| p.into_inner()) = catalog;
             Ok(())
         })();
         if result.is_err() {
@@ -1215,13 +1480,54 @@ impl PluginManager {
         Ok(plugin)
     }
 
-    fn remove_data(&self, source_id: &str) -> Result<(), PluginError> {
-        validate_id(source_id)?;
-        let path = self.0.root.join("data").join(source_id);
-        if path.exists() {
-            fs::remove_dir_all(path).map_err(io_error)?;
+    fn quarantine(&self, paths: Vec<PathBuf>) -> Result<Quarantine, PluginError> {
+        let root = self
+            .0
+            .root
+            .join("staging")
+            .join(format!("removed-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).map_err(io_error)?;
+        let mut quarantine = Quarantine {
+            root,
+            moves: Vec::new(),
+        };
+        for (index, original) in paths.into_iter().enumerate() {
+            if !original.exists() {
+                continue;
+            }
+            let staged = quarantine.root.join(index.to_string());
+            if let Err(error) = fs::rename(&original, &staged) {
+                quarantine.restore()?;
+                return Err(io_error(error));
+            }
+            quarantine.moves.push((original, staged));
         }
+        Ok(quarantine)
+    }
+}
+
+/// Move directories before committing metadata; failures restore the previous installation.
+struct Quarantine {
+    root: PathBuf,
+    moves: Vec<(PathBuf, PathBuf)>,
+}
+
+impl Quarantine {
+    fn restore(self) -> Result<(), PluginError> {
+        for (original, staged) in self.moves.into_iter().rev() {
+            fs::rename(staged, original).map_err(|error| {
+                PluginError::new("rollback_failed", format!("插件目录恢复失败：{error}"))
+            })?;
+        }
+        let _ = fs::remove_dir(self.root);
         Ok(())
+    }
+
+    fn discard(self) {
+        // Logical deletion is committed; cleanup failure must not report a false rollback.
+        tokio::task::spawn_blocking(move || {
+            let _ = fs::remove_dir_all(self.root);
+        });
     }
 }
 
@@ -1234,6 +1540,12 @@ fn bounded_error(error: PluginError) -> PluginError {
 
 fn source_not_found() -> PluginError {
     PluginError::new("source_not_found", "输入源实例不存在")
+}
+fn package_busy() -> PluginError {
+    PluginError::new(
+        "plugin_busy",
+        "插件正在更新、卸载或处理其他操作，请稍后重试",
+    )
 }
 fn validate_id(id: &str) -> Result<(), PluginError> {
     if id.is_empty()
@@ -1263,6 +1575,80 @@ fn validate_source(source: &SourceSpec) -> Result<(), PluginError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn package_owned_guards_share_one_gate_and_unused_gates_are_reclaimed() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = PluginManager::open(temp.path()).unwrap();
+        let first = manager.package_read("example.active").unwrap();
+        let original = manager.0.package_gates.read().unwrap()["example.active"].clone();
+        let second = manager.package_read("example.active").unwrap();
+        assert!(Weak::ptr_eq(
+            &original,
+            &manager.0.package_gates.read().unwrap()["example.active"]
+        ));
+        assert_eq!(
+            manager.package_write("example.active").unwrap_err().code,
+            "plugin_busy"
+        );
+        drop(first);
+        assert_eq!(
+            manager.package_write("example.active").unwrap_err().code,
+            "plugin_busy"
+        );
+        drop(second);
+        assert!(original.upgrade().is_none());
+
+        let writer = manager.package_write("example.active").unwrap();
+        let replacement = manager.0.package_gates.read().unwrap()["example.active"].clone();
+        assert!(!Weak::ptr_eq(&original, &replacement));
+        for index in 0..128 {
+            drop(
+                manager
+                    .package_read(&format!("example.finished-{index}"))
+                    .unwrap(),
+            );
+            assert_eq!(
+                manager.package_read("example.active").unwrap_err().code,
+                "plugin_busy"
+            );
+            assert!(Weak::ptr_eq(
+                &replacement,
+                &manager.0.package_gates.read().unwrap()["example.active"]
+            ));
+            assert!(manager.0.package_gates.read().unwrap().len() <= 2);
+        }
+        drop(writer);
+        assert!(replacement.upgrade().is_none());
+        let _new = manager.package_read("example.new").unwrap();
+        let gates = manager.0.package_gates.read().unwrap();
+        assert_eq!(gates.len(), 1);
+        assert!(!gates.contains_key("example.active"));
+    }
+
+    #[tokio::test]
+    async fn nonexistent_package_requests_do_not_accumulate_lifecycle_locks() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = PluginManager::open(temp.path()).unwrap();
+        let _active = manager.package_read("example.active").unwrap();
+        for index in 0..1024 {
+            let error = manager
+                .create_source(SourceSpec {
+                    id: format!("source-{index}"),
+                    plugin_id: format!("example.missing-{index}"),
+                    name: "Missing".into(),
+                    enabled: true,
+                    config: empty_object(),
+                })
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, "plugin_not_found");
+            let gates = manager.0.package_gates.read().unwrap();
+            assert!(gates.len() <= 2);
+            assert!(gates["example.active"].upgrade().is_some());
+        }
+        assert!(manager.cached_catalog_snapshot().sources.is_empty());
+    }
 
     fn binding(id: &str, channel: Channel) -> Binding {
         Binding {
@@ -1388,7 +1774,7 @@ mod tests {
         let manifest = PluginManifest {
             id: "example.source".into(),
             version: "1.0.0".into(),
-            protocol_version: 1,
+            protocol_version: PROTOCOL_VERSION,
             name: "示例".into(),
             publisher: "Example".into(),
             license: "MIT".into(),
@@ -1420,10 +1806,25 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(manager.snapshot().plugins.len(), 1);
+        let catalog = manager.cached_catalog_snapshot();
+        assert!(Arc::ptr_eq(&catalog, &manager.cached_catalog_snapshot()));
+        let states = manager.runtime_states();
+        assert_eq!(states[0].revision, 0);
+        assert!(
+            serde_json::to_value(&states).unwrap()[0]
+                .get("config")
+                .is_none()
+        );
         manager
             .rename_source(&source.id, "改名".into())
             .await
             .unwrap();
+        let renamed = manager.cached_catalog_snapshot();
+        assert!(!Arc::ptr_eq(&catalog, &renamed));
+        assert!(renamed.revision > catalog.revision);
+        assert_eq!(renamed.source_revisions[&source.id], 0);
+        assert_eq!(catalog.sources[0].name, "输入源");
+        assert_eq!(renamed.sources[0].name, "改名");
         manager.uninstall(&manifest.id, false).await.unwrap();
         let manager = PluginManager::open(&root).unwrap();
         manager

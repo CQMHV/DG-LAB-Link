@@ -10,7 +10,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use dg_lab_link_core::ControlError;
+use dg_lab_link_contracts::ControlError;
 use dg_lab_link_runtime::{Client, LocalConfig};
 use futures_util::StreamExt;
 use rmcp::transport::streamable_http_server::{
@@ -385,7 +385,7 @@ impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for LimitedStream<S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dg_lab_link_core::ControlCommand;
+    use dg_lab_link_contracts::ControlCommand;
     use serde_json::json;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tower::ServiceExt;
@@ -433,7 +433,7 @@ mod tests {
                 .header("MCP-Protocol-Version", "2025-06-18")
                 .body(Body::from(
                     json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
-                        "name": name, "arguments": {}
+                        "name": name, "arguments": if name == "disconnect_connection" { json!({"connectionId":"ws-v4"}) } else { json!({}) }
                     }})
                     .to_string(),
                 ))
@@ -447,7 +447,7 @@ mod tests {
         assert_eq!(ordinary_response.status(), StatusCode::TOO_MANY_REQUESTS);
         let stopped = timeout(
             Duration::from_secs(1),
-            app.clone().oneshot(request("disconnect_relay")),
+            app.clone().oneshot(request("disconnect_connection")),
         )
         .await
         .expect("ordinary saturation cannot block a stop")

@@ -15,7 +15,7 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
-const source = (pluginId: string): SourceSnapshot => ({ id: `instance-${pluginId}`, pluginId, kind: "plugin", name: "插件实例", enabled: true, assignedChannelCount: 0, selectedPresetId: null, selectedPresetName: null, runtimeStatus: "running", config: { gain: 2, hidden: { preserve: true } }, state: {} });
+const source = (pluginId: string): SourceSnapshot => ({ id: `instance-${pluginId}`, revision: 0, pluginId, kind: "plugin", name: "插件实例", enabled: true, assignedChannelCount: 0, selectedPresetId: null, selectedPresetName: null, runtimeStatus: "running", lastError: null, config: { gain: 2, hidden: { preserve: true } }, state: {} });
 const doc = (): UiDocument => ({ title: "插件设置", nodes: [{ id: "config", type: "form", action: "configure", label: "插件设置", children: [{ id: "gain", type: "number_field", configKey: "gain", label: "增益参数", value: 2 }] }] });
 
 describe("插件管理与公开语义界面", () => {
@@ -49,7 +49,7 @@ describe("插件管理与公开语义界面", () => {
         const field = await screen.findByRole("spinbutton", { name: "增益参数" });
         fireEvent.change(field, { target: { value: "4" } });
         await user.click(screen.getByRole("button", { name: "应用配置" }));
-        await waitFor(() => expect(save).toHaveBeenCalledWith(instance.id, { gain: 4, hidden: { preserve: true } }, undefined));
+        await waitFor(() => expect(save).toHaveBeenCalledWith(instance.id, { gain: 4, hidden: { preserve: true } }, 0, undefined));
     });
 
     it("后台状态更新不覆盖未提交表单", async () => {
@@ -60,7 +60,7 @@ describe("插件管理与公开语义界面", () => {
         fireEvent.change(field, { target: { value: "7" } });
         const next = doc(); next.nodes[0].children![0].value = 3; ui.mockResolvedValue(next);
         rerender(<PluginSourcePanel source={{ ...instance, state: { tick: 1 } }} />);
-        await waitFor(() => expect(ui).toHaveBeenCalledTimes(3));
+        await waitFor(() => expect(ui).toHaveBeenCalledTimes(2));
         expect((field as HTMLInputElement).value).toBe("7");
     });
 
@@ -82,11 +82,42 @@ describe("插件管理与公开语义界面", () => {
         const instance = source("thirdparty.custom");
         const { rerender } = render(<PluginSourcePanel source={instance} />);
         await screen.findByRole("spinbutton", { name: "增益参数" });
-        await waitFor(() => expect(ui).toHaveBeenCalledTimes(2));
+        await waitFor(() => expect(ui).toHaveBeenCalledTimes(1));
         rerender(<PluginSourcePanel source={{ ...instance, runtimeStatus: "stopped", state: { stopped: true } }} />);
         await screen.findByText("插件进程已停止");
-        expect(ui).toHaveBeenCalledTimes(2);
+        expect(ui).toHaveBeenCalledTimes(1);
         expect(screen.queryByRole("spinbutton")).toBeNull();
+    });
+
+    it.each(["form", "section"] as const)("%s 的禁用状态继承到字段和提交按钮", async (kind) => {
+        const document = doc();
+        if (kind === "form") document.nodes[0].props = { disabled: true };
+        else document.nodes = [{ id: "disabled-section", type: "section", props: { disabled: true }, children: document.nodes }];
+        vi.spyOn(plugins, "getSourceUi").mockResolvedValue(document);
+        const save = vi.spyOn(plugins, "setSourceConfig").mockResolvedValue({});
+        render(<PluginSourcePanel source={source("disabled")} />);
+        expect((await screen.findByRole("spinbutton", { name: "增益参数" }) as HTMLInputElement).disabled).toBe(true);
+        const submit = screen.getByRole("button", { name: "应用配置" });
+        expect((submit as HTMLButtonElement).disabled).toBe(true);
+        fireEvent.submit(screen.getByRole("form"));
+        expect(save).not.toHaveBeenCalled();
+    });
+
+    it("陈旧草稿保留旧版本，冲突后显式载入新配置再提交", async () => {
+        vi.spyOn(plugins, "getSourceUi").mockResolvedValue(doc());
+        const save = vi.spyOn(plugins, "setSourceConfig").mockRejectedValueOnce({ code: "config_conflict", message: "配置已更新" }).mockResolvedValue({});
+        const instance = source("revision");
+        const { rerender } = render(<PluginSourcePanel source={instance} />);
+        const field = await screen.findByRole("spinbutton", { name: "增益参数" });
+        fireEvent.change(field, { target: { value: "4" } });
+        rerender(<PluginSourcePanel source={{ ...instance, revision: 1, config: { gain: 3, hidden: { preserve: false } } }} />);
+        const user = userEvent.setup();
+        await user.click(screen.getByRole("button", { name: "应用配置" }));
+        expect(save).toHaveBeenLastCalledWith(instance.id, { gain: 4, hidden: { preserve: true } }, 0, undefined);
+        await user.click(await screen.findByRole("button", { name: "重新载入配置" }));
+        fireEvent.change(field, { target: { value: "5" } });
+        await user.click(screen.getByRole("button", { name: "应用配置" }));
+        expect(save).toHaveBeenLastCalledWith(instance.id, { gain: 5, hidden: { preserve: false } }, 1, undefined);
     });
 
 });

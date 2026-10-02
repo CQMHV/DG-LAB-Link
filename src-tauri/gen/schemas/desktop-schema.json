@@ -183,16 +183,10 @@
           "markdownDescription": "Enables the adjust_intensity command without any pre-configured scope."
         },
         {
-          "description": "Enables the audio_control command without any pre-configured scope.",
+          "description": "Enables the choose_plugin_destination command without any pre-configured scope.",
           "type": "string",
-          "const": "allow-audio-control",
-          "markdownDescription": "Enables the audio_control command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the choose_audio_file command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-choose-audio-file",
-          "markdownDescription": "Enables the choose_audio_file command without any pre-configured scope."
+          "const": "allow-choose-plugin-destination",
+          "markdownDescription": "Enables the choose_plugin_destination command without any pre-configured scope."
         },
         {
           "description": "Enables the choose_plugin_file command without any pre-configured scope.",
@@ -207,22 +201,10 @@
           "markdownDescription": "Enables the choose_plugin_package command without any pre-configured scope."
         },
         {
-          "description": "Enables the choose_recording_destination command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-choose-recording-destination",
-          "markdownDescription": "Enables the choose_recording_destination command without any pre-configured scope."
-        },
-        {
           "description": "Enables the connect_bluetooth command without any pre-configured scope.",
           "type": "string",
           "const": "allow-connect-bluetooth",
           "markdownDescription": "Enables the connect_bluetooth command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the connect_relay command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-connect-relay",
-          "markdownDescription": "Enables the connect_relay command without any pre-configured scope."
         },
         {
           "description": "Enables the connect_transport command without any pre-configured scope.",
@@ -247,12 +229,6 @@
           "type": "string",
           "const": "allow-disconnect-connection",
           "markdownDescription": "Enables the disconnect_connection command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the disconnect_relay command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-disconnect-relay",
-          "markdownDescription": "Enables the disconnect_relay command without any pre-configured scope."
         },
         {
           "description": "Enables the get_app_preferences command without any pre-configured scope.",
@@ -321,12 +297,6 @@
           "markdownDescription": "Enables the refresh_connection_pairing command without any pre-configured scope."
         },
         {
-          "description": "Enables the refresh_pairing command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-refresh-pairing",
-          "markdownDescription": "Enables the refresh_pairing command without any pre-configured scope."
-        },
-        {
           "description": "Enables the reorder_custom_waveforms command without any pre-configured scope.",
           "type": "string",
           "const": "allow-reorder-custom-waveforms",
@@ -343,18 +313,6 @@
           "type": "string",
           "const": "allow-select-custom-waveform",
           "markdownDescription": "Enables the select_custom_waveform command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the select_device command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-select-device",
-          "markdownDescription": "Enables the select_device command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the set_audio_config command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-set-audio-config",
-          "markdownDescription": "Enables the set_audio_config command without any pre-configured scope."
         },
         {
           "description": "Enables the set_auto_start command without any pre-configured scope.",
@@ -417,12 +375,6 @@
           "markdownDescription": "Enables the set_sync_all_devices command without any pre-configured scope."
         },
         {
-          "description": "Enables the set_touch_config command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-set-touch-config",
-          "markdownDescription": "Enables the set_touch_config command without any pre-configured scope."
-        },
-        {
           "description": "Enables the start_output command without any pre-configured scope.",
           "type": "string",
           "const": "allow-start-output",
@@ -441,28 +393,16 @@
           "markdownDescription": "Enables the update_safety command without any pre-configured scope."
         },
         {
-          "description": "Enables the update_touch_input command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-update-touch-input",
-          "markdownDescription": "Enables the update_touch_input command without any pre-configured scope."
-        },
-        {
           "description": "Denies the adjust_intensity command without any pre-configured scope.",
           "type": "string",
           "const": "deny-adjust-intensity",
           "markdownDescription": "Denies the adjust_intensity command without any pre-configured scope."
         },
         {
-          "description": "Denies the audio_control command without any pre-configured scope.",
+          "description": "Denies the choose_plugin_destination command without any pre-configured scope.",
           "type": "string",
-          "const": "deny-audio-control",
-          "markdownDescription": "Denies the audio_control command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the choose_audio_file command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-choose-audio-file",
-          "markdownDescription": "Denies the choose_audio_file command without any pre-configured scope."
+          "const": "deny-choose-plugin-destination",
+          "markdownDescription": "Denies the choose_plugin_destination command without any pre-configured scope."
         },
         {
           "description": "Denies the choose_plugin_file command without any pre-configured scope.",
@@ -477,22 +417,10 @@
           "markdownDescription": "Denies the choose_plugin_package command without any pre-configured scope."
         },
         {
-          "description": "Denies the choose_recording_destination command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-choose-recording-destination",
-          "markdownDescription": "Denies the choose_recording_destination command without any pre-configured scope."
-        },
-        {
           "description": "Denies the connect_bluetooth command without any pre-configured scope.",
           "type": "string",
           "const": "deny-connect-bluetooth",
           "markdownDescription": "Denies the connect_bluetooth command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the connect_relay command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-connect-relay",
-          "markdownDescription": "Denies the connect_relay command without any pre-configured scope."
         },
         {
           "description": "Denies the connect_transport command without any pre-configured scope.",
@@ -517,12 +445,6 @@
           "type": "string",
           "const": "deny-disconnect-connection",
           "markdownDescription": "Denies the disconnect_connection command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the disconnect_relay command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-disconnect-relay",
-          "markdownDescription": "Denies the disconnect_relay command without any pre-configured scope."
         },
         {
           "description": "Denies the get_app_preferences command without any pre-configured scope.",
@@ -591,12 +513,6 @@
           "markdownDescription": "Denies the refresh_connection_pairing command without any pre-configured scope."
         },
         {
-          "description": "Denies the refresh_pairing command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-refresh-pairing",
-          "markdownDescription": "Denies the refresh_pairing command without any pre-configured scope."
-        },
-        {
           "description": "Denies the reorder_custom_waveforms command without any pre-configured scope.",
           "type": "string",
           "const": "deny-reorder-custom-waveforms",
@@ -613,18 +529,6 @@
           "type": "string",
           "const": "deny-select-custom-waveform",
           "markdownDescription": "Denies the select_custom_waveform command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the select_device command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-select-device",
-          "markdownDescription": "Denies the select_device command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the set_audio_config command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-set-audio-config",
-          "markdownDescription": "Denies the set_audio_config command without any pre-configured scope."
         },
         {
           "description": "Denies the set_auto_start command without any pre-configured scope.",
@@ -687,12 +591,6 @@
           "markdownDescription": "Denies the set_sync_all_devices command without any pre-configured scope."
         },
         {
-          "description": "Denies the set_touch_config command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-set-touch-config",
-          "markdownDescription": "Denies the set_touch_config command without any pre-configured scope."
-        },
-        {
           "description": "Denies the start_output command without any pre-configured scope.",
           "type": "string",
           "const": "deny-start-output",
@@ -709,12 +607,6 @@
           "type": "string",
           "const": "deny-update-safety",
           "markdownDescription": "Denies the update_safety command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the update_touch_input command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-update-touch-input",
-          "markdownDescription": "Denies the update_touch_input command without any pre-configured scope."
         },
         {
           "description": "This permission set configures if your\napplication can enable or disable auto\nstarting the application on boot.\n\n#### Granted Permissions\n\nIt allows all to check, enable and\ndisable the automatic start on boot.\n\n\n#### This default permission set includes:\n\n- `allow-enable`\n- `allow-disable`\n- `allow-is-enabled`",

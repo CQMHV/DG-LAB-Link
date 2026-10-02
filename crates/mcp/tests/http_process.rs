@@ -119,9 +119,9 @@ async fn independent_http_process_observes_core_and_rejects_untrusted_requests()
     status["revision"] = gui_status["revision"].clone();
     assert_eq!(gui_status, status);
     assert_eq!(status["defaultSourceId"], "source-fixed-waveform");
-    assert_eq!(status["connection"]["state"], "disconnected");
+    assert_eq!(status["connections"][0]["state"], "disconnected");
     assert!(
-        status["connection"]["controllerId"].is_null(),
+        status["connections"][0]["controllerId"].is_null(),
         "cold adapters never connect a Relay"
     );
 
@@ -198,7 +198,7 @@ async fn independent_http_process_observes_core_and_rejects_untrusted_requests()
             &config,
             "tools/call",
             json!({
-                "name": "disconnect_relay", "arguments": {}
+                "name": "disconnect_connection", "arguments": {"connectionId":"ws-v4"}
             }),
         ),
     )
@@ -248,7 +248,7 @@ async fn http_does_not_start_core_and_port_conflicts_preserve_other_holders() {
     assert_eq!(gui.runtime_info().await.unwrap().pid, original.pid);
     assert_eq!(gui.runtime_info().await.unwrap().holder_count, 1);
     assert_eq!(
-        gui.call(ControlCommand::GetHubSnapshot).await.unwrap()["connection"]["state"],
+        gui.call(ControlCommand::GetHubSnapshot).await.unwrap()["connections"][0]["state"],
         "disconnected"
     );
     drop(mcp_reservation);

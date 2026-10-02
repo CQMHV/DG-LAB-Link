@@ -5,9 +5,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use dg_lab_link_core::hub::{ChannelStatus, ConnectionState, HubSnapshot, OutputState};
-use dg_lab_link_core::sources::audio::AudioState;
-use dg_lab_link_core::{ControlCommand, ControlError};
+use dg_lab_link_contracts::hub::{ChannelStatus, ConnectionState, HubSnapshot, OutputState};
+use dg_lab_link_contracts::{ControlCommand, ControlError};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -217,7 +216,7 @@ impl Client {
                     },
                     request = requests_rx.recv() => match request { Some(request) => request, None => break },
                 };
-                if matches!(&request.request.operation, Operation::Call(command) if crate::server::may_resume_output(command))
+                if matches!(&request.request.operation, Operation::Call(command) if command.may_resume_output())
                     && request.epoch.local != stop_epoch.load(Ordering::Acquire)
                 {
                     if let Some(sender) = write_pending
@@ -271,7 +270,11 @@ impl Client {
                     Response::CommandEpoch { epoch } => {
                         core_epoch.fetch_max(epoch, Ordering::AcqRel);
                     }
-                    Response::Snapshot { snapshot: update } => {
+                    Response::Snapshot {
+                        snapshot: mut update,
+                        configs,
+                    } => {
+                        restore_source_configs(&mut update, &snapshot.borrow(), configs);
                         snapshot.send_replace(*update);
                     }
                     Response::Result {
@@ -299,23 +302,22 @@ impl Client {
             // Do not leave the GUI showing active output after a crashed core.
             let mut disconnected = snapshot.borrow().clone();
             disconnected.revision = disconnected.revision.saturating_add(1);
-            disconnected.connection.state = ConnectionState::Error;
-            disconnected.connection.last_error = Some("共享核心连接已关闭".to_owned());
+            for connection in &mut disconnected.connections {
+                connection.state = ConnectionState::Error;
+                connection.last_error = Some("共享核心连接已关闭".to_owned());
+            }
+            for binding in &mut disconnected.source_bindings {
+                binding.binding.active = false;
+            }
+            for source in &mut disconnected.sources {
+                if source.plugin_id.is_some() {
+                    source.runtime_status = "stopped".into();
+                }
+            }
             disconnected.output.state = OutputState::Error;
             disconnected.output.last_error = Some("共享核心连接已关闭".to_owned());
             disconnected.output_device_count = 0;
-            disconnected.input_modes.audio.state = AudioState::Error;
-            disconnected.input_modes.audio.last_error = Some("共享核心连接已关闭".to_owned());
-            disconnected.input_modes.audio.level_left = 0.0;
-            disconnected.input_modes.audio.level_right = 0.0;
-            disconnected.channels.a.status = ChannelStatus::Disconnected;
-            disconnected.channels.b.status = ChannelStatus::Disconnected;
             for device in &mut disconnected.devices {
-                device.output_active = false;
-                device.channel_a_status = ChannelStatus::Disconnected;
-                device.channel_b_status = ChannelStatus::Disconnected;
-            }
-            if let Some(device) = &mut disconnected.device {
                 device.output_active = false;
                 device.channel_a_status = ChannelStatus::Disconnected;
                 device.channel_b_status = ChannelStatus::Disconnected;
@@ -589,6 +591,27 @@ fn core_lock_available(directory: &Path) -> Result<bool, ControlError> {
     }
 }
 
+fn restore_source_configs(
+    update: &mut HubSnapshot,
+    previous: &HubSnapshot,
+    configs: Option<BTreeMap<String, Arc<Value>>>,
+) {
+    for source in &mut update.sources {
+        source.config = configs
+            .as_ref()
+            .and_then(|configs| configs.get(&source.id))
+            .cloned()
+            .or_else(|| {
+                previous
+                    .sources
+                    .iter()
+                    .find(|old| old.id == source.id)
+                    .map(|old| old.config.clone())
+            })
+            .unwrap_or_else(|| Arc::new(serde_json::json!({})));
+    }
+}
+
 fn unavailable() -> ControlError {
     ControlError::new("runtime_unavailable", "共享核心未运行或本机连接已关闭")
 }
@@ -600,6 +623,38 @@ fn invalid_response(error: serde_json::Error) -> ControlError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_snapshots_restore_configuration_and_apply_catalogue_updates() {
+        let directory = tempfile::tempdir().unwrap();
+        let (service, _runtime) = dg_lab_link_core::ControlService::create(
+            directory.path().to_owned(),
+            "ws://127.0.0.1:1/v4".into(),
+        )
+        .unwrap();
+        let mut previous = service.snapshot();
+        previous.sources[0].config = Arc::new(serde_json::json!({"gain":3}));
+        let mut update = previous.clone();
+        update.sources[0].config = Arc::new(serde_json::json!({}));
+        restore_source_configs(&mut update, &previous, None);
+        assert!(Arc::ptr_eq(
+            &previous.sources[0].config,
+            &update.sources[0].config
+        ));
+        let changed = Arc::new(serde_json::json!({"gain":7}));
+        restore_source_configs(
+            &mut update,
+            &previous,
+            Some(BTreeMap::from([(
+                previous.sources[0].id.clone(),
+                changed.clone(),
+            )])),
+        );
+        assert!(Arc::ptr_eq(&update.sources[0].config, &changed));
+        update.sources.clear();
+        restore_source_configs(&mut update, &previous, None);
+        assert!(update.sources.is_empty());
+    }
 
     #[tokio::test]
     async fn cancelled_request_does_not_leak_pending_capacity() {

@@ -48,7 +48,7 @@ describe("设备总览", () => {
         expect((await getHubSnapshot()).connections.find((connection) => connection.transport === "ws_v3")?.state).toBe("disconnected");
     });
 
-    it("同步使用显式基准设备，保留 Hub 中原有的当前设备", async () => {
+    it("同步使用显式基准设备，不改变控制台焦点", async () => {
         const initial = await getHubSnapshot();
         const base = initial.devices[1];
         const user = userEvent.setup();
@@ -63,7 +63,6 @@ describe("设备总览", () => {
             expect(snapshot.syncAllDevices).toBe(true);
             expect(snapshot.devices.map((device) => [device.intensityA, device.intensityB]))
                 .toEqual([[base.intensityA, base.intensityB], [base.intensityA, base.intensityB]]);
-            expect(snapshot.selectedDeviceId).toBe(initial.selectedDeviceId);
         });
         expect(within(safetyBar()).getByText("郊狼 3.0 · V4")).toBeTruthy();
     });

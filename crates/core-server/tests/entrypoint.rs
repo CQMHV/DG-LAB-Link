@@ -77,7 +77,7 @@ async fn standalone_core_accepts_clients_and_exits_after_last_release() {
     assert_eq!(first_info.instance_id, second_info.instance_id);
     assert_eq!(first_info.holder_count, 2);
     assert_eq!(
-        serde_json::to_value(first.snapshot()).unwrap()["connection"]["state"],
+        serde_json::to_value(first.snapshot()).unwrap()["connections"][0]["state"],
         "disconnected"
     );
     first.release().await.unwrap();

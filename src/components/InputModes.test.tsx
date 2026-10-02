@@ -4,11 +4,15 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
-import { __emitMockSnapshot, __getMockTouchInput, __resetMockBridge, getHubSnapshot } from "../lib/bridge";
-import type { TouchInput } from "../lib/contracts";
+import { __getMockTouchInput, __resetMockBridge, getHubSnapshot, setDeviceChannelSource, startOutput } from "../lib/bridge";
+import type { AudioChannelConfig, AudioSnapshot, TouchConfig, TouchInput } from "../lib/contracts";
+import { asObject } from "../lib/json";
 import { defaultTouchConfig } from "../lib/inputModes";
 import { DashboardPage } from "../pages/DashboardPage";
 import { TouchBoard } from "./TouchBoard";
+
+const readTouchConfig = async () => (await getHubSnapshot()).sources.find((source) => source.id === "source-touch")!.config as unknown as TouchConfig;
+const readAudio = async () => asObject((await getHubSnapshot()).sources.find((source) => source.id === "source-audio")!.state).audio as AudioSnapshot;
 
 beforeEach(() => {
     __resetMockBridge();
@@ -35,7 +39,7 @@ describe("动态输入源", () => {
     });
 
     it("声明式配置保留完整波形与曲线，保存触控参数", async () => {
-        const original = (await getHubSnapshot()).inputModes.touchConfig;
+        const original = await readTouchConfig();
         const user = userEvent.setup(); render(<App />);
         await user.click(await screen.findByRole("button", { name: "输入源" }));
         await user.click(screen.getByRole("button", { name: "打开 触控模式 详情" }));
@@ -44,7 +48,7 @@ describe("动态输入源", () => {
         await user.selectOptions(screen.getByRole("combobox", { name: "触控通道分配" }), "separate");
         await user.click(screen.getByRole("button", { name: "应用触控配置" }));
         await waitFor(async () => {
-            const config = (await getHubSnapshot()).inputModes.touchConfig;
+            const config = await readTouchConfig();
             expect(config.mode).toBe("rhythm"); expect(config.gridSize).toBe(3); expect(config.routing).toBe("separate");
             expect(config.freeWaveforms).toEqual(original.freeWaveforms); expect(config.intensityCurve).toEqual(original.intensityCurve);
         });
@@ -69,28 +73,29 @@ describe("动态输入源", () => {
         const player = within(await screen.findByRole("region", { name: "共享音频控制" }));
         await user.click(player.getByRole("button", { name: "导入音频或视频" }));
         await user.click(await player.findByRole("button", { name: "播放音频" }));
-        await waitFor(async () => expect((await getHubSnapshot()).inputModes.audio.state).toBe("playing"));
+        await waitFor(async () => expect((await readAudio()).state).toBe("playing"));
         await user.click(player.getByRole("button", { name: "麦克风实时输入" }));
-        await waitFor(async () => expect((await getHubSnapshot()).inputModes.audio.state).toBe("capturing"));
+        await waitFor(async () => expect((await readAudio()).state).toBe("capturing"));
         await user.click(player.getByRole("button", { name: "开始录音" }));
-        await waitFor(async () => expect((await getHubSnapshot()).inputModes.audio.state).toBe("recording"));
+        await waitFor(async () => expect((await readAudio()).state).toBe("recording"));
         await user.click(player.getByRole("button", { name: "完成录音并准备回放" }));
-        await waitFor(async () => expect((await getHubSnapshot()).inputModes.audio.hasRecording).toBe(true));
+        await waitFor(async () => expect((await readAudio()).hasRecording).toBe(true));
         await user.click(player.getByRole("button", { name: "桌面音频" }));
-        await waitFor(async () => expect((await getHubSnapshot()).inputModes.audio.mode).toBe("desktop"));
+        await waitFor(async () => expect((await readAudio()).mode).toBe("desktop"));
         await user.click(player.getByRole("button", { name: "停止桌面监听" }));
-        await waitFor(async () => expect((await getHubSnapshot()).inputModes.audio.state).toBe("idle"));
+        await waitFor(async () => expect((await readAudio()).state).toBe("idle"));
     });
 
     it("通道映射通过公共表单分别配置", async () => {
         const user = userEvent.setup(); render(<App />);
         await user.selectOptions(await screen.findByRole("combobox", { name: "选择 郊狼 3.0 A 通道的输入源" }), "source-audio");
+        await user.selectOptions(screen.getByRole("combobox", { name: "选择 郊狼 3.0 B 通道的输入源" }), "source-audio");
         const form = within(await screen.findByRole("form", { name: "A 通道音频映射" }));
         await user.selectOptions(form.getByRole("combobox", { name: "音频声道" }), "left");
         fireEvent.change(form.getByRole("slider", { name: "增益" }), { target: { value: "4" } });
         await user.click(form.getByRole("button", { name: "应用配置" }));
         await waitFor(async () => {
-            const bindings = (await getHubSnapshot()).inputModes.audioBindings;
+            const bindings = (await getHubSnapshot()).sourceBindings.filter((binding) => binding.sourceId === "source-audio").map((binding) => ({ ...binding, config: binding.config as AudioChannelConfig }));
             expect(bindings[0].config.gain).toBe(4); expect(bindings[0].config.inputChannel).toBe("left"); expect(bindings[1].config.gain).toBe(2.5);
         });
     });
@@ -157,12 +162,10 @@ describe("动态输入源", () => {
     });
 
     it("另一通道切换来源或保存音频配置不会中断已有触点与续租", async () => {
+        const deviceId = (await getHubSnapshot()).devices[0].controlId;
+        await setDeviceChannelSource(deviceId, "a", "source-touch");
+        await startOutput(deviceId);
         const snapshot = await getHubSnapshot();
-        const deviceId = snapshot.devices[0].controlId;
-        snapshot.devices[0].sourceIdA = "source-touch";
-        snapshot.devices[0].bindingIdA = `${deviceId}/a`;
-        snapshot.devices[0].outputActive = true;
-        __emitMockSnapshot(snapshot);
         const props = {
             activeTabId: "touch-channel-independence",
             activeDeviceId: deviceId,
@@ -186,17 +189,17 @@ describe("动态输入源", () => {
             onStopOutput: vi.fn(),
             onSetDeviceChannelSource: vi.fn(),
             onSetDeviceChannelSourceSync: vi.fn(),
-            onSetAudioConfig: vi.fn(),
         };
         const { rerender } = render(<DashboardPage {...props} />);
         const board = await screen.findByLabelText("触控区域");
         fireEvent.pointerDown(board, { pointerId: 5, button: 0, clientX: 100, clientY: 100 });
         await waitFor(() => expect(__getMockTouchInput()?.pointers[0]?.id).toBe(5));
         const firstInput = __getMockTouchInput()!;
-        const next = structuredClone(snapshot);
-        next.devices[0].sourceIdB = "source-audio";
-        __emitMockSnapshot(next);
+        await setDeviceChannelSource(deviceId, "b", "source-audio");
+        const next = await getHubSnapshot();
         rerender(<DashboardPage {...props} snapshot={next} pendingAction={`source-${deviceId}-b`} />);
+        expect(next.devices[0].bindingIdA).toBe(snapshot.devices[0].bindingIdA);
+        expect(screen.queryAllByRole("alert").map((alert) => alert.textContent)).toEqual([]);
         expect(screen.getByLabelText("触控区域")).toBe(board);
         expect(board.getAttribute("aria-disabled")).toBe("false");
         await waitFor(() => {

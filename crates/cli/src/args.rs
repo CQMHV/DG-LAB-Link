@@ -36,11 +36,6 @@ pub enum Command {
     Status,
     /// 持续订阅最新快照，输出 NDJSON
     Watch,
-    /// 连接和断开 Socket V4 Relay
-    Relay {
-        #[command(subcommand)]
-        command: RelayCommand,
-    },
     /// 管理并行运行的 V4、V3 与蓝牙连接
     Connections {
         #[command(subcommand)]
@@ -51,16 +46,8 @@ pub enum Command {
         #[command(subcommand)]
         command: BluetoothCommand,
     },
-    /// 读取配对信息；--refresh 重新生成配对
-    Pairing {
-        #[arg(long)]
-        refresh: bool,
-    },
-    /// 查看设备或更改 GUI 当前焦点
-    Devices {
-        #[command(subcommand)]
-        command: Option<DeviceCommand>,
-    },
+    /// 查看全部设备
+    Devices,
     /// 按设备 controlId 和通道相对调整强度
     Intensity {
         #[arg(long)]
@@ -89,16 +76,6 @@ pub enum Command {
     Waveforms {
         #[command(subcommand)]
         command: WaveformCommand,
-    },
-    /// 触控配置和带租期的触点状态
-    Touch {
-        #[command(subcommand)]
-        command: TouchCommand,
-    },
-    /// 音频播放、采集、录音及通道映射
-    Audio {
-        #[command(subcommand)]
-        command: AudioCommand,
     },
     /// 查看或更新安全设置
     Safety {
@@ -138,12 +115,6 @@ pub enum Command {
 pub enum HolderCommand {
     List,
     Release { id: String },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum RelayCommand {
-    Connect,
-    Disconnect,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -200,11 +171,6 @@ pub enum BluetoothCommand {
 }
 
 #[derive(Debug, Subcommand)]
-pub enum DeviceCommand {
-    Select { device: String },
-}
-
-#[derive(Debug, Subcommand)]
 pub enum OutputCommand {
     Start {
         #[arg(long)]
@@ -258,6 +224,8 @@ pub enum SourceCommand {
     },
     Config {
         source: String,
+        #[arg(long)]
+        expected_revision: u64,
         #[arg(long)]
         binding: Option<String>,
         #[command(flatten)]
@@ -344,54 +312,6 @@ pub enum WaveformCommand {
 }
 
 #[derive(Debug, Subcommand)]
-pub enum TouchCommand {
-    Config {
-        #[command(flatten)]
-        input: JsonInput,
-    },
-    /// JSON 包含 deviceId、ownerId、sequence、pointers；持续触控须一秒内续租
-    Input {
-        #[command(flatten)]
-        input: JsonInput,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum AudioCommand {
-    Status,
-    Load {
-        path: PathBuf,
-    },
-    Play,
-    Pause,
-    Stop,
-    Seek {
-        position_ms: u64,
-    },
-    Microphone,
-    Desktop,
-    Record,
-    StopRecording,
-    Save {
-        path: PathBuf,
-    },
-    Options {
-        #[arg(long, value_enum)]
-        repeat: Toggle,
-        #[arg(long, value_enum)]
-        speaker: Toggle,
-    },
-    Config {
-        #[arg(long)]
-        device: String,
-        #[arg(long, value_enum)]
-        channel: ChannelArg,
-        #[command(flatten)]
-        input: JsonInput,
-    },
-}
-
-#[derive(Debug, Subcommand)]
 pub enum SafetyCommand {
     Get,
     /// JSON 必须含 connectionTimeoutEnabled、connectionTimeoutMinutes、allowAppIntensityControl
@@ -424,10 +344,10 @@ pub enum McpTransport {
 
 #[derive(Debug, Args)]
 pub struct JsonInput {
-    /// JSON 对象文本，与 --file 互斥
+    /// JSON 文本，与 --file 互斥
     #[arg(long, conflicts_with = "file")]
     pub params: Option<String>,
-    /// 从 UTF-8 JSON 文件读取对象
+    /// 从 UTF-8 JSON 文件读取参数
     #[arg(long)]
     pub file: Option<PathBuf>,
 }

@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
-use dg_lab_link_core::ControlError;
+use dg_lab_link_contracts::ControlError;
 use dg_lab_link_mcp::{serve_http_mcp, serve_stdio_mcp};
 use dg_lab_link_runtime::{Client, LocalConfig, config_dir, connect_or_spawn, core_executable};
 

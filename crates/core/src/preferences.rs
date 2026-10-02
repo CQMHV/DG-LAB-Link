@@ -9,22 +9,15 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::sources::WaveformConfig;
-use crate::sources::touch::TouchConfig;
 use crate::transport::{BleParameters, TransportKind};
 
 const PREFERENCES_FILE_NAME: &str = "preferences.json";
 const MAX_PREFERENCES_BYTES: u64 = 4 * 1024 * 1024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AppPreferencesSnapshot {
-    pub close_to_tray: bool,
-    pub auto_start: bool,
-    pub start_minimized: bool,
-}
+pub use dg_lab_link_contracts::preferences::AppPreferencesSnapshot;
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
-#[serde(default, rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 struct StoredPreferences {
     relay_endpoints: BTreeMap<TransportKind, String>,
     ble_parameters: BTreeMap<String, BleParameters>,
@@ -34,12 +27,8 @@ struct StoredPreferences {
     connection_timeout_minutes: u16,
     allow_app_intensity_control: bool,
     default_source_id: Option<String>,
-    #[serde(alias = "manualWaveform", alias = "defaultWaveform")]
     fixed_waveform: Option<WaveformConfig>,
     custom_waveforms: Vec<WaveformConfig>,
-    touch_config: TouchConfig,
-    #[serde(skip_serializing)]
-    selected_custom_waveform_id: Option<String>,
 }
 
 impl Default for StoredPreferences {
@@ -55,9 +44,37 @@ impl Default for StoredPreferences {
             default_source_id: None,
             fixed_waveform: Some(WaveformConfig::default()),
             custom_waveforms: Vec::new(),
-            touch_config: TouchConfig::default(),
-            selected_custom_waveform_id: None,
         }
+    }
+}
+
+impl StoredPreferences {
+    fn validate(&self) -> Result<(), PreferencesError> {
+        if !(1..=1440).contains(&self.connection_timeout_minutes) {
+            return Err(PreferencesError::Invalid(
+                "连接超时须为 1..1440 分钟".into(),
+            ));
+        }
+        crate::hub::validate_waveform_library(&self.custom_waveforms, self.fixed_waveform.as_ref())
+            .map_err(|error| PreferencesError::Invalid(error.to_string()))?;
+        for (transport, endpoint) in &self.relay_endpoints {
+            let url = url::Url::parse(endpoint)
+                .map_err(|error| PreferencesError::Invalid(error.to_string()))?;
+            if *transport == TransportKind::Ble
+                || !matches!(url.scheme(), "ws" | "wss")
+                || url.host_str().is_none()
+            {
+                return Err(PreferencesError::Invalid(
+                    "Relay 端点须为 WS/WSS 地址".into(),
+                ));
+            }
+        }
+        for parameters in self.ble_parameters.values() {
+            parameters
+                .validate()
+                .map_err(|error| PreferencesError::Invalid(error.to_string()))?;
+        }
+        Ok(())
     }
 }
 
@@ -67,6 +84,8 @@ pub enum PreferencesError {
     Read(#[source] std::io::Error),
     #[error("应用偏好设置格式无效：{0}")]
     Parse(#[source] serde_json::Error),
+    #[error("应用偏好设置无效：{0}")]
+    Invalid(String),
     #[error("无法保存应用偏好设置：{0}")]
     Write(#[source] std::io::Error),
     #[error("无法序列化应用偏好设置：{0}")]
@@ -114,21 +133,9 @@ impl PreferencesState {
             stored.ble_parameters.insert(device_id, parameters);
         })
     }
-    pub fn touch_config(&self) -> TouchConfig {
-        self.stored
-            .read()
-            .unwrap_or_else(|error| error.into_inner())
-            .touch_config
-            .clone()
-    }
-
-    pub fn set_touch_config(&self, config: TouchConfig) -> Result<(), PreferencesError> {
-        self.update(|stored| stored.touch_config = config)
-    }
-
     pub fn load(config_dir: PathBuf) -> Result<Self, PreferencesError> {
         let file_path = config_dir.join(PREFERENCES_FILE_NAME);
-        let mut snapshot: StoredPreferences = match fs::File::open(&file_path) {
+        let snapshot: StoredPreferences = match fs::File::open(&file_path) {
             Ok(file) => {
                 let mut content = Vec::new();
                 file.take(MAX_PREFERENCES_BYTES + 1)
@@ -145,25 +152,8 @@ impl PreferencesState {
             Err(error) if error.kind() == ErrorKind::NotFound => StoredPreferences::default(),
             Err(error) => return Err(PreferencesError::Read(error)),
         };
-        if let Some(selected_id) = snapshot.selected_custom_waveform_id.take()
-            && let Some(selected) = snapshot
-                .custom_waveforms
-                .iter()
-                .find(|waveform| waveform.preset_id == selected_id)
-        {
-            snapshot.fixed_waveform = Some(selected.clone());
-        }
-        if !(1..=1440).contains(&snapshot.connection_timeout_minutes) {
-            snapshot.connection_timeout_minutes = 60;
-        }
+        snapshot.validate()?;
         Ok(Self::new(file_path, snapshot))
-    }
-
-    pub fn with_defaults(config_dir: PathBuf) -> Self {
-        Self::new(
-            config_dir.join(PREFERENCES_FILE_NAME),
-            StoredPreferences::default(),
-        )
     }
 
     pub fn snapshot(&self, auto_start: bool) -> AppPreferencesSnapshot {
@@ -278,6 +268,7 @@ impl PreferencesState {
             .unwrap_or_else(|error| error.into_inner());
         let mut next = stored.clone();
         update(&mut next);
+        next.validate()?;
         self.persist(&next)?;
         *stored = next;
         Ok(())
@@ -315,6 +306,39 @@ mod tests {
 
     fn temporary_config_dir() -> PathBuf {
         std::env::temp_dir().join(format!("dg-lab-link-preferences-{}", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn invalid_persisted_values_are_rejected_without_modifying_the_file() {
+        for invalid in [
+            serde_json::json!({"connectionTimeoutMinutes":0}),
+            serde_json::json!({"fixedWaveform":{"presetId":"bad","presetName":"Bad","frames":["FFFFFFFFFFFFFFFF"]}}),
+            serde_json::json!({"relayEndpoints":{"ws_v3":"https://example.test"}}),
+            serde_json::json!({"bleParameters":{"device":{"maxStrengthA":201}}}),
+            serde_json::json!({"touchConfig":{}}),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join(PREFERENCES_FILE_NAME);
+            let original = serde_json::to_vec(&invalid).unwrap();
+            fs::write(&path, &original).unwrap();
+            assert!(
+                PreferencesState::load(directory.path().to_owned()).is_err(),
+                "{invalid}"
+            );
+            assert_eq!(fs::read(path).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn invalid_direct_update_preserves_memory_and_persisted_preferences() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = PreferencesState::load(directory.path().to_owned()).unwrap();
+        state.set_close_to_tray(false).unwrap();
+        let path = directory.path().join(PREFERENCES_FILE_NAME);
+        let original = fs::read(&path).unwrap();
+        assert!(state.set_safety_settings(true, 0, true).is_err());
+        assert_eq!(state.safety_settings(), (false, 60, false));
+        assert_eq!(fs::read(path).unwrap(), original);
     }
 
     #[test]
@@ -446,42 +470,6 @@ mod tests {
     }
 
     #[test]
-    fn touch_configuration_is_persisted_and_old_files_receive_defaults() {
-        let config_dir = temporary_config_dir();
-        let state = PreferencesState::load(config_dir.clone()).unwrap();
-        assert_eq!(state.touch_config(), TouchConfig::default());
-        let config = TouchConfig {
-            swap_axes: true,
-            grid_size: 3,
-            ..TouchConfig::default()
-        };
-        state.set_touch_config(config.clone()).unwrap();
-        assert_eq!(
-            PreferencesState::load(config_dir.clone())
-                .unwrap()
-                .touch_config(),
-            config
-        );
-        fs::remove_dir_all(config_dir).unwrap();
-    }
-
-    #[test]
-    fn manual_waveform_field_migrates_to_fixed_waveform() {
-        let config_dir = temporary_config_dir();
-        fs::create_dir_all(&config_dir).unwrap();
-        fs::write(
-            config_dir.join(PREFERENCES_FILE_NAME),
-            r#"{"manualWaveform":{"presetId":"BUBBLE","presetName":"气泡","frames":["2D2D2D2D64646464"]}}"#,
-        )
-        .unwrap();
-
-        let state = PreferencesState::load(config_dir.clone()).unwrap();
-        assert_eq!(state.fixed_waveform().unwrap().preset_id, "BUBBLE");
-
-        fs::remove_dir_all(config_dir).unwrap();
-    }
-
-    #[test]
     fn transport_configuration_migrates_and_persists_only_durable_parameters() {
         let config_dir = temporary_config_dir();
         fs::create_dir_all(&config_dir).unwrap();
@@ -515,35 +503,6 @@ mod tests {
         assert!(saved.get("connections").is_none());
         assert!(saved.get("output").is_none());
         assert!(saved.get("intensityA").is_none());
-        fs::remove_dir_all(config_dir).unwrap();
-    }
-
-    #[test]
-    fn selected_custom_waveform_migrates_to_fixed_waveform() {
-        let config_dir = temporary_config_dir();
-        fs::create_dir_all(&config_dir).unwrap();
-        fs::write(
-            config_dir.join(PREFERENCES_FILE_NAME),
-            r#"{
-                "defaultWaveform": {
-                    "presetId": "BREATHING",
-                    "presetName": "呼吸",
-                    "frames": ["0A0A0A0A64646464"]
-                },
-                "customWaveforms": [{
-                    "presetId": "custom-1",
-                    "presetName": "已选择的导入波形",
-                    "frames": ["1414141464646464"]
-                }],
-                "selectedCustomWaveformId": "custom-1"
-            }"#,
-        )
-        .unwrap();
-
-        let state = PreferencesState::load(config_dir.clone()).unwrap();
-        assert_eq!(state.fixed_waveform().unwrap().preset_id, "custom-1");
-        assert_eq!(state.custom_waveforms()[0].preset_id, "custom-1");
-
         fs::remove_dir_all(config_dir).unwrap();
     }
 }

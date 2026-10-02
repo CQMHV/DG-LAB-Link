@@ -1,3 +1,4 @@
+#![cfg(feature = "server")]
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -309,7 +310,11 @@ async fn disconnects_from_other_clients_invalidate_output_accepted_before_forwar
     let cli = Client::connect(&core.directory, "cli", None).await.unwrap();
     let old_http_command = observer.accept_command(false);
     let old_gui_command = gui.accept_command(false);
-    cli.call(ControlCommand::DisconnectRelay).await.unwrap();
+    cli.call(ControlCommand::DisconnectConnection {
+        connection_id: "ws-v4".into(),
+    })
+    .await
+    .unwrap();
     for (client, epoch) in [(&observer, old_http_command), (&gui, old_gui_command)] {
         let error = client
             .call_received(
@@ -487,7 +492,9 @@ async fn silent_tcp_connections_cannot_monopolize_all_capacity() {
     .await
     .unwrap();
     observer
-        .call(ControlCommand::DisconnectRelay)
+        .call(ControlCommand::DisconnectConnection {
+            connection_id: "ws-v4".into(),
+        })
         .await
         .unwrap();
     assert_eq!(holder.runtime_info().await.unwrap().holder_count, 1);
@@ -736,7 +743,12 @@ async fn mixed_websocket_sessions_share_clients_and_cleanup_on_final_holder_rele
     })
     .await
     .unwrap();
-    gui.call(ControlCommand::ConnectRelay).await.unwrap();
+    gui.call(ControlCommand::ConnectTransport {
+        transport: dg_lab_link_contracts::transport::TransportKind::WsV4,
+        endpoint: None,
+    })
+    .await
+    .unwrap();
     cli.call(ControlCommand::ConnectTransport {
         transport: TransportKind::WsV3,
         endpoint: Some(v3_endpoint),
@@ -894,7 +906,11 @@ async fn mixed_websocket_sessions_share_clients_and_cleanup_on_final_holder_rele
     })
     .await
     .unwrap();
-    cli.call(ControlCommand::DisconnectRelay).await.unwrap();
+    cli.call(ControlCommand::DisconnectConnection {
+        connection_id: "ws-v4".into(),
+    })
+    .await
+    .unwrap();
     let remaining = wait_runtime_snapshot(&mcp, |snapshot| {
         snapshot.devices.len() == 1 && snapshot.devices[0].control_id == v3
     })
@@ -902,7 +918,12 @@ async fn mixed_websocket_sessions_share_clients_and_cleanup_on_final_holder_rele
     assert_eq!(remaining.output.state, OutputState::Running);
     assert!(remaining.devices[0].output_active);
     assert_eq!(v3_seen.closes.load(Ordering::Acquire), 0);
-    gui.call(ControlCommand::ConnectRelay).await.unwrap();
+    gui.call(ControlCommand::ConnectTransport {
+        transport: dg_lab_link_contracts::transport::TransportKind::WsV4,
+        endpoint: None,
+    })
+    .await
+    .unwrap();
     wait_runtime_snapshot(&cli, |snapshot| snapshot.devices.len() == 2).await;
     gui.call(ControlCommand::StartOutput { device_id: v4 })
         .await
@@ -943,7 +964,11 @@ async fn stale_transport_connects_are_rejected_after_another_entrypoint_disconne
     let cli = Client::connect(&core.directory, "CLI", None).await.unwrap();
     let v3_epoch = mcp.accept_command(false);
     let ble_epoch = gui.accept_command(false);
-    cli.call(ControlCommand::DisconnectRelay).await.unwrap();
+    cli.call(ControlCommand::DisconnectConnection {
+        connection_id: "ws-v4".into(),
+    })
+    .await
+    .unwrap();
     let v3_error = mcp
         .call_received(
             ControlCommand::ConnectTransport {

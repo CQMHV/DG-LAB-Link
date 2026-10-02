@@ -26,8 +26,7 @@ struct CoreArgs {
     relay_endpoint: Option<String>,
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     let args = match CoreArgs::try_parse() {
         Ok(args) => args,
         Err(error) if error.use_stderr() => {
@@ -46,13 +45,28 @@ async fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
     };
-    match run(&args).await {
+    match run_with_runtime(run(&args)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             report_error(&error, args.json);
             ExitCode::FAILURE
         }
     }
+}
+
+fn run_with_runtime<F: std::future::Future<Output = Result<(), ControlError>>>(
+    future: F,
+) -> Result<(), ControlError> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| ControlError::new("runtime_start_failed", error.to_string()))?;
+    let result = runtime.block_on(future);
+    // run_core has already enforced the shared ten-second cleanup deadline.
+    // Uninterruptible filesystem workers must not add an unbounded runtime Drop
+    // wait; returning from main ends this dedicated core process and its threads.
+    runtime.shutdown_timeout(std::time::Duration::ZERO);
+    result
 }
 
 async fn run(args: &CoreArgs) -> Result<(), ControlError> {
@@ -72,5 +86,28 @@ fn report_error(error: &ControlError, json: bool) {
         );
     } else {
         eprintln!("{}: {}", error.code, error.message);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_exit_does_not_wait_for_blocked_filesystem_workers() {
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let began = std::time::Instant::now();
+        run_with_runtime(async move {
+            tokio::task::spawn_blocking(move || {
+                let _ = started.send(());
+                let _ = wait.recv_timeout(std::time::Duration::from_secs(3));
+            });
+            ready.await.unwrap();
+            Ok(())
+        })
+        .unwrap();
+        assert!(began.elapsed() < std::time::Duration::from_secs(1));
+        release.send(()).unwrap();
     }
 }

@@ -20,6 +20,7 @@ import { PluginSourcePanel } from "../components/PluginSourcePanel";
 import { displayChannelStatus, transportName } from "../lib/transports";
 import type {
     HubChannel,
+    ChannelStatus,
     HubSnapshot,
     WaveformConfig,
 } from "../lib/contracts";
@@ -40,7 +41,7 @@ interface DashboardPageProps {
     onMoveTab: (tabId: string, targetTabId: string) => void;
     onNewDeviceTab: () => void;
     onFocusDetachedTab: (tabId: string) => void;
-    onOpenPairing: () => void;
+    onOpenPairing: (connectionId?: string) => void;
     onSelectDevice: (deviceId: string) => void;
     onSelectCustomWaveform: (
         deviceId: string,
@@ -101,15 +102,15 @@ export const DashboardPage = ({
     const deviceUnavailable = Boolean(activeDeviceId) && !device;
     const connection = device
         ? snapshot.connections.find((item) => item.connectionId === device.connectionId)
-        : snapshot.connection;
+        : snapshot.connections.find((item) => item.transport !== "ble" && (item.state === "waiting" || item.state === "connected")) ?? snapshot.connections.find((item) => item.transport === "ws_v4");
     const isConnected = connection?.state === "connected" && (!device || device.initialization === "ready");
     const deviceSources = {
         a: snapshot.sources.find((source) => source.id === device?.sourceIdA),
         b: snapshot.sources.find((source) => source.id === device?.sourceIdB),
     };
     const canPair =
-        (snapshot.connection.state === "waiting" || snapshot.connection.state === "connected") &&
-        Boolean(snapshot.connection.pairingUrl);
+        (connection?.state === "waiting" || connection?.state === "connected") &&
+        Boolean(connection?.pairingUrl);
     const disabledChannels = (["a", "b"] as const).filter(
         (channel) =>
             (channel === "a"
@@ -127,7 +128,7 @@ export const DashboardPage = ({
             limit: device?.intensityLimitB ?? 0,
             status: displayChannelStatus(device?.channelBStatus ?? "disconnected", device?.capabilities.loadStatus ?? false),
         },
-    } satisfies HubSnapshot["channels"];
+    } satisfies Record<HubChannel, { intensity: number; limit: number; status: ChannelStatus }>;
     const busy = pendingAction !== null;
     const sourceBusy = Boolean(
         device &&
@@ -367,7 +368,8 @@ export const DashboardPage = ({
                                                         bindingId={(channel === "a" ? device.bindingIdA : device.bindingIdB) ?? undefined}
                                                         surface="control"
                                                         disabled={!isConnected || !device.outputActive}
-                                                        revision={snapshot.revision}
+                                                        bindingConfig={snapshot.sourceBindings.find((binding) => binding.bindingId === (channel === "a" ? device.bindingIdA : device.bindingIdB))?.config}
+                                                        bindingRevision={snapshot.sourceBindings.find((binding) => binding.bindingId === (channel === "a" ? device.bindingIdA : device.bindingIdB))?.revision}
                                                     />}
                                                 </ChannelControl>
                                             );
@@ -446,7 +448,7 @@ export const DashboardPage = ({
                                             ? "secondary-button device-picker-connect"
                                             : "primary-compact-button"
                                     }
-                                    onClick={onOpenPairing}
+                                    onClick={() => onOpenPairing(connection?.connectionId)}
                                     type="button"
                                 >
                                     <LinkSimple aria-hidden="true" size={18} />

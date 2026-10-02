@@ -1,7 +1,7 @@
 import { FileAudio, FloppyDisk, Microphone, Pause, Play, Record, SpeakerHigh, Stop } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
-import { chooseRecordingDestination, isBrowserDemo } from "../lib/bridge";
-import { choosePluginFile } from "../lib/plugins";
+import { isBrowserDemo } from "../lib/bridge";
+import { choosePluginDestination, choosePluginFile } from "../lib/plugins";
 import type { AudioAction, AudioSnapshot, HubChannel } from "../lib/contracts";
 import { getErrorMessage } from "../lib/errors";
 
@@ -31,7 +31,7 @@ export const AudioPlayer = ({ audio, disabled, onControl, channel, modes = ["fil
         catch (failure) { setError(getErrorMessage(failure)); }
     };
     const saveRecording = async () => {
-        try { const path = await chooseRecordingDestination(); if (path) await control({ type: "saveRecording", path }); }
+        try { const path = await choosePluginDestination("DG-LAB录音.wav", ["wav"]); if (path) await control({ type: "saveRecording", path }); }
         catch (failure) { setError(getErrorMessage(failure)); }
     };
     const seek = () => {

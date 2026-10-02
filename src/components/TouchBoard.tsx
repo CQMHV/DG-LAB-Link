@@ -1,6 +1,5 @@
 import { HandTap } from "@phosphor-icons/react";
 import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
-import { updateTouchInput } from "../lib/bridge";
 import type { HubChannel, TouchConfig, TouchInput } from "../lib/contracts";
 import { getErrorMessage } from "../lib/errors";
 
@@ -9,7 +8,7 @@ interface TouchBoardProps {
     deviceId: string;
     disabled: boolean;
     channel?: HubChannel;
-    onInput?: (input: TouchInput) => Promise<void>;
+    onInput: (input: TouchInput) => Promise<void>;
 }
 
 const routeNames: Record<TouchConfig["routing"], string> = {
@@ -17,7 +16,7 @@ const routeNames: Record<TouchConfig["routing"], string> = {
 };
 const clamp = (value: number) => Math.max(0, Math.min(1, value));
 
-const useTouchController = ({ config, deviceId, disabled, onInput = updateTouchInput }: TouchBoardProps, active = true) => {
+const useTouchController = ({ config, deviceId, disabled, onInput }: TouchBoardProps, active = true) => {
     const pointers = useRef(new Map<number, TouchInput["pointers"][number]>());
     const ownerId = useRef(`touch-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`}`);
     const sequence = useRef(0);

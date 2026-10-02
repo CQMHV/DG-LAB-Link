@@ -245,8 +245,8 @@ async fn cold_stdio_protocol_and_http_share_one_core_and_eof_releases_the_last_h
         .await;
     let status: Value =
         serde_json::from_str(resource["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
-    assert_eq!(status["connection"]["state"], "disconnected");
-    assert!(status["connection"]["controllerId"].is_null());
+    assert_eq!(status["connections"][0]["state"], "disconnected");
+    assert!(status["connections"][0]["controllerId"].is_null());
     assert_eq!(status["outputDeviceCount"], 0);
     let plugin_resource = stdio
         .request("resources/read", json!({"uri":"dglab://plugins"}))
@@ -442,7 +442,7 @@ async fn exercise_shared_plugin(stdio: &mut McpProcess, config: &LocalConfig, ob
     );
     std::fs::copy(executable, payload.join("touch.exe")).unwrap();
     std::fs::write(payload.join("plugin.json"),json!({
-        "id":"test.dglab.touch","version":"1.0.0","protocolVersion":1,
+        "id":"test.dglab.touch","version":"1.0.0","protocolVersion":dg_lab_link_plugin_runtime::PROTOCOL_VERSION,
         "name":"本地第三方触控示例","publisher":"Integration test","license":"AGPL-3.0-only","executable":"touch.exe"
     }).to_string()).unwrap();
     let package = package_directory.path().join("touch.dglabplugin");
@@ -493,12 +493,13 @@ async fn exercise_shared_plugin(stdio: &mut McpProcess, config: &LocalConfig, ob
         "form"
     );
     let mut touch_config =
-        serde_json::to_value(dg_lab_link_core::sources::touch::TouchConfig::default()).unwrap();
+        serde_json::to_value(dg_lab_link_builtin_plugins::sources::touch::TouchConfig::default())
+            .unwrap();
     touch_config["swapAxes"] = json!(true);
     let configured = http_call(
         config,
         "set_source_config",
-        json!({"sourceId":source_id,"config":touch_config}),
+        json!({"sourceId":source_id,"config":touch_config,"expectedRevision":0}),
     )
     .await;
     assert_eq!(configured["result"]["isError"], false, "{configured}");
@@ -669,7 +670,7 @@ async fn stdio_eof_and_abnormal_exit_preserve_an_existing_gui_holder() {
     assert_eq!(after_revocation.instance_id, original.instance_id);
     assert_eq!(after_revocation.holder_count, 1);
     assert_eq!(
-        gui.call(ControlCommand::GetHubSnapshot).await.unwrap()["connection"]["state"],
+        gui.call(ControlCommand::GetHubSnapshot).await.unwrap()["connections"][0]["state"],
         "disconnected"
     );
 
@@ -705,7 +706,7 @@ async fn stdio_eof_and_abnormal_exit_preserve_an_existing_gui_holder() {
     assert_eq!(after_kill.instance_id, original.instance_id);
     assert_eq!(after_kill.holder_count, 1);
     assert_eq!(
-        gui.call(ControlCommand::GetHubSnapshot).await.unwrap()["connection"]["state"],
+        gui.call(ControlCommand::GetHubSnapshot).await.unwrap()["connections"][0]["state"],
         "disconnected"
     );
     gui.release().await.unwrap();

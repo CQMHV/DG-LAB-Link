@@ -27,7 +27,7 @@ describe("多传输设备入口", () => {
         expect(within(modal).getByText("DG-LAB SOCKET V3")).toBeTruthy();
         expect(within(modal).getByText("v3-demo-controller")).toBeTruthy();
         const snapshot = await getHubSnapshot();
-        expect(snapshot.connection.state).toBe("connected");
+        expect(snapshot.connections.find((connection) => connection.transport === "ws_v4")?.state).toBe("connected");
         expect(snapshot.connections.find((connection) => connection.transport === "ws_v3")?.pairingUrl).toContain("DGLAB-SOCKET");
     });
 
@@ -60,7 +60,7 @@ describe("多传输设备入口", () => {
         expect((start as HTMLButtonElement).disabled).toBe(false);
         await user.click(start);
         await waitFor(async () => expect((await getHubSnapshot()).devices[0].outputActive).toBe(true));
-        expect((await getHubSnapshot()).connection.state).toBe("disconnected");
+        expect((await getHubSnapshot()).connections.find((connection) => connection.transport === "ws_v4")?.state).toBe("disconnected");
     });
 
     it("蓝牙参数显示无回执状态，并保存有效设备参数", async () => {

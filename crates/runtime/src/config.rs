@@ -2,7 +2,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use dg_lab_link_core::ControlError;
+use dg_lab_link_contracts::ControlError;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -99,6 +99,7 @@ impl LocalConfig {
 
     // Saves replace the whole file atomically. Runtime info can read the latest
     // address without waiting for a configuration transaction on its WS loop.
+    #[cfg(feature = "server")]
     pub(crate) fn saved_mcp_url(directory: &Path) -> Result<String, ControlError> {
         let stored = read_stored(File::open(directory.join("local-runtime.json"))?)?;
         let config = Self {
@@ -139,6 +140,7 @@ impl LocalConfig {
         config.save_unlocked(directory)
     }
 
+    #[cfg(any(feature = "server", test))]
     pub(crate) fn save_core_port(directory: &Path, port: u16) -> Result<Self, ControlError> {
         let _configuration = configuration_lock(directory)?;
         let mut config = Self::load_unlocked(directory)?;

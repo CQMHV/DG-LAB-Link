@@ -179,7 +179,7 @@ async fn all_three_transports_and_multiple_ble_devices_keep_distinct_addresses_a
         keys.push(key);
     }
     runtime.snapshot.output.state = OutputState::Running;
-    runtime.refresh_selected_device_snapshot();
+    runtime.refresh_device_snapshots();
     assert_eq!(runtime.snapshot.devices.len(), 4);
     assert_eq!(
         runtime
@@ -202,7 +202,7 @@ async fn all_three_transports_and_multiple_ble_devices_keep_distinct_addresses_a
     );
     runtime.remove_connection_devices("ble:first");
     runtime.reconcile_connected_devices();
-    runtime.refresh_selected_device_snapshot();
+    runtime.refresh_device_snapshots();
     assert_eq!(
         runtime.output_devices,
         BTreeSet::from([keys[0].clone(), keys[1].clone(), keys[3].clone()])
@@ -253,7 +253,7 @@ async fn events_from_an_old_native_session_cannot_recreate_or_remove_a_new_conne
 }
 
 #[tokio::test]
-async fn physical_wheel_sync_keeps_the_explicit_baseline_after_gui_focus_changes() {
+async fn physical_wheel_sync_keeps_the_explicit_baseline() {
     let (_hub, mut runtime) = create_hub("ws://127.0.0.1:9000/".to_owned());
     let baseline = install(&mut runtime, "ble:baseline").await;
     let other = install(&mut runtime, "ble:other").await;
@@ -264,7 +264,6 @@ async fn physical_wheel_sync_keeps_the_explicit_baseline_after_gui_focus_changes
     runtime
         .set_sync_all_devices_from(Some(baseline.control_id()), true)
         .unwrap();
-    runtime.select_device(other.control_id()).await.unwrap();
     let mut wheel = session_device();
     wheel.intensity_a = 25;
     runtime
@@ -285,10 +284,256 @@ async fn physical_wheel_sync_keeps_the_explicit_baseline_after_gui_focus_changes
             ..
         }
     ));
-    assert_eq!(runtime.selected_device, Some(other));
     assert_eq!(runtime.sync_baseline_device, Some(baseline.clone()));
     runtime.remove_connection_devices(&baseline.connection_id);
     assert!(runtime.sync_baseline_device.is_none());
+}
+
+#[tokio::test]
+async fn concurrent_ordinary_stops_latch_inactive_before_slow_device_ack() {
+    let (hub, mut runtime) = create_hub("ws://127.0.0.1:9000/".into());
+    runtime
+        .set_default_source(Some(FIXED_WAVEFORM_SOURCE_ID.into()))
+        .unwrap();
+    let a = install(&mut runtime, V3_CONNECTION_ID).await;
+    let b = install(&mut runtime, "ble:fixture").await;
+    let (ha, mut qa) = session_channel(8);
+    let (hb, mut qb) = session_channel(8);
+    runtime.sessions.insert(a.connection_id.clone(), ha.clone());
+    runtime.sessions.insert(b.connection_id.clone(), hb.clone());
+    for device in [&a, &b] {
+        runtime.start_output(&device.control_id()).unwrap();
+    }
+    for handle in [&ha, &hb] {
+        handle
+            .try_send(
+                DeviceOperation::Wave {
+                    request_id: "old".into(),
+                    slot_id: "slot".into(),
+                    channel: Channel::A,
+                    frame: WaveFrame::silent(),
+                },
+                0,
+            )
+            .unwrap();
+    }
+    let (reply_a, response_a) = oneshot::channel();
+    let (reply_b, response_b) = oneshot::channel();
+    hub.safety_commands
+        .try_send(HubSafetyCommand::StopOutput {
+            device_id: a.control_id(),
+            reply: reply_a,
+        })
+        .unwrap();
+    hub.safety_commands
+        .try_send(HubSafetyCommand::StopOutput {
+            device_id: b.control_id(),
+            reply: reply_b,
+        })
+        .unwrap();
+    for _ in 0..2 {
+        let command = runtime.safety_commands.recv().await.unwrap();
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            runtime.handle_safety_command(command),
+        )
+        .await
+        .unwrap();
+    }
+    assert!(runtime.output_devices.is_empty());
+    assert!(
+        runtime
+            .device_source_bindings
+            .values()
+            .all(|binding| !binding.active)
+    );
+    assert!(
+        runtime
+            .snapshot
+            .devices
+            .iter()
+            .all(|device| !device.output_active
+                && device.intensity_a == 20
+                && device.intensity_b == 30)
+    );
+    assert_eq!(
+        runtime.start_output(&a.control_id()),
+        Err(HubError::QueueBusy)
+    );
+    for (handle, queue) in [(&ha, &mut qa), (&hb, &mut qb)] {
+        let SessionCommand::Operation(old) = queue.commands.try_recv().unwrap() else {
+            panic!("old wave");
+        };
+        assert!(!handle.is_current(&old));
+    }
+    let SessionCommand::Stop {
+        reply: slow,
+        zero: false,
+        ..
+    } = qa.safety.try_recv().unwrap()
+    else {
+        panic!("A stop admitted");
+    };
+    let SessionCommand::Stop {
+        reply: fast,
+        zero: false,
+        ..
+    } = qb.safety.try_recv().unwrap()
+    else {
+        panic!("B stop admitted despite A awaiting ACK");
+    };
+    // Completing B cannot cancel A's admitted cleanup or re-enable either target.
+    fast.send(Ok(())).unwrap();
+    let completed = tokio::time::timeout(Duration::from_secs(1), runtime.commands.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    runtime.handle_command(completed).await;
+    assert_eq!(response_b.await.unwrap(), Ok(()));
+    assert!(runtime.pending_stops.contains_key(&a));
+    assert!(runtime.output_devices.is_empty());
+    slow.send(Err(TransportError::new(
+        "write_failed",
+        "simulated slow writer failure",
+    )))
+    .unwrap();
+    let completed = tokio::time::timeout(Duration::from_secs(1), runtime.commands.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    runtime.handle_command(completed).await;
+    assert!(response_a.await.unwrap().is_err());
+    assert!(runtime.output_devices.is_empty());
+    assert!(
+        runtime
+            .device_source_bindings
+            .values()
+            .all(|binding| !binding.active)
+    );
+    assert!(
+        runtime
+            .sources
+            .values()
+            .all(|source| source.snapshot.enabled)
+    );
+    runtime.output_tick().await;
+    assert!(qa.commands.is_empty() && qb.commands.is_empty());
+    runtime.start_output(&a.control_id()).unwrap();
+    assert!(
+        runtime
+            .device_source_bindings
+            .iter()
+            .filter(|(key, _)| key.device == a)
+            .all(|(_, binding)| binding.active)
+    );
+}
+
+#[tokio::test]
+async fn binding_config_cas_and_source_replacement_prevent_config_leak_and_aba() {
+    let (_hub, mut runtime) = create_hub("ws://127.0.0.1:9000/".into());
+    runtime
+        .set_default_source(Some(FIXED_WAVEFORM_SOURCE_ID.into()))
+        .unwrap();
+    let device = install(&mut runtime, V3_CONNECTION_ID).await;
+    runtime
+        .set_device_channel_source(device.control_id(), Channel::A, TOUCH_SOURCE_ID.into())
+        .await
+        .unwrap();
+    let key = SourceBindingKey {
+        device: device.clone(),
+        channel: Channel::A,
+    };
+    let old_id = runtime.device_source_bindings[&key].id.clone();
+    for (expected_revision, expected) in [(0, Ok(())), (0, Err(HubError::ConfigConflict))] {
+        let (reply, response) = oneshot::channel();
+        runtime
+            .handle_command(HubCommand::SetPluginBindingConfig {
+                source_id: TOUCH_SOURCE_ID.into(),
+                binding_id: old_id.clone(),
+                config: json!({"gain":7}),
+                expected_revision,
+                reply,
+            })
+            .await;
+        assert_eq!(response.await.unwrap(), expected);
+    }
+    assert_eq!(runtime.device_source_bindings[&key].revision, 1);
+    runtime
+        .set_device_channel_source(device.control_id(), Channel::A, AUDIO_SOURCE_ID.into())
+        .await
+        .unwrap();
+    assert_eq!(runtime.device_source_bindings[&key].config, json!({}));
+    runtime
+        .set_device_channel_source(device.control_id(), Channel::A, TOUCH_SOURCE_ID.into())
+        .await
+        .unwrap();
+    let current = &runtime.device_source_bindings[&key];
+    assert_ne!(current.id, old_id);
+    assert_eq!(current.config, json!({}));
+    assert_eq!(current.revision, 0);
+    assert!(!current.active);
+    let (reply, response) = oneshot::channel();
+    runtime
+        .handle_command(HubCommand::SetPluginBindingConfig {
+            source_id: TOUCH_SOURCE_ID.into(),
+            binding_id: old_id,
+            config: json!({"gain":99}),
+            expected_revision: 1,
+            reply,
+        })
+        .await;
+    assert_eq!(response.await.unwrap(), Err(HubError::ConfigConflict));
+    assert_eq!(runtime.device_source_bindings[&key].config, json!({}));
+}
+
+#[tokio::test]
+async fn stopping_one_v4_device_preserves_other_targets_wave_error_confirmation() {
+    let (_hub, mut runtime) = create_hub("ws://127.0.0.1:9000/".into());
+    super::tests::install_test_device(&mut runtime, "app", "a", 10);
+    super::tests::install_test_device(&mut runtime, "app", "b", 20);
+    let devices = runtime.devices.keys().cloned().collect::<Vec<_>>();
+    for device in &devices {
+        runtime.start_output(&device.control_id()).unwrap();
+    }
+    let (events, _receiver) = mpsc::channel(8);
+    let (relay, task) = spawn_relay_client(events, 8);
+    runtime.relay = Some(relay.clone());
+    let b = devices[1].clone();
+    let key = SourceBindingKey {
+        device: b.clone(),
+        channel: Channel::A,
+    };
+    runtime.pending_wave_operations.insert(
+        "b-wave".into(),
+        PendingWaveOperation {
+            device: b.clone(),
+            channel: Channel::A,
+            generation: runtime.device_source_bindings[&key].generation,
+            sent_at: Instant::now(),
+        },
+    );
+    let (_device, _generation, admitted) = runtime
+        .prepare_device_stop(&devices[0].control_id())
+        .unwrap();
+    assert!(admitted.is_some());
+    assert!(runtime.output_devices.contains(&b));
+    runtime
+        .apply_app_message(
+            "app",
+            &json!({"t":"resp","reqId":"b-wave","error":"B rejected current wave"}),
+        )
+        .await;
+    assert!(!runtime.output_devices.contains(&b));
+    assert!(
+        runtime
+            .snapshot
+            .output
+            .last_error
+            .as_deref()
+            .is_some_and(|message| message.contains("B rejected current wave"))
+    );
+    relay.shutdown_now();
+    task.await.unwrap();
 }
 
 #[tokio::test]

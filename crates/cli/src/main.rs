@@ -6,11 +6,10 @@ use std::process::{ExitCode, Stdio};
 use std::time::Duration;
 
 use clap::Parser;
-use dg_lab_link_core::model::Channel;
-use dg_lab_link_core::sources::audio::AudioAction;
-use dg_lab_link_core::transport::TransportKind;
-use dg_lab_link_core::waveforms::WaveformFile;
-use dg_lab_link_core::{ControlCommand, ControlError};
+use dg_lab_link_contracts::model::Channel;
+use dg_lab_link_contracts::transport::TransportKind;
+use dg_lab_link_contracts::waveforms::WaveformFile;
+use dg_lab_link_contracts::{ControlCommand, ControlError};
 use dg_lab_link_runtime::{Client, LocalConfig, config_dir, connect_or_spawn, core_executable};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -54,7 +53,7 @@ async fn main() -> ExitCode {
 async fn run(cli: Cli) -> Result<(), ControlError> {
     prevent_standard_handle_inheritance()?;
     if matches!(cli.command, Command::Commands) {
-        let commands: Vec<Value> = ControlCommand::descriptors().into_iter().map(|command| {
+        let commands: Vec<Value> = ControlCommand::descriptors().iter().map(|command| {
             json!({"command":command.name,"description":command.description,"params":command.input_schema,"readOnly":command.read_only})
         }).collect();
         return print_value(&commands, cli.json);
@@ -324,12 +323,6 @@ fn business_request(command: Command) -> Result<Request, ControlError> {
     use ControlCommand as C;
     let command = match command {
         Command::Status => C::GetHubSnapshot,
-        Command::Relay {
-            command: RelayCommand::Connect,
-        } => C::ConnectRelay,
-        Command::Relay {
-            command: RelayCommand::Disconnect,
-        } => C::DisconnectRelay,
         Command::Connections { command } => match command {
             ConnectionCommand::List => C::GetConnections,
             ConnectionCommand::Connect {
@@ -373,12 +366,7 @@ fn business_request(command: Command) -> Result<Request, ControlError> {
                 }
             }
         },
-        Command::Pairing { refresh: true } => C::RefreshPairing,
-        Command::Pairing { refresh: false } => return Ok(Request::SnapshotField("connection")),
-        Command::Devices { command: None } => return Ok(Request::SnapshotField("devices")),
-        Command::Devices {
-            command: Some(DeviceCommand::Select { device }),
-        } => C::SelectDevice { device_id: device },
+        Command::Devices => return Ok(Request::SnapshotField("devices")),
         Command::Intensity {
             device,
             channel,
@@ -429,12 +417,14 @@ fn business_request(command: Command) -> Result<Request, ControlError> {
             SourceCommand::Stop { source } => C::StopSource { source_id: source },
             SourceCommand::Config {
                 source,
+                expected_revision,
                 binding,
                 input,
             } => C::SetSourceConfig {
                 source_id: source,
-                config: read_json(input)?,
+                config: read_json_value(input)?,
                 binding_id: binding,
+                expected_revision,
             },
             SourceCommand::Ui {
                 source,
@@ -451,7 +441,7 @@ fn business_request(command: Command) -> Result<Request, ControlError> {
                 input,
             } => C::from_call(
                 "source_action",
-                json!({"sourceId":source,"params":{"action":action,"value":read_json(input)?,"bindingId":binding}}),
+                json!({"sourceId":source,"params":{"action":action,"value":read_json_value(input)?,"bindingId":binding}}),
             )?,
             SourceCommand::Input { source, input } => C::from_call(
                 "source_input",
@@ -503,31 +493,6 @@ fn business_request(command: Command) -> Result<Request, ControlError> {
             WaveformCommand::Delete { id } => C::DeleteCustomWaveform { preset_id: id },
             WaveformCommand::Reorder { ids } => C::ReorderCustomWaveforms { preset_ids: ids },
         },
-        Command::Touch { command } => match command {
-            TouchCommand::Config { input } => {
-                C::from_call("set_touch_config", json!({"config":read_json(input)?}))?
-            }
-            TouchCommand::Input { input } => {
-                C::from_call("update_touch_input", json!({"input":read_json(input)?}))?
-            }
-        },
-        Command::Audio { command } => match command {
-            AudioCommand::Status => {
-                // This field includes touchConfig as well as audio and per-device audioBindings.
-                return Ok(Request::SnapshotField("inputModes"));
-            }
-            AudioCommand::Config {
-                device,
-                channel,
-                input,
-            } => C::from_call(
-                "set_audio_config",
-                json!({"deviceId":device,"channel":channel_name(channel),"config":read_json(input)?}),
-            )?,
-            other => C::AudioControl {
-                action: audio_action(other)?,
-            },
-        },
         Command::Safety {
             command: SafetyCommand::Get,
         } => return Ok(Request::SnapshotField("safety")),
@@ -546,55 +511,25 @@ fn business_request(command: Command) -> Result<Request, ControlError> {
                     "窗口、托盘与启动偏好由 GUI 管理",
                 ));
             }
-            normalize_audio_paths(&mut typed)?;
+            normalize_package_paths(&mut typed)?;
             typed
         }
         _ => return Err(ControlError::new("invalid_command", "该命令不是业务调用")),
     };
     let mut command = command;
-    normalize_audio_paths(&mut command)?;
+    normalize_package_paths(&mut command)?;
     Ok(Request::Command(command))
 }
 
-fn audio_action(command: AudioCommand) -> Result<AudioAction, ControlError> {
-    Ok(match command {
-        AudioCommand::Load { path } => AudioAction::LoadFile {
-            path: path_text(&path)?,
-        },
-        AudioCommand::Play => AudioAction::Play,
-        AudioCommand::Pause => AudioAction::Pause,
-        AudioCommand::Stop => AudioAction::Stop,
-        AudioCommand::Seek { position_ms } => AudioAction::Seek { position_ms },
-        AudioCommand::Microphone => AudioAction::StartMicrophone,
-        AudioCommand::Desktop => AudioAction::StartDesktop,
-        AudioCommand::Record => AudioAction::StartRecording,
-        AudioCommand::StopRecording => AudioAction::StopRecording,
-        AudioCommand::Save { path } => AudioAction::SaveRecording {
-            path: path_text(&path)?,
-        },
-        AudioCommand::Options { repeat, speaker } => AudioAction::SetPlaybackOptions {
-            loop_enabled: repeat.enabled(),
-            speaker_enabled: speaker.enabled(),
-        },
-        _ => return Err(ControlError::new("invalid_command", "该命令不是音频控制")),
-    })
-}
-
-fn normalize_audio_paths(command: &mut ControlCommand) -> Result<(), ControlError> {
+fn normalize_package_paths(command: &mut ControlCommand) -> Result<(), ControlError> {
     if let ControlCommand::InstallPlugin { path } | ControlCommand::UpdatePlugin { path } = command
-    {
-        *path = path_text(Path::new(path))?;
-    }
-    if let ControlCommand::AudioControl {
-        action: AudioAction::LoadFile { path } | AudioAction::SaveRecording { path },
-    } = command
     {
         *path = path_text(Path::new(path))?;
     }
     Ok(())
 }
 
-fn read_json(input: JsonInput) -> Result<Value, ControlError> {
+fn read_json_value(input: JsonInput) -> Result<Value, ControlError> {
     let text = match (input.params, input.file) {
         (Some(text), None) => text,
         (None, Some(path)) => read_bounded_text(&path, MAX_JSON_BYTES as u64)?,
@@ -614,6 +549,11 @@ fn read_json(input: JsonInput) -> Result<Value, ControlError> {
     }
     let value: Value = serde_json::from_str(&text)
         .map_err(|error| ControlError::new("invalid_params", error.to_string()))?;
+    Ok(value)
+}
+
+fn read_json(input: JsonInput) -> Result<Value, ControlError> {
+    let value = read_json_value(input)?;
     if !value.is_object() {
         return Err(ControlError::new("invalid_params", "JSON 参数必须是对象"));
     }
@@ -819,31 +759,6 @@ mod tests {
     }
 
     #[test]
-    fn audio_paths_are_absolute_for_short_and_typed_commands() {
-        let AudioAction::SaveRecording { path } = audio_action(AudioCommand::Save {
-            path: "recording.wav".into(),
-        })
-        .unwrap() else {
-            panic!()
-        };
-        assert!(Path::new(&path).is_absolute());
-        let Request::Command(ControlCommand::AudioControl {
-            action: AudioAction::LoadFile { path },
-        }) = business_request(Command::Call {
-            command: "audio_control".into(),
-            input: JsonInput {
-                params: Some(r#"{"action":{"type":"loadFile","path":"demo.mp3"}}"#.into()),
-                file: None,
-            },
-        })
-        .unwrap()
-        else {
-            panic!()
-        };
-        assert!(Path::new(&path).is_absolute());
-    }
-
-    #[test]
     fn plugin_commands_normalize_packages_and_keep_explicit_instance_and_binding() {
         let cli =
             Cli::try_parse_from(["cli", "plugins", "install", "example.dglabplugin", "--json"])
@@ -859,6 +774,8 @@ mod tests {
             "sources",
             "config",
             "source-123",
+            "--expected-revision",
+            "7",
             "--binding",
             "device/a",
             "--params",
@@ -869,6 +786,7 @@ mod tests {
             source_id,
             binding_id,
             config,
+            expected_revision,
         }) = business_request(cli.command).unwrap()
         else {
             panic!("expected config")
@@ -876,6 +794,7 @@ mod tests {
         assert_eq!(source_id, "source-123");
         assert_eq!(binding_id.as_deref(), Some("device/a"));
         assert_eq!(config, json!({"gain":2}));
+        assert_eq!(expected_revision, 7);
         let cli = Cli::try_parse_from([
             "cli",
             "sources",
@@ -894,6 +813,63 @@ mod tests {
         assert_eq!(params.binding_id.as_deref(), Some("device/b"));
         assert_eq!(serde_json::to_value(params.surface).unwrap(), "control");
         assert!(Cli::try_parse_from(["cli", "output", "emergency-stop"]).is_err());
+    }
+
+    #[test]
+    fn plugin_actions_accept_all_json_value_types_and_retired_commands_are_rejected() {
+        for text in ["3", "true", "null", "\"value\"", "[1,2]"] {
+            let cli = Cli::try_parse_from([
+                "cli", "sources", "action", "instance", "change", "--params", text,
+            ])
+            .unwrap();
+            let Request::Command(ControlCommand::SourceAction { source_id, params }) =
+                business_request(cli.command).unwrap()
+            else {
+                panic!("expected source action")
+            };
+            assert_eq!(source_id, "instance");
+            assert_eq!(params.value, serde_json::from_str::<Value>(text).unwrap());
+        }
+        for words in [
+            vec!["cli", "relay", "connect"],
+            vec!["cli", "pairing", "--refresh"],
+            vec!["cli", "audio", "play"],
+            vec!["cli", "touch", "input"],
+            vec!["cli", "devices", "select", "target"],
+        ] {
+            assert!(Cli::try_parse_from(words).is_err());
+        }
+        assert!(
+            Cli::try_parse_from(["cli", "sources", "config", "instance", "--params", "{}"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn plugin_configuration_accepts_scalar_json_and_keeps_expected_revision() {
+        let cli = Cli::try_parse_from([
+            "cli",
+            "sources",
+            "config",
+            "instance",
+            "--expected-revision",
+            "4",
+            "--params",
+            "false",
+        ])
+        .unwrap();
+        let Request::Command(ControlCommand::SetSourceConfig {
+            config,
+            expected_revision,
+            binding_id,
+            ..
+        }) = business_request(cli.command).unwrap()
+        else {
+            panic!("expected source configuration")
+        };
+        assert_eq!(config, json!(false));
+        assert_eq!(expected_revision, 4);
+        assert_eq!(binding_id, None);
     }
 
     #[test]

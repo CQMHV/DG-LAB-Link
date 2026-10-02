@@ -286,7 +286,7 @@ async fn silent_tcp_connections_cannot_monopolize_all_capacity() {
         futures_util::future::join_all((0..128).map(|_| tokio::net::TcpStream::connect(&address)))
             .await;
     assert!(connections.iter().all(Result::is_ok));
-    timeout(Duration::from_secs(8), core.mcp(json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {"name": "disconnect_relay", "arguments": {}}}))).await.unwrap();
+    timeout(Duration::from_secs(8), core.mcp(json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {"name": "disconnect_connection", "arguments": {"connectionId":"ws-v4"}}}))).await.unwrap();
     assert_eq!(holder.runtime_info().await.unwrap().holder_count, 1);
     drop(connections);
     holder.release().await.unwrap();
@@ -444,16 +444,21 @@ async fn simulated_relay_is_one_shared_controller_for_gui_cli_and_mcp() {
     let (core, gui) = Core::start(Some(endpoint)).await;
     let cli = Client::connect(&core.directory, "cli", None).await.unwrap();
     assert_eq!(
-        gui.snapshot().connection.state,
+        gui.snapshot().connections[0].state,
         ConnectionState::Disconnected
     );
-    assert!(gui.snapshot().connection.controller_id.is_none());
+    assert!(gui.snapshot().connections[0].controller_id.is_none());
     gui.call(ControlCommand::SetDefaultSource {
         source_id: Some("source-fixed-waveform".to_owned()),
     })
     .await
     .unwrap();
-    gui.call(ControlCommand::ConnectRelay).await.unwrap();
+    gui.call(ControlCommand::ConnectTransport {
+        transport: dg_lab_link_contracts::transport::TransportKind::WsV4,
+        endpoint: None,
+    })
+    .await
+    .unwrap();
     timeout(Duration::from_secs(5), async {
         loop {
             let snapshot: HubSnapshot =
@@ -492,15 +497,15 @@ async fn simulated_relay_is_one_shared_controller_for_gui_cli_and_mcp() {
     let gui_state = gui.call(ControlCommand::GetHubSnapshot).await.unwrap();
     let mcp_state = core.mcp(json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "get_hub_snapshot", "arguments": {}}})).await;
     assert_eq!(
-        gui_state["connection"]["controllerId"],
-        mcp_state["result"]["structuredContent"]["connection"]["controllerId"]
+        gui_state["connections"][0]["controllerId"],
+        mcp_state["result"]["structuredContent"]["connections"][0]["controllerId"]
     );
     assert_eq!(
         gui_state["devices"],
         mcp_state["result"]["structuredContent"]["devices"]
     );
     assert_ne!(
-        gui.snapshot().connection.state,
+        gui.snapshot().connections[0].state,
         ConnectionState::Disconnected
     );
     #[cfg(windows)]
@@ -562,7 +567,7 @@ async fn paused_audio_plugin(client: &Client) -> String {
         "build the native audio plugin before integration tests"
     );
     std::fs::copy(executable, payload.join("audio.exe")).unwrap();
-    std::fs::write(payload.join("plugin.json"),json!({"id":"test.dglab.audio","version":"1.0.0","protocolVersion":1,"name":"音频测试","publisher":"Integration test","license":"AGPL-3.0-only","executable":"audio.exe"}).to_string()).unwrap();
+    std::fs::write(payload.join("plugin.json"),json!({"id":"test.dglab.audio","version":"1.0.0","protocolVersion":dg_lab_link_plugin_runtime::PROTOCOL_VERSION,"name":"音频测试","publisher":"Integration test","license":"AGPL-3.0-only","executable":"audio.exe"}).to_string()).unwrap();
     let package = temporary.path().join("audio.dglabplugin");
     let packaging_payload = payload.clone();
     let packaging_output = package.clone();

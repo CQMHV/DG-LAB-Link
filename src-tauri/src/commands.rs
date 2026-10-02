@@ -2,17 +2,15 @@ use serde::{Serialize, de::DeserializeOwned};
 use tauri::{AppHandle, State};
 use tauri_plugin_autostart::ManagerExt;
 
-use dg_lab_link_core::hub::HubSnapshot;
-use dg_lab_link_core::model::Channel;
-use dg_lab_link_core::preferences::AppPreferencesSnapshot;
-use dg_lab_link_core::sources::WaveformConfig;
-use dg_lab_link_core::sources::audio::{AudioAction, AudioChannelConfig};
-use dg_lab_link_core::sources::touch::{TouchConfig, TouchInput};
-use dg_lab_link_core::transport::{
+use dg_lab_link_contracts::hub::HubSnapshot;
+use dg_lab_link_contracts::model::Channel;
+use dg_lab_link_contracts::preferences::AppPreferencesSnapshot;
+use dg_lab_link_contracts::sources::WaveformConfig;
+use dg_lab_link_contracts::transport::{
     BleParameters, BluetoothDevice, TransportConnectionSnapshot, TransportKind,
 };
-use dg_lab_link_core::waveforms::WaveformFile;
-use dg_lab_link_core::{ControlCommand, ControlError};
+use dg_lab_link_contracts::waveforms::WaveformFile;
+use dg_lab_link_contracts::{ControlCommand, ControlError};
 use dg_lab_link_runtime::{Client, LocalConfig, RuntimeInfo};
 
 use crate::{DesktopPreferences, RuntimeConfigDir};
@@ -45,12 +43,6 @@ async fn app_preferences(
 
 fn autostart_error(error: tauri_plugin_autostart::Error) -> CommandError {
     ControlError::new("autostart_error", format!("无法更新开机自启设置：{error}"))
-}
-
-fn selected_device(client: &Client, device_id: Option<String>) -> Result<String, CommandError> {
-    device_id
-        .or_else(|| client.snapshot().selected_device_id)
-        .ok_or_else(|| ControlError::new("not_connected", "设备尚未连接"))
 }
 
 #[tauri::command]
@@ -140,48 +132,6 @@ pub async fn get_mcp_config(
 }
 
 #[tauri::command]
-pub async fn update_touch_input(
-    client: State<'_, Client>,
-    input: TouchInput,
-) -> Result<(), CommandError> {
-    call(&client, ControlCommand::UpdateTouchInput { input }).await
-}
-
-#[tauri::command]
-pub async fn set_touch_config(
-    client: State<'_, Client>,
-    config: TouchConfig,
-) -> Result<(), CommandError> {
-    call(&client, ControlCommand::SetTouchConfig { config }).await
-}
-
-#[tauri::command]
-pub async fn set_audio_config(
-    client: State<'_, Client>,
-    device_id: String,
-    channel: Channel,
-    config: AudioChannelConfig,
-) -> Result<(), CommandError> {
-    call(
-        &client,
-        ControlCommand::SetAudioConfig {
-            device_id,
-            channel,
-            config,
-        },
-    )
-    .await
-}
-
-#[tauri::command]
-pub async fn audio_control(
-    client: State<'_, Client>,
-    action: AudioAction,
-) -> Result<(), CommandError> {
-    call(&client, ControlCommand::AudioControl { action }).await
-}
-
-#[tauri::command]
 pub async fn get_custom_waveform(
     client: State<'_, Client>,
     preset_id: String,
@@ -190,25 +140,19 @@ pub async fn get_custom_waveform(
 }
 
 #[tauri::command]
-pub async fn parse_waveform_files(
-    client: State<'_, Client>,
-    files: Vec<WaveformFile>,
-) -> Result<Vec<WaveformConfig>, CommandError> {
-    call(&client, ControlCommand::ParseWaveformFiles { files }).await
-}
-
-#[tauri::command]
-pub async fn choose_audio_file() -> Result<Option<String>, CommandError> {
-    choose_plugin_file().await
-}
-
-#[tauri::command]
-pub async fn choose_recording_destination() -> Result<Option<String>, CommandError> {
-    tauri::async_runtime::spawn_blocking(|| {
-        rfd::FileDialog::new()
-            .set_title("保存录音")
-            .set_file_name("DG-LAB录音.wav")
-            .add_filter("WAV 音频", &["wav"])
+pub async fn choose_plugin_destination(
+    suggested_name: Option<String>,
+    extensions: Vec<String>,
+) -> Result<Option<String>, CommandError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut dialog = rfd::FileDialog::new().set_title("保存插件文件");
+        if let Some(name) = suggested_name {
+            dialog = dialog.set_file_name(name);
+        }
+        if !extensions.is_empty() {
+            dialog = dialog.add_filter("插件文件", &extensions);
+        }
+        dialog
             .save_file()
             .map(|path| path.to_string_lossy().into_owned())
     })
@@ -217,18 +161,11 @@ pub async fn choose_recording_destination() -> Result<Option<String>, CommandErr
 }
 
 #[tauri::command]
-pub async fn connect_relay(client: State<'_, Client>) -> Result<(), CommandError> {
-    call(&client, ControlCommand::ConnectRelay).await
-}
-
-#[tauri::command]
-pub async fn disconnect_relay(client: State<'_, Client>) -> Result<(), CommandError> {
-    call(&client, ControlCommand::DisconnectRelay).await
-}
-
-#[tauri::command]
-pub async fn refresh_pairing(client: State<'_, Client>) -> Result<(), CommandError> {
-    call(&client, ControlCommand::RefreshPairing).await
+pub async fn parse_waveform_files(
+    client: State<'_, Client>,
+    files: Vec<WaveformFile>,
+) -> Result<Vec<WaveformConfig>, CommandError> {
+    call(&client, ControlCommand::ParseWaveformFiles { files }).await
 }
 
 #[tauri::command]
@@ -351,11 +288,10 @@ pub async fn set_bluetooth_config(
 #[tauri::command]
 pub async fn adjust_intensity(
     client: State<'_, Client>,
-    device_id: Option<String>,
+    device_id: String,
     channel: Channel,
     delta: i32,
 ) -> Result<(), CommandError> {
-    let device_id = selected_device(&client, device_id)?;
     call(
         &client,
         ControlCommand::AdjustIntensity {
@@ -484,24 +420,11 @@ pub async fn reorder_custom_waveforms(
 }
 
 #[tauri::command]
-pub async fn select_device(
-    client: State<'_, Client>,
-    device_id: String,
-) -> Result<(), CommandError> {
-    call(&client, ControlCommand::SelectDevice { device_id }).await
-}
-
-#[tauri::command]
 pub async fn set_sync_all_devices(
     client: State<'_, Client>,
     enabled: bool,
-    device_id: Option<String>,
+    device_id: String,
 ) -> Result<(), CommandError> {
-    let device_id = if enabled {
-        selected_device(&client, device_id)?
-    } else {
-        client.snapshot().selected_device_id.unwrap_or_default()
-    };
     call(
         &client,
         ControlCommand::SetSyncAllDevices { device_id, enabled },

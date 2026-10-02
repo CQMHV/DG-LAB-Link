@@ -237,6 +237,38 @@ pub fn prepare_package(
 
 /// Package an SDK project output directory without scripts or shell execution.
 pub fn pack_directory(directory: &Path, destination: &Path) -> Result<PluginManifest, PluginError> {
+    let directory = directory.canonicalize().map_err(io_error)?;
+    let destination = if destination.is_absolute() {
+        destination.to_owned()
+    } else {
+        std::env::current_dir().map_err(io_error)?.join(destination)
+    };
+    let parent = destination
+        .parent()
+        .ok_or_else(|| PluginError::new("invalid_package", "打包输出路径无效"))?
+        .canonicalize()
+        .map_err(io_error)?;
+    let destination = parent.join(
+        destination
+            .file_name()
+            .ok_or_else(|| PluginError::new("invalid_package", "打包输出路径无效"))?,
+    );
+    let output = if destination.exists() {
+        destination.canonicalize().map_err(io_error)?
+    } else {
+        destination.clone()
+    };
+    // Windows compares path components case-insensitively; canonicalize resolves aliases.
+    let root_name = directory.to_string_lossy().to_lowercase();
+    let output_name = output.to_string_lossy().to_lowercase();
+    if output_name == root_name
+        || output_name.starts_with(&(root_name + std::path::MAIN_SEPARATOR_STR))
+    {
+        return Err(PluginError::new(
+            "invalid_package",
+            "打包输出必须位于插件目录之外",
+        ));
+    }
     let manifest: PluginManifest =
         serde_json::from_reader(File::open(directory.join("plugin.json")).map_err(io_error)?)
             .map_err(|error| PluginError::new("invalid_package", error.to_string()))?;
@@ -246,23 +278,36 @@ pub fn pack_directory(directory: &Path, destination: &Path) -> Result<PluginMani
     }
     validate_windows_executable(&directory.join(&manifest.executable))?;
     let mut entries = Vec::new();
-    collect_files(directory, directory, &mut entries)?;
+    collect_files(&directory, &directory, &mut entries)?;
     if entries.len() > MAX_PACKAGE_ENTRIES {
         return Err(PluginError::new("package_too_large", "插件包条目过多"));
     }
     entries.sort();
-    let file = File::create(destination).map_err(io_error)?;
-    let mut writer = zip::ZipWriter::new(file);
+    let temporary = parent.join(format!(".dglab-pack-{}.tmp", uuid::Uuid::new_v4()));
     let options = SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
         .unix_permissions(0o644);
     let result = (|| {
+        let file = File::options()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(io_error)?;
+        let mut writer = zip::ZipWriter::new(file);
         let mut total = 0_u64;
+        let mut names = HashSet::new();
         for relative in entries {
             let name = relative.to_string_lossy().replace('\\', "/");
             validate_relative_path(&name)?;
-            let mut input = File::open(directory.join(&relative)).map_err(io_error)?;
-            total = total.saturating_add(input.metadata().map_err(io_error)?.len());
+            if !names.insert(name.to_lowercase()) {
+                return Err(PluginError::new(
+                    "invalid_package",
+                    "打包目录存在大小写冲突路径",
+                ));
+            }
+            let input = File::open(directory.join(&relative)).map_err(io_error)?;
+            let size = input.metadata().map_err(io_error)?.len();
+            total = total.saturating_add(size);
             if total > MAX_EXPANDED_BYTES {
                 return Err(PluginError::new(
                     "package_too_large",
@@ -270,7 +315,10 @@ pub fn pack_directory(directory: &Path, destination: &Path) -> Result<PluginMani
                 ));
             }
             writer.start_file(name, options).map_err(zip_error)?;
-            std::io::copy(&mut input, &mut writer).map_err(io_error)?;
+            let copied = std::io::copy(&mut input.take(size + 1), &mut writer).map_err(io_error)?;
+            if copied != size {
+                return Err(PluginError::new("plugin_io", "打包期间输入文件发生变化"));
+            }
         }
         let mut file = writer.finish().map_err(zip_error)?;
         file.flush().map_err(io_error)?;
@@ -281,10 +329,12 @@ pub fn pack_directory(directory: &Path, destination: &Path) -> Result<PluginMani
                 "压缩插件包超过 64 MiB",
             ));
         }
+        drop(file);
+        fs::rename(&temporary, &destination).map_err(io_error)?;
         Ok(manifest)
     })();
     if result.is_err() {
-        let _ = fs::remove_file(destination);
+        let _ = fs::remove_file(temporary);
     }
     result
 }
@@ -369,7 +419,7 @@ mod tests {
         PluginManifest {
             id: "example.source".into(),
             version: "1.0.0".into(),
-            protocol_version: 1,
+            protocol_version: PROTOCOL_VERSION,
             name: "示例".into(),
             publisher: "Example".into(),
             license: "MIT".into(),
@@ -437,5 +487,50 @@ mod tests {
                 .code,
             "invalid_package"
         );
+    }
+
+    #[test]
+    fn packing_rejects_outputs_inside_payload_and_preserves_existing_output_on_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir_all(source.join("bin")).unwrap();
+        let manifest_bytes = serde_json::to_vec(&manifest()).unwrap();
+        fs::write(source.join("plugin.json"), &manifest_bytes).unwrap();
+        let executable = executable_fixture();
+        fs::write(source.join("bin/source.exe"), &executable).unwrap();
+        for output in [
+            source.join("plugin.json"),
+            source.join("bin/source.exe"),
+            source.join("new.dglabplugin"),
+            source.join("bin/../plugin.json"),
+        ] {
+            assert_eq!(
+                pack_directory(&source, &output).unwrap_err().code,
+                "invalid_package"
+            );
+        }
+        assert_eq!(
+            fs::read(source.join("plugin.json")).unwrap(),
+            manifest_bytes
+        );
+        assert_eq!(fs::read(source.join("bin/source.exe")).unwrap(), executable);
+        let output = temp.path().join("published.dglabplugin");
+        pack_directory(&source, &output).unwrap();
+        let previous = fs::read(&output).unwrap();
+        let oversized = File::create(source.join("oversized.bin")).unwrap();
+        oversized.set_len(MAX_EXPANDED_BYTES + 1).unwrap();
+        drop(oversized);
+        assert_eq!(
+            pack_directory(&source, &output).unwrap_err().code,
+            "package_too_large"
+        );
+        assert_eq!(fs::read(&output).unwrap(), previous);
+        assert!(!fs::read_dir(temp.path()).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".dglab-pack-")
+        }));
     }
 }

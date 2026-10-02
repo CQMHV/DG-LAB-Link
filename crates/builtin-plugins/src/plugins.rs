@@ -124,25 +124,29 @@ impl TouchPlugin {
         Ok(self.state())
     }
 
-    fn update_input(&mut self, input: TouchInput) -> Result<Value, PluginError> {
-        let ids: Vec<_> = self
-            .bindings
-            .iter()
-            .filter(|binding| binding.control_id == input.device_id)
-            .map(|binding| binding.binding_id.clone())
-            .collect();
-        if ids.is_empty() {
-            return Err(PluginError::new(
-                "unknown_binding",
-                "该设备未绑定此触控输入源",
-            ));
-        }
-        let now = Instant::now();
-        for id in ids {
-            if let Some(runtime) = self.runtimes.get_mut(&id) {
-                runtime.update(&input, now).map_err(source_error)?;
+    fn update_input(&mut self, params: InputParams) -> Result<Value, PluginError> {
+        let id = params
+            .binding_id
+            .ok_or_else(|| PluginError::new("invalid_params", "触控输入必须指定 bindingId"))?;
+        let selected = binding(&self.bindings, &id)?;
+        let mut pointers: Vec<crate::sources::touch::TouchPointer> =
+            parse(params.value.get("pointers").cloned().unwrap_or(json!([])))?;
+        for pointer in &mut pointers {
+            if pointer.channel.is_none() {
+                pointer.channel = Some(channel(selected.channel));
             }
         }
+        let input = TouchInput {
+            device_id: selected.control_id.clone(),
+            owner_id: params.owner,
+            sequence: params.sequence,
+            pointers,
+        };
+        self.runtimes
+            .get_mut(&id)
+            .ok_or_else(|| PluginError::new("unknown_binding", "触控通道绑定已失效"))?
+            .update(&input, Instant::now())
+            .map_err(source_error)?;
         Ok(self.state())
     }
 
@@ -310,10 +314,7 @@ impl TouchPlugin {
     }
 
     fn document(&self, params: UiParams) -> Result<UiDocument, PluginError> {
-        let actions = vec![
-            action::<TouchConfig>("set_touch_config", "设置触控参数"),
-            action::<TouchInput>("update_touch_input", "更新触点"),
-        ];
+        let actions = vec![action::<TouchConfig>("configure", "设置触控参数")];
         if matches!(params.surface, UiSurface::Control) {
             let selected = params
                 .binding_id
@@ -493,11 +494,6 @@ impl Plugin for TouchPlugin {
         context: &PluginContext,
     ) -> Result<Value, PluginError> {
         let state = match params.action.as_str() {
-            "set_touch_config" => self.set_config(
-                params.value.get("config").cloned().unwrap_or(params.value),
-                false,
-            )?,
-            "update_touch_input" => self.update_input(parse(params.value)?)?,
             "release_owner" => {
                 let owner = params
                     .value
@@ -539,30 +535,7 @@ impl Plugin for TouchPlugin {
         if params.action != "update_touch_input" {
             return Err(PluginError::new("unsupported_action", "未知触控输入"));
         }
-        let state = if let Some(id) = params.binding_id {
-            let selected = binding(&self.bindings, &id)?;
-            let mut pointers: Vec<crate::sources::touch::TouchPointer> =
-                parse(params.value.get("pointers").cloned().unwrap_or(json!([])))?;
-            for pointer in &mut pointers {
-                if pointer.channel.is_none() {
-                    pointer.channel = Some(channel(selected.channel));
-                }
-            }
-            let input = TouchInput {
-                device_id: selected.control_id.clone(),
-                owner_id: params.owner,
-                sequence: params.sequence,
-                pointers,
-            };
-            self.runtimes
-                .get_mut(&id)
-                .ok_or_else(|| PluginError::new("unknown_binding", "触控通道绑定已失效"))?
-                .update(&input, Instant::now())
-                .map_err(source_error)?;
-            Ok(self.state())
-        } else {
-            self.update_input(parse(params.value)?)
-        }?;
+        let state = self.update_input(params)?;
         self.service_clears(context, Instant::now())?;
         Ok(state)
     }
@@ -766,7 +739,7 @@ impl AudioPlugin {
     fn document(&self, params: UiParams) -> Result<UiDocument, PluginError> {
         let actions = vec![
             action::<AudioAction>("audio_control", "音频控制"),
-            action::<AudioChannelConfig>("set_audio_config", "设置通道映射"),
+            action::<AudioChannelConfig>("configure", "设置通道映射"),
         ];
         let snapshot =
             serde_json::to_value(self.engine.snapshot()).expect("audio snapshot serializes");
@@ -927,9 +900,7 @@ impl Plugin for AudioPlugin {
         context: &PluginContext,
     ) -> Result<Value, PluginError> {
         let state = match params.action.as_str() {
-            "set_audio_config" | "save_audio_config" | "configure_binding" => {
-                self.set_channel_config(&params)?
-            }
+            "configure_binding" => self.set_channel_config(&params)?,
             "audio_control" => self.control(params.value)?,
             _ => return Err(PluginError::new("unsupported_action", "未知音频动作")),
         };
@@ -997,13 +968,52 @@ mod tests {
         let a = test_binding("device", dg_lab_link_plugin_sdk::Channel::A);
         let b = test_binding("device", dg_lab_link_plugin_sdk::Channel::B);
         plugin.sync_bindings(vec![a.clone(), b.clone()]).unwrap();
-        plugin.update_input(parse(json!({"deviceId":"device","ownerId":"window","sequence":1,"pointers":[{"id":1,"x":0.5,"y":0.5,"cell":null,"channel":"a"},{"id":2,"x":0.5,"y":0.5,"cell":null,"channel":"b"}]})).unwrap()).unwrap();
+        for selected in [&a, &b] {
+            plugin
+                .update_input(InputParams {
+                    action: "update_touch_input".into(),
+                    binding_id: Some(selected.binding_id.clone()),
+                    owner: "window".into(),
+                    sequence: 1,
+                    value: json!({"pointers":[{"id":1,"x":0.5,"y":0.5}]}),
+                })
+                .unwrap();
+        }
         let mut stopped = a;
         stopped.generation += 1;
         stopped.active = false;
         plugin.sync_bindings(vec![stopped, b]).unwrap();
         assert!(!plugin.runtimes["device:A"].active_touch_channels(Instant::now())[0]);
         assert!(plugin.runtimes["device:B"].active_touch_channels(Instant::now())[1]);
+    }
+
+    #[test]
+    fn touch_input_requires_an_explicit_live_binding() {
+        let mut plugin = TouchPlugin::default();
+        let a = test_binding("device", dg_lab_link_plugin_sdk::Channel::A);
+        plugin.sync_bindings(vec![a]).unwrap();
+        let input = InputParams {
+            action: "update_touch_input".into(),
+            binding_id: None,
+            owner: "window".into(),
+            sequence: 1,
+            value: json!({"pointers":[{"id":1,"x":0.5,"y":0.5}]}),
+        };
+        assert_eq!(
+            plugin.update_input(input.clone()).unwrap_err().code,
+            "invalid_params"
+        );
+        assert_eq!(
+            plugin
+                .update_input(InputParams {
+                    binding_id: Some("expired".into()),
+                    ..input
+                })
+                .unwrap_err()
+                .code,
+            "unknown_binding"
+        );
+        assert!(!plugin.runtimes["device:A"].active_touch_channels(Instant::now())[0]);
     }
 
     #[test]

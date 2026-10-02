@@ -8,18 +8,24 @@ import {
 } from "react-circular-progressbar";
 import "react-circular-progressbar/dist/styles.css";
 
-import type { ChannelSnapshot, HubChannel } from "../lib/contracts";
+import type { ChannelStatus, HubChannel } from "../lib/contracts";
+
+interface ChannelView {
+    intensity: number;
+    limit: number;
+    status: ChannelStatus;
+}
 
 interface ChannelControlProps {
     channel: HubChannel;
-    snapshot: ChannelSnapshot;
+    snapshot: ChannelView;
     disabled: boolean;
     pending: boolean;
     onAdjust: (channel: HubChannel, delta: number) => void;
     children?: ReactNode;
 }
 
-const statusLabel = (status: ChannelSnapshot["status"]): string => {
+const statusLabel = (status: ChannelStatus): string => {
     if (status === "active") {
         return "输出中";
     }

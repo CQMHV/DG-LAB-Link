@@ -16,7 +16,6 @@ import { WindowChrome } from "./components/WindowChrome";
 import { useHubSnapshot } from "./hooks/useHubSnapshot";
 import {
     adjustIntensity,
-    connectRelay,
     connectTransport,
     disconnectConnection,
     refreshConnectionPairing,
@@ -30,7 +29,6 @@ import {
     importCustomWaveforms,
     isBrowserDemo,
     reorderCustomWaveforms,
-    selectDevice,
     selectCustomWaveform,
     setAutoStart,
     setDefaultSource,
@@ -145,9 +143,7 @@ export default function App() {
     );
 
     const closePairing = useCallback(() => setPairingConnectionId(null), []);
-    const pairingConnection = pairingConnectionId === "ws-v4"
-        ? snapshot?.connection
-        : snapshot?.connections.find((connection) => connection.connectionId === pairingConnectionId);
+    const pairingConnection = snapshot?.connections.find((connection) => connection.connectionId === pairingConnectionId);
 
     const handleAdjust = (
         channel: HubChannel,
@@ -230,15 +226,10 @@ export default function App() {
         if (dashboardTabs.activeTabId === tabId) {
             return;
         }
-        const tab = dashboardTabs.tabs.find((candidate) => candidate.id === tabId);
         setDashboardTabs((current) => ({
             ...current,
             activeTabId: tabId,
         }));
-        const deviceId = tab?.deviceId;
-        if (deviceId) {
-            void runAction(`device-${deviceId}`, () => selectDevice(deviceId));
-        }
     };
 
     const handleSelectDevice = (deviceId: string) => {
@@ -253,7 +244,6 @@ export default function App() {
                 ),
             }));
         }
-        void runAction(`device-${deviceId}`, () => selectDevice(deviceId));
     };
 
     const handleNewDeviceTab = () => {
@@ -293,12 +283,6 @@ export default function App() {
             activeTabId: nextActiveTab.id,
             tabs: remainingTabs,
         });
-        const nextDeviceId = nextActiveTab.deviceId;
-        if (closingActiveTab && nextDeviceId) {
-            void runAction(`device-${nextDeviceId}`, () =>
-                selectDevice(nextDeviceId),
-            );
-        }
     };
 
     const handleMoveDeviceTab = (tabId: string, targetTabId: string) => {
@@ -330,7 +314,6 @@ export default function App() {
             tabs: [...current.tabs, tab],
         }));
         setPage("dashboard");
-        void runAction(`device-${deviceId}`, () => selectDevice(deviceId));
     };
 
     const handleOpenDeviceInNewWindow = (deviceId: string) => {
@@ -422,7 +405,7 @@ export default function App() {
     };
 
     const runtimeError =
-        snapshot?.output.lastError ?? snapshot?.connection.lastError ?? snapshot?.connections.find((connection) => connection.lastError)?.lastError ?? null;
+        snapshot?.output.lastError ?? snapshot?.connections.find((connection) => connection.lastError)?.lastError ?? null;
     const externalError = snapshotError ?? runtimeError;
     const visibleExternalError =
         externalError === dismissedExternalError ? null : externalError;
@@ -439,7 +422,7 @@ export default function App() {
         ? detachedDeviceId
         : dashboardTabsInitialized.current
           ? activeDashboardTab?.deviceId ?? null
-          : snapshot?.selectedDeviceId ?? snapshot?.devices[0]?.controlId ?? null;
+          : snapshot?.devices[0]?.controlId ?? null;
     const selectedOverviewDeviceId = snapshot?.devices.some((device) => device.controlId === overviewDeviceId)
         ? overviewDeviceId
         : snapshot?.devices[0]?.controlId ?? null;
@@ -534,7 +517,7 @@ export default function App() {
         }
         dashboardTabsInitialized.current = true;
         const initialDeviceId =
-            snapshot.selectedDeviceId ?? snapshot.devices[0]?.controlId ?? null;
+            snapshot.devices[0]?.controlId ?? null;
         if (!initialDeviceId) {
             return;
         }
@@ -618,13 +601,13 @@ export default function App() {
                                 onAdjust={handleAdjust}
                                 onCloseTab={handleCloseDeviceTab}
                                 onConnect={() =>
-                                    void runAction("connect", connectRelay)
+                                    void runAction("connect", () => connectTransport("ws_v4"))
                                 }
                                 onDetachTab={handleDetachTab}
                                 onMoveTab={handleMoveDeviceTab}
                                 onNewDeviceTab={handleNewDeviceTab}
                                 onFocusDetachedTab={handleFocusDetachedTab}
-                                onOpenPairing={() => setPairingConnectionId("ws-v4")}
+                                onOpenPairing={(connectionId = "ws-v4") => setPairingConnectionId(connectionId)}
                                 onSelectDevice={handleSelectDevice}
                                 onSelectCustomWaveform={(deviceId, channel, presetId) =>
                                     void runAction(

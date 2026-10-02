@@ -1,5 +1,5 @@
-use dg_lab_link_core::control::{ControlCommand, ControlError};
-use dg_lab_link_core::hub::HubSnapshot;
+use dg_lab_link_contracts::control::{ControlCommand, ControlError};
+use dg_lab_link_contracts::hub::HubSnapshot;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -61,12 +61,16 @@ pub(crate) enum Response {
     },
     Snapshot {
         snapshot: Box<HubSnapshot>,
+        /// Configuration is sent only when the source catalogue changes.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        configs: Option<std::collections::BTreeMap<String, std::sync::Arc<Value>>>,
     },
     CommandEpoch {
         epoch: u64,
     },
 }
 
+#[cfg(any(feature = "server", test))]
 impl Response {
     pub fn result(id: u64, result: Result<Value, ControlError>) -> Self {
         match result {

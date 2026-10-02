@@ -78,6 +78,7 @@ pub struct PluginContext {
     pending: Pending,
     sequence: Arc<AtomicU64>,
     request_id: Arc<AtomicU64>,
+    operation_epoch: Option<u64>,
 }
 
 impl PluginContext {
@@ -123,6 +124,7 @@ impl PluginContext {
             .try_send(Message::Notification {
                 method: "status".into(),
                 params: value,
+                operation_epoch: None,
             })
             .map_err(|_| PluginError::new("queue_busy", "插件状态队列已满或关闭"))
     }
@@ -130,6 +132,26 @@ impl PluginContext {
     /// Call a typed core business command serialized as JSON. Device writes must
     /// contain an explicit controlId just as GUI, CLI and MCP calls do.
     pub async fn business_call(&self, command: Value) -> Result<Value, PluginError> {
+        self.core_request("core.call", command).await
+    }
+
+    /// Begin one new externally initiated operation. Never refresh a context to
+    /// retry work revoked by stop; asynchronous descendants retain this copy.
+    pub async fn begin_operation(&self) -> Result<Self, PluginError> {
+        let response = self
+            .core_request("core.begin_operation", Value::Null)
+            .await?;
+        let epoch = response
+            .get("operationEpoch")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| PluginError::new("invalid_response", "核心未返回有效操作上下文"))?;
+        Ok(Self {
+            operation_epoch: Some(epoch),
+            ..self.clone()
+        })
+    }
+
+    async fn core_request(&self, method: &str, params: Value) -> Result<Value, PluginError> {
         let id = self.request_id.fetch_add(1, Ordering::Relaxed) + 1;
         let (sender, receiver) = oneshot::channel();
         {
@@ -146,8 +168,9 @@ impl PluginContext {
             .sender
             .try_send(Message::Request {
                 id,
-                method: "core.call".into(),
-                params: command,
+                method: method.into(),
+                params,
+                operation_epoch: self.operation_epoch,
             })
             .is_err()
         {
@@ -177,13 +200,14 @@ pub async fn run_plugin<P: Plugin>(mut plugin: P) -> Result<(), PluginError> {
     let (sender, mut writer_queue) = mpsc::channel::<Message>(64);
     let (incoming, mut request_queue) = mpsc::channel::<Message>(64);
     let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
-    let context = PluginContext {
+    let mut context = PluginContext {
         sender: sender.clone(),
         frames: Arc::new(Mutex::new(HashMap::new())),
         frame_ready: Arc::new(Notify::new()),
         pending: pending.clone(),
         sequence: Arc::new(AtomicU64::new(0)),
         request_id: Arc::new(AtomicU64::new(0)),
+        operation_epoch: None,
     };
     let cancellation = CancellationToken::new();
     let writer_context = context.clone();
@@ -204,7 +228,7 @@ pub async fn run_plugin<P: Plugin>(mut plugin: P) -> Result<(), PluginError> {
                         std::mem::take(&mut *mailbox)
                     };
                     for frame in frames.into_values() {
-                        let message = Message::Notification { method: "frame".into(), params: serde_json::to_value(frame).expect("frame is serializable") };
+                        let message = Message::Notification { method: "frame".into(), params: serde_json::to_value(frame).expect("frame is serializable"), operation_epoch: None };
                         tokio::time::timeout(Duration::from_secs(1), write_message(&mut output, &message)).await
                             .map_err(|_| PluginError::new("plugin_io", "插件输出管道超时"))??;
                     }
@@ -259,23 +283,25 @@ pub async fn run_plugin<P: Plugin>(mut plugin: P) -> Result<(), PluginError> {
             result = &mut reader => break result.map_err(|error| PluginError::new("plugin_io", error.to_string())).and_then(|result| result),
             result = &mut writer => break result.map_err(|error| PluginError::new("plugin_io", error.to_string())).and_then(|result| result),
             Some(message) = request_queue.recv() => {
-                let (id, method, params) = match message {
-                    Message::Request { id, method, params } => (Some(id), method, params),
-                    Message::Notification { method, params } => (None, method, params),
+                let (id, method, params, operation_epoch) = match message {
+                    Message::Request { id, method, params, operation_epoch } => (Some(id), method, params, operation_epoch),
+                    Message::Notification { method, params, operation_epoch } => (None, method, params, operation_epoch),
                     Message::Response { .. } => continue,
                 };
+                let request_context = PluginContext { operation_epoch, ..context.clone() };
+                if operation_epoch.is_some() { context.operation_epoch = operation_epoch; }
                 let shutdown = method == "shutdown";
                 let response = if !initialized && method != "initialize" && method != "migrate" && !shutdown {
                     Err(PluginError::new("not_initialized", "插件尚未初始化"))
                 } else {
                     match method.as_str() {
                         "migrate" => match serde_json::from_value(params) {
-                            Ok(params) => plugin.migrate(params, &context).await,
+                            Ok(params) => plugin.migrate(params, &request_context).await,
                             Err(error) => Err(invalid_params(error)),
                         },
                         "initialize" => match serde_json::from_value::<InitializeParams>(params) {
                             Ok(params) if params.protocol_version == PROTOCOL_VERSION && !initialized => {
-                                match plugin.initialize(params, &context).await {
+                                match plugin.initialize(params, &request_context).await {
                                     Ok(value) => { initialized = true; Ok(value) }
                                     Err(error) => Err(error),
                                 }
@@ -284,30 +310,30 @@ pub async fn run_plugin<P: Plugin>(mut plugin: P) -> Result<(), PluginError> {
                             Err(error) => Err(invalid_params(error)),
                         },
                         "configure" => match serde_json::from_value(params) {
-                            Ok(params) => plugin.configure(params, &context).await,
+                            Ok(params) => plugin.configure(params, &request_context).await,
                             Err(error) => Err(invalid_params(error)),
                         },
                         "bindings" => match serde_json::from_value::<Vec<Binding>>(params) {
-                            Ok(bindings) if bindings.len() <= MAX_BINDINGS => plugin.bindings(bindings, &context).await,
+                            Ok(bindings) if bindings.len() <= MAX_BINDINGS => plugin.bindings(bindings, &request_context).await,
                             Ok(_) => Err(PluginError::new("invalid_params", "绑定数量超过上限")),
                             Err(error) => Err(invalid_params(error)),
                         },
                         "action" => match serde_json::from_value(params) {
-                            Ok(params) => plugin.action(params, &context).await,
+                            Ok(params) => plugin.action(params, &request_context).await,
                             Err(error) => Err(invalid_params(error)),
                         },
                         "ui" => match serde_json::from_value(params) {
-                            Ok(params) => plugin.ui(params, &context).await.and_then(|document| {
+                            Ok(params) => plugin.ui(params, &request_context).await.and_then(|document| {
                                 document.validate()?;
                                 serde_json::to_value(document).map_err(invalid_params)
                             }),
                             Err(error) => Err(invalid_params(error)),
                         },
                         "input" => match serde_json::from_value(params) {
-                            Ok(params) => plugin.input(params, &context).await,
+                            Ok(params) => plugin.input(params, &request_context).await,
                             Err(error) => Err(invalid_params(error)),
                         },
-                        "shutdown" => { plugin.shutdown(&context).await; Ok(Value::Null) },
+                        "shutdown" => { plugin.shutdown(&request_context).await; Ok(Value::Null) },
                         _ => Err(PluginError::new("method_not_found", "未知插件方法")),
                     }
                 };
@@ -341,4 +367,83 @@ pub async fn run_plugin<P: Plugin>(mut plugin: P) -> Result<(), PluginError> {
 
 fn invalid_params(error: serde_json::Error) -> PluginError {
     PluginError::new("invalid_params", error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn context(sender: mpsc::Sender<Message>) -> PluginContext {
+        PluginContext {
+            sender,
+            frames: Arc::new(Mutex::new(HashMap::new())),
+            frame_ready: Arc::new(Notify::new()),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            sequence: Arc::new(AtomicU64::new(0)),
+            request_id: Arc::new(AtomicU64::new(0)),
+            operation_epoch: Some(7),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_new_operation_returns_a_copy_without_refreshing_old_contexts() {
+        let (sender, mut requests) = mpsc::channel(64);
+        let context = context(sender);
+        let reply = async {
+            let Message::Request {
+                id,
+                method,
+                params,
+                operation_epoch,
+            } = requests.recv().await.unwrap()
+            else {
+                panic!("request expected")
+            };
+            assert_eq!(method, "core.begin_operation");
+            assert!(params.is_null());
+            assert_eq!(operation_epoch, Some(7));
+            let pending = context.pending.lock().unwrap().remove(&id).unwrap();
+            pending
+                .send(Ok(serde_json::json!({"operationEpoch":8})))
+                .unwrap();
+        };
+        let (fresh, ()) = tokio::join!(context.begin_operation(), reply);
+        assert_eq!(fresh.unwrap().operation_epoch, Some(8));
+        assert_eq!(context.operation_epoch, Some(7));
+        assert!(context.pending.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn explicit_operation_and_business_requests_share_the_same_capacity() {
+        let (sender, _requests) = mpsc::channel(64);
+        let context = context(sender);
+        for id in 0..16 {
+            let (sender, _) = oneshot::channel();
+            context.pending.lock().unwrap().insert(id, sender);
+        }
+        assert_eq!(
+            context.begin_operation().await.err().unwrap().code,
+            "queue_busy"
+        );
+        assert_eq!(
+            context.business_call(Value::Null).await.unwrap_err().code,
+            "queue_busy"
+        );
+        context.pending.lock().unwrap().clear();
+        for id in 0..64 {
+            context
+                .sender
+                .try_send(Message::Response {
+                    id,
+                    result: Value::Null,
+                    error: None,
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            context.begin_operation().await.err().unwrap().code,
+            "queue_busy"
+        );
+        assert!(context.pending.lock().unwrap().is_empty());
+    }
 }

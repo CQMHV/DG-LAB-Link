@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const MAX_BINDINGS: usize = 64;
 pub const FRAME_INTERVAL_MS: u64 = 100;
 pub const MAX_INSTANCES: usize = 32;
@@ -16,6 +16,16 @@ pub struct PluginManifest {
     pub publisher: String,
     pub license: String,
     pub executable: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledPlugin {
+    pub manifest: PluginManifest,
+    pub digest: String,
+    pub preinstalled: bool,
+    #[serde(skip)]
+    pub directory: std::path::PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]

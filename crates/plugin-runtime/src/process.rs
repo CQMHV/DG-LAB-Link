@@ -18,12 +18,26 @@ use crate::LatestFrameStore;
 
 pub type BusinessFuture<'a> = Pin<Box<dyn Future<Output = Result<Value, PluginError>> + Send + 'a>>;
 pub trait BusinessHandler: Send + Sync + 'static {
-    fn call<'a>(&'a self, source_id: &'a str, command: Value) -> BusinessFuture<'a>;
+    fn call<'a>(
+        &'a self,
+        source_id: &'a str,
+        command: Value,
+        operation_epoch: Option<u64>,
+    ) -> BusinessFuture<'a>;
+    fn begin_operation<'a>(&'a self, _source_id: &'a str) -> BusinessFuture<'a> {
+        Box::pin(async {
+            Err(PluginError::new(
+                "context_unavailable",
+                "核心不支持主动操作上下文",
+            ))
+        })
+    }
 }
 
 pub(crate) type HandlerSlot = Arc<RwLock<Option<Arc<dyn BusinessHandler>>>>;
 pub(crate) type StateCallback = Arc<dyn Fn(&str, Option<PluginError>, Option<Value>) + Send + Sync>;
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, PluginError>>>>>;
+type InputMailbox = Arc<Mutex<HashMap<String, (InputParams, Option<u64>)>>>;
 
 #[derive(Clone)]
 pub(crate) struct Session {
@@ -33,7 +47,7 @@ pub(crate) struct Session {
     cancellation: CancellationToken,
     bindings: Arc<Mutex<Option<Vec<Binding>>>>,
     bindings_ready: Arc<Notify>,
-    inputs: Arc<Mutex<HashMap<String, InputParams>>>,
+    inputs: InputMailbox,
     input_ready: Arc<Notify>,
     finished: Arc<Notify>,
     exited: Arc<std::sync::atomic::AtomicBool>,
@@ -114,7 +128,7 @@ impl Session {
                     Some(message) = queue.recv() => Some(message),
                     _ = writer_session.bindings_ready.notified() => {
                         writer_session.bindings.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()
-                            .map(|bindings| Message::Notification { method: "bindings".into(), params: serde_json::to_value(bindings).expect("bindings serialize") })
+                            .map(|bindings| Message::Notification { method: "bindings".into(), params: serde_json::to_value(bindings).expect("bindings serialize"), operation_epoch: None })
                     }
                     _ = writer_session.input_ready.notified() => {
                         let input = {
@@ -123,7 +137,7 @@ impl Session {
                             key.and_then(|key| inputs.remove(&key))
                         };
                         if !writer_session.inputs.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).is_empty() { writer_session.input_ready.notify_one(); }
-                        input.map(|params| Message::Notification { method: "input".into(), params: serde_json::to_value(params).expect("input serialize") })
+                        input.map(|(params, operation_epoch)| Message::Notification { method: "input".into(), params: serde_json::to_value(params).expect("input serialize"), operation_epoch })
                     }
                 };
                 let Some(message) = message else {
@@ -167,7 +181,8 @@ impl Session {
                             let _ = sender.send(error.map_or(Ok(result), Err));
                         }
                     }
-                    Ok(Some(Message::Notification { method, params })) => match method.as_str() {
+                    Ok(Some(Message::Notification { method, params, .. })) => match method.as_str()
+                    {
                         "frame" => {
                             if let Ok(notification) = serde_json::from_value(params) {
                                 reader_frames.push_leased(
@@ -185,7 +200,12 @@ impl Session {
                         }
                         _ => {}
                     },
-                    Ok(Some(Message::Request { id, method, params })) => {
+                    Ok(Some(Message::Request {
+                        id,
+                        method,
+                        params,
+                        operation_epoch,
+                    })) => {
                         let handler = handler
                             .read()
                             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -196,24 +216,32 @@ impl Session {
                         let callback_cancel = reader_session.cancellation.clone();
                         tokio::spawn(async move {
                             let response = match (method.as_str(), handler, permit) {
-                                ("core.call", Some(handler), Ok(_permit)) => {
+                                (
+                                    "core.call" | "core.begin_operation",
+                                    Some(handler),
+                                    Ok(_permit),
+                                ) => {
+                                    let request = if method == "core.begin_operation" {
+                                        handler.begin_operation(&callback_source)
+                                    } else {
+                                        handler.call(&callback_source, params, operation_epoch)
+                                    };
                                     tokio::select! {
                                         _ = callback_cancel.cancelled() => return,
-                                        result = tokio::time::timeout(Duration::from_secs(15), handler.call(&callback_source, params)) => {
+                                        result = tokio::time::timeout(Duration::from_secs(15), request) => {
                                             result.unwrap_or_else(|_| Err(PluginError::new("request_timeout", "核心业务调用超时")))
                                         }
                                     }
                                 }
-                                ("core.call", None, _) => Err(PluginError::new(
-                                    "core_unavailable",
-                                    "核心业务接口尚未就绪",
-                                )),
+                                ("core.call" | "core.begin_operation", None, _) => Err(
+                                    PluginError::new("core_unavailable", "核心业务接口尚未就绪"),
+                                ),
                                 (_, _, Err(_)) => {
                                     Err(PluginError::new("queue_busy", "插件业务请求超过容量"))
                                 }
                                 _ => Err(PluginError::new(
                                     "method_not_found",
-                                    "插件只能通过 core.call 调用业务接口",
+                                    "未知插件反向请求方法",
                                 )),
                             };
                             let (result, error) = response.map_or_else(
@@ -398,6 +426,7 @@ impl Session {
                 id,
                 method: method.into(),
                 params,
+                operation_epoch: OPERATION_EPOCH.try_with(|epoch| *epoch).ok(),
             })
             .is_err()
         {
@@ -427,7 +456,7 @@ impl Session {
             self.inputs
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .retain(|_, input| {
+                .retain(|_, (input, _)| {
                     input
                         .binding_id
                         .as_ref()
@@ -459,11 +488,11 @@ impl Session {
         }
         if inputs
             .get(&key)
-            .is_some_and(|old| old.sequence >= params.sequence)
+            .is_some_and(|(old, _)| old.sequence >= params.sequence)
         {
             return Ok(());
         }
-        inputs.insert(key, params);
+        inputs.insert(key, (params, OPERATION_EPOCH.try_with(|epoch| *epoch).ok()));
         drop(inputs);
         self.input_ready.notify_one();
         Ok(())
@@ -615,10 +644,10 @@ mod tests {
         let pending = session.inputs.lock().unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(
-            pending.values().next().unwrap().binding_id.as_deref(),
+            pending.values().next().unwrap().0.binding_id.as_deref(),
             Some("device/b")
         );
-        assert_eq!(pending.values().next().unwrap().sequence, 8);
+        assert_eq!(pending.values().next().unwrap().0.sequence, 8);
         drop(pending);
         assert_eq!(
             session.bindings.lock().unwrap().as_ref().unwrap()[0].generation,

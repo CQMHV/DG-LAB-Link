@@ -8,7 +8,7 @@
         "dev:desktop": "npm run build:headless && npm run dev",
         "dev:simulator": "vite --config simulator/vite.config.ts",
         "build": "npm run build:client",
-        "build:client": "tsc --noEmit && vite build",
+        "build:client": "npm run check && vite build",
         "build:headless": "node scripts/build-headless.mjs",
         "build:headless:release": "node scripts/build-headless.mjs --release",
         "build:cli": "npm run build:headless",
@@ -18,11 +18,13 @@
         "check:waveforms": "node scripts/generate-waveforms.mjs --check",
         "build:simulator": "tsc -p simulator/tsconfig.json --noEmit && vite build --config simulator/vite.config.ts",
         "preview": "vite preview",
-        "check": "tsc --noEmit",
+        "check": "npm run check:contracts && tsc --noEmit",
         "test": "vitest run",
         "test:simulator": "vitest run --config simulator/vite.config.ts",
         "test:watch": "vitest",
-        "tauri": "tauri"
+        "tauri": "tauri",
+        "generate:contracts": "node scripts/generate-contracts.mjs",
+        "check:contracts": "node scripts/generate-contracts.mjs --check"
     },
     "dependencies": {
         "@dg-kit/waveforms": "1.16.3",
