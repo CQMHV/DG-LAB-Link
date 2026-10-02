@@ -1,16 +1,18 @@
 # CLI 与本机 MCP
 
-core、GUI、CLI、MCP 四个程序按职责分开；GUI、CLI、stdio MCP 与本机 HTTP MCP 连接同一个独立核心，共用 Hub、Socket V4 Relay、设备会话、输入源、波形库与持久配置。所有业务操作最终调用类型化 `ControlCommand`；窗口、托盘和开机自启由 GUI 管理。
+core、GUI、CLI、MCP 四个程序按职责分开；GUI、CLI、stdio MCP 与本机 HTTP MCP 连接同一个独立核心，共用 Hub、Socket V4／V3／BLE、设备会话、输入源、波形库与持久配置。所有业务操作最终调用类型化 `ControlCommand`；窗口、托盘和开机自启由 GUI 管理。
 
 ## 构建与持有核心
 
 无界面入口只需 Rust 工具链：
 
 ```powershell
-cargo build -p dg-lab-link-core-server -p dg-lab-link-cli -p dg-lab-link-mcp
+cargo build -p dg-lab-link-core-server -p dg-lab-link-cli -p dg-lab-link-mcp -p dg-lab-link-builtin-plugins -p dg-lab-link-plugin-runtime
 $cli = ".\src-tauri\target\debug\dg-lab-link-cli.exe"
 & $cli --help
 ```
+
+上述 Cargo 命令编译程序和插件入口；首次启动前还需用 `dg-lab-link-plugin-pack` 将两个插件清单与对应 exe 打包到可执行文件同级 `plugins/`。已有 Node.js 开发环境可执行 `npm run build:headless` 自动完成构建和打包。插件包准备方式见 [预装插件](PLUGIN_BUILTINS.md)，公共打包器用法见 [插件开发](PLUGINS.md)；运行时无需 Node.js。
 
 可执行文件按职责分为 `dg-lab-link-core`（核心、实时链路及本机 WebSocket `/control`）、`dg-lab-link-cli`（命令与持有者管理）、`dg-lab-link-mcp`（默认 stdio，`--transport http` 提供 HTTP MCP）、`dg-lab-link-gui`（窗口、托盘及自启动）。GUI、CLI 和 stdio MCP 自动连接或启动同目录的 core，HTTP MCP 只连接已有 core；实时链路始终留在 core。CLI 需要 core + CLI，stdio MCP 需要 core + MCP；HTTP MCP 需要 core + MCP，并通过 GUI 或 CLI `serve` 保持核心。桌面联合构建会准备全部四个程序。
 
@@ -53,10 +55,9 @@ $device = "<devices 返回的 controlId>"
 & $cli intensity --device $device --channel a --delta 1
 & $cli output start --device $device
 & $cli output stop --device $device
-& $cli output emergency-stop
 ```
 
-开始输出前 A/B 必须都有输入源。输入源 ID 从 `sources list` 读取；内置来源为 `source-fixed-waveform`、`source-touch`、`source-audio`。普通停止只清理目标设备；紧急停止清理并归零所有在线设备，同时停止音频。`sync --device $device --enabled on` 开启全设备强度同步，显式使用该设备作为基准；关闭用 `off`。`sources sync --device $device --enabled on` 控制该设备 A/B 的输入源同步。`sources default none` 表示新设备每次询问。
+开始输出前 A/B 必须都有输入源。输入源 ID 从 `sources list` 读取；固定波形为 `source-fixed-waveform`；预装插件的默认实例为 `source-touch`、`source-audio`，可删除或创建其他实例。普通停止只清理目标设备波形，保留基础强度，插件和音频继续运行。`sync --device $device --enabled on` 开启全设备强度同步，显式使用该设备作为基准；关闭用 `off`。`sources sync --device $device --enabled on` 控制该设备 A/B 的输入源同步。`sources default none` 表示新设备每次询问。
 
 波形导入支持 `.pulse`、`.json`、`.pulses`；JSON 可为帧数组、含 `frames` / `pulseData` 的对象或对象数组。解析、容量、名称和帧校验在核心统一执行，单个文件最多 2 MiB；CLI 每批波形文本最多 4 MiB。`waveforms parse` 只解析不保存，`waveforms import` 导入并分配自定义 ID。`waveforms get <id>` 读取自定义完整配置；`delete <id>` 删除；`reorder <id>…` 提供全部自定义 ID 保存顺序。
 
@@ -76,9 +77,9 @@ $device = "<devices 返回的 controlId>"
 & $cli safety set --file .\safety.json
 ```
 
-触控输入包含 `deviceId`（设备 controlId）、`ownerId`、递增 `sequence` 和 `pointers`。每个触点含 `id`、归一化 `x` / `y`、可选 `cell` 和可选 `channel`（`a` / `b`）。指定 `channel` 时每路最多一个触点，两路可同时独立控制，不受共享 `routing` 影响；不指定时按 `TouchConfig.routing` 分配。一次输入不可混用这两种方式。释放单路时只移除该路触点并保留另一触点，全部释放时提交空 `pointers`；持续触控必须在一秒租期内续租。核心限制活动所有者，过期或乱序输入不会复活触点。
+触控输入包含 `deviceId`（设备 controlId）、`ownerId`、递增 `sequence` 和 `pointers`。每个触点含 `id`、归一化 `x` / `y`、可选 `cell` 和可选 `channel`（`a` / `b`）。指定 `channel` 时每路最多一个触点，两路可同时独立控制，不受共享 `routing` 影响；不指定时按 `TouchConfig.routing` 分配。一次输入不可混用这两种方式。释放单路时只移除该路触点并保留另一触点，全部释放时提交空 `pointers`；持续触控必须在一秒租期内续租。触控插件限制活动所有者，过期或乱序输入不会复活触点。
 
-音频播放、麦克风、桌面监听、录音和映射均在核心 Rust 工作线程执行。文件或录音保存路径相对于调用 CLI 的工作目录解析为绝对路径；MCP 的路径须直接提供绝对路径。
+音频播放、麦克风、桌面监听、录音和映射均在音频插件 Rust 工作线程执行。文件或录音保存路径相对于调用 CLI 的工作目录解析为绝对路径；MCP 的路径须直接提供绝对路径。
 
 ```powershell
 & $cli audio load .\demo.mp3
@@ -104,6 +105,28 @@ $device = "<devices 返回的 controlId>"
 ```
 
 `get_app_preferences`、`set_close_to_tray`、`set_start_minimized` 属于 GUI 管理，不暴露给 CLI/MCP。`devices select <controlId>` 显式切换共享 GUI 焦点，其他设备写操作不依赖该焦点。
+
+## 插件与实例
+
+核心只内置固定波形。触控和音频为普通预装插件；本地安装、更新、卸载与第三方使用相同入口。原生插件以当前用户权限运行，首次使用时启动，普通输出停止不停止插件。插件本身不持有核心。
+
+```powershell
+& $cli plugins list --json
+& $cli plugins install .\example-source.dglabplugin --json
+$source = & $cli sources create example.pulse-source --name "示例实例" --json | ConvertFrom-Json
+& $cli sources ui $source.id --json
+& $cli sources config $source.id --file .\source-config.json --json
+& $cli sources bind --device $device --channel a $source.id --json
+& $cli sources ui $source.id --control --binding "<快照 bindingIdA>" --json
+& $cli sources action $source.id read_core --json
+& $cli sources stop $source.id --json
+& $cli sources enable $source.id off --json
+& $cli plugins update .\example-source-v2.dglabplugin --json
+& $cli plugins uninstall example.pulse-source --json
+# 卸载默认保留实例、配置和数据；彻底删除需显式 --delete-data
+```
+
+`call clear_device_channel --params` 可按设备及通道清空旧波形并保持输出活动；返回绑定代次，不代表设备确认。实例配置通过 `sources config` 持久保存；`--binding <bindingId>` 修改当前设备通道的会话配置。`sources input <id> --file` 接收公共 `InputParams`。`call` 与两种 MCP 开放同一组 `list_plugins/install_plugin/update_plugin/uninstall_plugin/create_source/delete_source/set_source_enabled/start_source/stop_source/set_source_config/get_source_ui/source_action/source_input` 命令。`dglab://plugins` 和 `dglab://sources/<sourceId>` 资源只读，不启动实例。UI 文档包含动作与参数 Schema，第三方操作可经 CLI/MCP 调用。完整协议、打包工具和模板见 [插件文档](PLUGINS.md)。
 
 ## AI 使用 MCP
 
@@ -168,7 +191,7 @@ HTTP 服务关闭后，在创建持有者的终端运行 `& $cli holders release
 }
 ```
 
-两种传输的 MCP 工具名称都与 `ControlCommand` 的 snake_case 名称一致，例如 `get_hub_snapshot`、`connect_relay`、`adjust_intensity`、`start_output`、`stop_output`、`emergency_stop`、`import_waveform_files`。设备写参数仍为 `{ "deviceId": "<controlId>" }`。工具使用相同核心校验、持久化、回滚、队列和停止优先级；Hub 快照、设备、输入源与运行记录还通过只读资源 `dglab://status`、`dglab://devices`、`dglab://sources`、`dglab://logs` 提供。
+两种传输的 MCP 工具名称都与 `ControlCommand` 的 snake_case 名称一致，例如 `get_hub_snapshot`、`connect_relay`、`adjust_intensity`、`start_output`、`stop_output`、`import_waveform_files`。设备写参数仍为 `{ "deviceId": "<controlId>" }`。工具使用相同核心校验、持久化、回滚、队列和停止优先级；Hub 快照、设备、输入源与运行记录还通过只读资源 `dglab://status`、`dglab://devices`、`dglab://sources`、`dglab://plugins`、`dglab://sources/<sourceId>`、`dglab://logs` 提供。
 
 HTTP 使用 `initialize` 协商协议版本，后续请求带 `MCP-Protocol-Version` 和 `Accept: application/json, text/event-stream`。服务使用无状态 HTTP，不要求 `Mcp-Session-Id`。例如用 PowerShell 验证 HTTP 初始化（core 已被持有，独立 HTTP MCP 已启动）：
 

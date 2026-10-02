@@ -75,6 +75,23 @@ core 校验绑定归属、通道代次、进程身份与递增序列号，保存
 
 `props` 声明控件属性，例如 slider 的 `min/max/step`、select 的选项、曲线的坐标点和触控板的布局。`configKey` 指定配置字段，`action` 指定提交或离散动作，`input` 指定持续输入动作。动作描述包含 `{id,label,description,paramsSchema}`，CLI/MCP 可先读取描述，再经统一 `source_action` 调用。`bindingId` 将通道面板与设备通道关联，配置页面使用实例上下文。文件选择返回绝对路径。
 
+首版控件契约如下；所有节点都可用 `props.disabled` 禁用交互。字段置于 `form` 中时通过 `configKey` 更新表单草稿；字段置于表单外时把新值交给其 `action`。配置字段名是当前对象的直接键，不解析点分隔路径。
+
+| 节点 | `value` 与公开 `props` |
+| --- | --- |
+| `form` | `value` 为初始配置对象，未展示的配置字段保留；`submitLabel` 指定提交文案，`configPrefix` 选择实例配置中的一个子对象。默认动作 `configure`，通道上下文由 `bindingId` 传递。 |
+| `text_field`、数值字段、`slider`、`switch` | 值分别为字符串、数字或布尔；字符串支持 `maxLength`，数字支持 `min/max/step`。 |
+| `select` | `options` 为 `[{value,label}]`，值可为字符串或数字。 |
+| `curve` | 值为至少两个 `{x,y}` 点，`x` 归一化到 0..1；支持 `min/max/unit`。 |
+| `waveform_picker` | 值为完整 `WaveformConfig`；`multiple:true` 使用数组，`count` 指定区域数，`nullable:true` 允许单选无波形。目录来自公共 `list_waveforms`。 |
+| `xy_pad`、`grid` | `input` 指定持续输入动作；每次发送 `{pointers:[{id,x,y,cell}]}`，释放发送空数组。坐标为 0..1，格编号从零开始；`grid` 支持 `rows/columns/cells`，格可为文字或 `{label}`。面板每 200ms 续租，失焦或关闭释放。 |
+| 触控专用布局 | 任意插件均可在 `xy_pad/grid` 提供 `touchConfig` 使用公开的完整触控布局，并用 `channel` 选择 `a/b`；值结构与预装触控 `TouchConfig` 相同，参见 [预装插件](PLUGIN_BUILTINS.md)。宿主仍使用该节点的公共输入动作。 |
+| `audio_player` | 值为公开 `AudioSnapshot`；`modes` 可筛选 `file/microphone/recording/desktop`，支持 `description/channel`。动作收到 `AudioAction` 对象，如 `{type:"play"}`；默认动作名为 `audio_control`。快照与动作格式见 `crates/builtin-plugins/src/sources/audio.rs`，预装插件提供完整 UI 示例。 |
+| `file_field` | 选择文件后，有 `configKey` 则更新绝对路径字段，否则调用动作并发送 `{...props.payload,path}`。不启动文件内容或插件提供的脚本。 |
+| `meter`、`progress`、`key_value` | 分别使用数字／数字数组、数字、对象；支持 `min/max`，仪表数组可提供 `labels`。 |
+
+持续输入的 core 返回结果表示已接收入队，不是插件或设备执行确认。插件自行约定输入错误与租期反馈，可通过 `status` 展示；需要明确执行结果的操作使用 `action` 请求。GUI 自动附带输入所有者与递增序列号，CLI/MCP 调用 `source_input` 时需自行提供。
+
 ## 构建示例与模板
 
 真实示例在 `crates/plugin-sdk/examples/pulse-source.rs`，包括波形输出、配置验证、语义滑块及读取核心快照的反向调用。构建并打包：
