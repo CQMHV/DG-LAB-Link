@@ -429,6 +429,274 @@ async fn queued_ui_does_not_restart_a_source_after_stop() {
 
 #[cfg(feature = "test-fixtures")]
 #[tokio::test]
+async fn binding_configuration_keeps_one_session_locked_through_commit_and_rollback() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("host");
+    let manager = PluginManager::open(&root).unwrap();
+    manager
+        .install(fixture_package(temp.path(), "1"), false)
+        .await
+        .unwrap();
+    manager.create_source(spec("first")).await.unwrap();
+    let old = json!({"intensity":20});
+    let action = |config: Value, validate_only| ActionParams {
+        action: "configure_binding".into(),
+        value: json!({"bindingId":"binding-a","config":config,"validateOnly":validate_only}),
+        binding_id: Some("binding-a".into()),
+    };
+    manager
+        .action("first", action(old.clone(), false))
+        .await
+        .unwrap();
+    let original_pid = manager.runtime_states()[0].state["processId"].clone();
+    let host = manager.clone();
+    let (entered, committing) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel();
+    let changed = json!({"intensity":80});
+    let actions = [
+        action(changed.clone(), true),
+        action(changed, false),
+        action(old.clone(), false),
+    ];
+    let transaction = tokio::spawn(async move {
+        host.configure_binding_transaction(
+            "first",
+            actions,
+            || Ok(()),
+            || async move {
+                entered.send(()).unwrap();
+                released.await.unwrap();
+                Err(PluginError::new(
+                    "config_conflict",
+                    "The Hub rejected the binding commit",
+                ))
+            },
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while manager.runtime_states()[0].state["bindingValidationStarted"] != true {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(manager.stop("first").await.unwrap_err().code, "queue_busy");
+    assert_eq!(
+        manager
+            .configure("first", json!({}), 0)
+            .await
+            .unwrap_err()
+            .code,
+        "queue_busy"
+    );
+    tokio::time::timeout(Duration::from_secs(2), committing)
+        .await
+        .unwrap()
+        .unwrap();
+    // The gate also covers the asynchronous Hub commit, after both native
+    // requests have completed and before rollback begins.
+    assert_eq!(manager.stop("first").await.unwrap_err().code, "queue_busy");
+    release.send(()).unwrap();
+    assert_eq!(
+        transaction.await.unwrap().unwrap_err().code,
+        "config_conflict"
+    );
+    let state = manager
+        .action(
+            "first",
+            ActionParams {
+                action: "binding_state".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(state["bindingConfig"], old);
+    assert_eq!(state["processId"], original_pid);
+    assert_eq!(
+        fs::read_to_string(root.join("data/first/starts.txt")).unwrap(),
+        "1"
+    );
+    assert_eq!(manager.runtime_states()[0].status, SourceStatus::Running);
+
+    let rejected = json!({"intensity":90,"rejectApply":true});
+    let error = manager
+        .configure_binding_transaction(
+            "first",
+            [
+                action(rejected.clone(), true),
+                action(rejected, false),
+                action(old.clone(), false),
+            ],
+            || Ok(()),
+            || async { panic!("failed application must not reach the Hub commit") },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "fixture_apply_failed");
+    let state = manager
+        .action(
+            "first",
+            ActionParams {
+                action: "binding_state".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(state["bindingConfig"], old);
+    assert_eq!(state["processId"], original_pid);
+    manager.stop("first").await.unwrap();
+    assert_eq!(manager.runtime_states()[0].status, SourceStatus::Stopped);
+    let error = manager
+        .configure_binding_transaction(
+            "first",
+            [
+                action(old.clone(), true),
+                action(old.clone(), false),
+                action(old, false),
+            ],
+            || Err(PluginError::new("queue_busy", "Revoked operation")),
+            || async { Ok(()) },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "queue_busy");
+    assert_eq!(manager.runtime_states()[0].status, SourceStatus::Stopped);
+    assert_eq!(
+        fs::read_to_string(root.join("data/first/starts.txt")).unwrap(),
+        "1"
+    );
+    manager.shutdown().await;
+}
+
+#[cfg(feature = "test-fixtures")]
+#[tokio::test]
+async fn binding_configuration_rollback_never_restarts_a_crashed_session() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("host");
+    let manager = PluginManager::open(&root).unwrap();
+    manager
+        .install(fixture_package(temp.path(), "1"), false)
+        .await
+        .unwrap();
+    manager.create_source(spec("first")).await.unwrap();
+    let action = |config: Value, validate_only| ActionParams {
+        action: "configure_binding".into(),
+        value: json!({"bindingId":"binding-a","config":config,"validateOnly":validate_only}),
+        binding_id: Some("binding-a".into()),
+    };
+    let crash = json!({"crashOnApply":true});
+    let error = manager
+        .configure_binding_transaction(
+            "first",
+            [
+                action(crash.clone(), true),
+                action(crash, false),
+                action(json!({"intensity":20}), false),
+            ],
+            || Ok(()),
+            || async { panic!("crashed application must not reach the Hub commit") },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "rollback_failed");
+    assert_eq!(manager.runtime_states()[0].status, SourceStatus::Faulted);
+    assert_eq!(
+        manager.runtime_states()[0]
+            .last_error
+            .as_ref()
+            .unwrap()
+            .code,
+        "rollback_failed"
+    );
+    manager
+        .try_update_bindings("first", &[binding("binding-a", Channel::A)])
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        fs::read_to_string(root.join("data/first/starts.txt")).unwrap(),
+        "1"
+    );
+    assert_eq!(manager.runtime_states()[0].status, SourceStatus::Faulted);
+    manager.start("first").await.unwrap();
+    assert_eq!(
+        fs::read_to_string(root.join("data/first/starts.txt")).unwrap(),
+        "2"
+    );
+    assert_eq!(manager.runtime_states()[0].status, SourceStatus::Running);
+    manager.shutdown().await;
+}
+
+#[cfg(feature = "test-fixtures")]
+#[tokio::test]
+async fn stale_source_operations_cannot_start_a_stopped_native_process() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("host");
+    let manager = PluginManager::open(&root).unwrap();
+    manager
+        .install(fixture_package(temp.path(), "1"), false)
+        .await
+        .unwrap();
+    manager.create_source(spec("first")).await.unwrap();
+    let epoch = Arc::new(AtomicU64::new(7));
+    let current = epoch.clone();
+    manager.set_operation_validator(Arc::new(move |accepted| {
+        if accepted != current.load(Ordering::Acquire) {
+            return Err(PluginError::new("queue_busy", "Revoked operation"));
+        }
+        Ok(())
+    }));
+    let old_start = dg_lab_link_plugin_sdk::OPERATION_EPOCH.scope(7, manager.start("first"));
+    let old_config = dg_lab_link_plugin_sdk::OPERATION_EPOCH.scope(
+        7,
+        manager.configure("first", json!({"frequency":140,"intensity":80}), 0),
+    );
+    let old_action = dg_lab_link_plugin_sdk::OPERATION_EPOCH.scope(
+        7,
+        manager.action(
+            "first",
+            ActionParams {
+                action: "state".into(),
+                ..Default::default()
+            },
+        ),
+    );
+    let old_ui =
+        dg_lab_link_plugin_sdk::OPERATION_EPOCH.scope(7, manager.ui("first", UiParams::default()));
+    manager.start("first").await.unwrap();
+    epoch.store(8, Ordering::Release);
+    manager.stop("first").await.unwrap();
+    assert_eq!(manager.runtime_states()[0].status, SourceStatus::Stopped);
+    assert_eq!(old_start.await.unwrap_err().code, "queue_busy");
+    assert_eq!(old_config.await.unwrap_err().code, "queue_busy");
+    assert_eq!(old_action.await.unwrap_err().code, "queue_busy");
+    assert_eq!(old_ui.await.unwrap_err().code, "queue_busy");
+    let source = manager.snapshot().sources.remove(0);
+    assert_eq!(source.status, SourceStatus::Stopped);
+    assert_eq!(source.revision, 0);
+    assert_eq!(source.spec.config, spec("first").config);
+    assert_eq!(
+        fs::read_to_string(root.join("data/first/starts.txt")).unwrap(),
+        "1"
+    );
+    dg_lab_link_plugin_sdk::OPERATION_EPOCH
+        .scope(8, manager.start("first"))
+        .await
+        .unwrap();
+    assert_eq!(manager.runtime_states()[0].status, SourceStatus::Running);
+    assert_eq!(
+        fs::read_to_string(root.join("data/first/starts.txt")).unwrap(),
+        "2"
+    );
+    manager.shutdown().await;
+}
+
+#[cfg(feature = "test-fixtures")]
+#[tokio::test]
 async fn deferred_native_business_calls_preserve_the_original_operation_epoch() {
     let temp = tempfile::tempdir().unwrap();
     let manager = PluginManager::open(temp.path().join("host")).unwrap();

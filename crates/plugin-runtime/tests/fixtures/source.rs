@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 #[derive(Default)]
 struct Fixture {
     config: Value,
+    binding_config: Value,
     external_context: Option<PluginContext>,
 }
 
@@ -18,7 +19,15 @@ impl Plugin for Fixture {
     ) -> Result<Value, PluginError> {
         self.config = params.source.config;
         self.external_context = Some(context.clone());
-        context.status(json!({"initialized":true}))?;
+        let starts_path = std::path::Path::new(&params.data_directory).join("starts.txt");
+        let starts = std::fs::read_to_string(&starts_path)
+            .unwrap_or_default()
+            .parse::<u64>()
+            .unwrap_or(0)
+            + 1;
+        std::fs::write(starts_path, starts.to_string())
+            .map_err(|error| PluginError::new("fixture_io", error.to_string()))?;
+        context.status(json!({"initialized":true,"processId":std::process::id()}))?;
         Ok(Value::Null)
     }
 
@@ -53,6 +62,32 @@ impl Plugin for Fixture {
         params: ActionParams,
         context: &PluginContext,
     ) -> Result<Value, PluginError> {
+        if params.action == "binding_state" {
+            return Ok(json!({"bindingConfig":self.binding_config,"processId":std::process::id()}));
+        }
+        if params.action == "configure_binding" {
+            if params.value["validateOnly"] == true {
+                context.status(
+                    json!({"bindingValidationStarted":true,"processId":std::process::id()}),
+                )?;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                return Ok(Value::Null);
+            }
+            self.binding_config = params.value["config"].clone();
+            if self.binding_config["crashOnApply"] == true {
+                std::process::exit(7);
+            }
+            context.status(
+                json!({"bindingConfig":self.binding_config,"processId":std::process::id()}),
+            )?;
+            if self.binding_config["rejectApply"] == true {
+                return Err(PluginError::new(
+                    "fixture_apply_failed",
+                    "Applied then failed",
+                ));
+            }
+            return Ok(self.binding_config.clone());
+        }
         if params.action == "external_business" {
             let original = self.external_context.as_ref().expect("initialized context");
             let fresh = original.begin_operation().await?;

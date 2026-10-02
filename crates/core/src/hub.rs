@@ -10,7 +10,9 @@ use tokio::time::{Duration, Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::dglab::client::{RelayClientError, RelayClientHandle, RelayEvent, spawn_relay_client};
+use crate::dglab::client::{
+    RelayClientError, RelayClientHandle, RelayEvent, RelaySessionEvent, spawn_relay_client,
+};
 use crate::dglab::v4::pairing_url as build_pairing_url;
 use crate::model::{Channel, WaveFrame};
 use crate::sources::{WaveSource, WaveformConfig, builtin_registry};
@@ -165,6 +167,11 @@ impl From<RelayClientError> for HubError {
 }
 
 enum HubCommand {
+    ConnectionCleanupFinished {
+        connection_id: String,
+        generation: u64,
+        result: Result<(), HubError>,
+    },
     StopOutputFinished {
         device: DeviceKey,
         generation: u64,
@@ -270,6 +277,7 @@ pub struct HubHandle {
     shutdown: CancellationToken,
     completion: watch::Receiver<Option<Result<(), HubError>>>,
     safety_epoch: Arc<AtomicU64>,
+    epoch_sender: watch::Sender<u64>,
     safety_wakeup: Arc<Notify>,
 }
 
@@ -295,13 +303,22 @@ impl HubHandle {
         })
         .await
     }
-    pub(crate) fn safety_generation(&self) -> u64 {
+    pub fn command_epoch(&self) -> u64 {
         self.safety_epoch.load(Ordering::Acquire)
+    }
+    pub fn subscribe_command_epoch(&self) -> watch::Receiver<u64> {
+        self.epoch_sender.subscribe()
+    }
+    pub fn accept_command(&self, safety: bool) -> u64 {
+        if !safety {
+            return self.command_epoch();
+        }
+        revoke_command_epoch(&self.safety_epoch, &self.epoch_sender, &self.safety_wakeup)
     }
     fn accepted_generation(&self) -> u64 {
         dg_lab_link_plugin_sdk::OPERATION_EPOCH
             .try_with(|epoch| *epoch)
-            .unwrap_or_else(|_| self.safety_generation())
+            .unwrap_or_else(|_| self.command_epoch())
     }
     pub async fn transport(&self, action: TransportAction) -> Result<Value, HubError> {
         let (reply, response) = oneshot::channel();
@@ -318,8 +335,13 @@ impl HubHandle {
         response.await.map_err(|_| HubError::Stopped)?
     }
     pub async fn disconnect_connection(&self, connection_id: String) -> Result<(), HubError> {
-        self.safety_epoch.fetch_add(1, Ordering::AcqRel);
-        self.safety_wakeup.notify_waiters();
+        self.accept_command(true);
+        self.enqueue_disconnect_connection(connection_id).await
+    }
+    pub(crate) async fn enqueue_disconnect_connection(
+        &self,
+        connection_id: String,
+    ) -> Result<(), HubError> {
         self.safety_request(|reply| HubSafetyCommand::DisconnectConnection {
             connection_id,
             reply,
@@ -387,7 +409,10 @@ impl HubHandle {
     }
 
     pub async fn stop_output(&self, device_id: String) -> Result<(), HubError> {
-        self.safety_epoch.fetch_add(1, Ordering::AcqRel);
+        self.accept_command(true);
+        self.enqueue_stop_output(device_id).await
+    }
+    pub(crate) async fn enqueue_stop_output(&self, device_id: String) -> Result<(), HubError> {
         let (reply, response) = oneshot::channel();
         self.safety_commands
             .send(HubSafetyCommand::StopOutput { device_id, reply })
@@ -517,8 +542,7 @@ impl HubHandle {
     }
 
     pub fn shutdown_now(&self) {
-        self.safety_epoch.fetch_add(1, Ordering::AcqRel);
-        self.safety_wakeup.notify_waiters();
+        self.accept_command(true);
         self.shutdown.cancel();
     }
 
@@ -557,6 +581,20 @@ impl HubHandle {
         self.safety_wakeup.notify_waiters();
         response.await.map_err(|_| HubError::Stopped)?
     }
+}
+
+fn revoke_command_epoch(epoch: &AtomicU64, sender: &watch::Sender<u64>, wakeup: &Notify) -> u64 {
+    let next = epoch.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+    sender.send_if_modified(|current| {
+        if next > *current {
+            *current = next;
+            true
+        } else {
+            false
+        }
+    });
+    wakeup.notify_waiters();
+    next
 }
 
 struct SourceRuntime {
@@ -621,6 +659,38 @@ struct PendingDeviceStop {
     replies: Vec<oneshot::Sender<Result<(), HubError>>>,
 }
 
+enum ConnectionReply {
+    Unit(oneshot::Sender<Result<(), HubError>>),
+    Value(oneshot::Sender<Result<Value, HubError>>),
+}
+impl ConnectionReply {
+    fn send(self, result: Result<(), HubError>) {
+        match self {
+            Self::Unit(reply) => {
+                let _ = reply.send(result);
+            }
+            Self::Value(reply) => {
+                let _ = reply.send(result.map(|_| Value::Null));
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+enum CleanupConnection {
+    V4(RelayClientHandle),
+    Local(SessionHandle),
+}
+struct PendingConnectionCleanup {
+    generation: u64,
+    accepted_epoch: u64,
+    restart_endpoint: Option<String>,
+    reply: Option<ConnectionReply>,
+    cancellation: CancellationToken,
+    devices: Vec<(DeviceKey, DeviceSession)>,
+    connection: CleanupConnection,
+}
+
 pub struct HubRuntime {
     plugins: Option<PluginManager>,
     plugin_catalog_revision: Option<u64>,
@@ -634,6 +704,7 @@ pub struct HubRuntime {
     shutdown: CancellationToken,
     snapshot: HubSnapshot,
     v4_connection: TransportConnectionSnapshot,
+    v4_session_generation: Option<u64>,
     sources: BTreeMap<String, SourceRuntime>,
     default_fixed_waveform: Option<WaveformConfig>,
     fixed_waveform_bindings: BTreeMap<SourceBindingKey, FixedWaveformRuntime>,
@@ -643,6 +714,7 @@ pub struct HubRuntime {
     initialized_source_devices: BTreeSet<DeviceKey>,
     source_sync_devices: BTreeSet<DeviceKey>,
     relay: Option<RelayClientHandle>,
+    relay_events: Option<mpsc::Sender<RelaySessionEvent>>,
     sessions: BTreeMap<String, SessionHandle>,
     session_events: Option<mpsc::Sender<(u64, SessionEvent)>>,
     session_identities: BTreeMap<String, u64>,
@@ -655,12 +727,14 @@ pub struct HubRuntime {
     shutdown_zero_pending: BTreeSet<DeviceKey>,
     output_devices: BTreeSet<DeviceKey>,
     pending_stops: BTreeMap<DeviceKey, PendingDeviceStop>,
+    pending_connection_cleanups: BTreeMap<String, PendingConnectionCleanup>,
     pending_wave_operations: HashMap<String, PendingWaveOperation>,
     pending_intensity_operations: BTreeMap<IntensityKey, PendingIntensityOperation>,
     pending_intensity_requests: HashMap<String, IntensityKey>,
     intensity_lock_targets: BTreeMap<DeviceKey, IntensityLockTarget>,
     operation_generation: u64,
     safety_epoch: Arc<AtomicU64>,
+    epoch_sender: watch::Sender<u64>,
     safety_wakeup: Arc<Notify>,
     connection_started_at: Option<Instant>,
     reconnect_at: Option<Instant>,
@@ -830,6 +904,7 @@ pub fn create_hub_with_source_preferences(
     let (safety_sender, safety_receiver) = mpsc::channel(HUB_SAFETY_COMMAND_CAPACITY);
     let shutdown = CancellationToken::new();
     let safety_epoch = Arc::new(AtomicU64::new(0));
+    let (epoch_sender, _) = watch::channel(0);
     let safety_wakeup = Arc::new(Notify::new());
     let (completion_sender, completion_receiver) = watch::channel(None);
     (
@@ -840,6 +915,7 @@ pub fn create_hub_with_source_preferences(
             shutdown: shutdown.clone(),
             completion: completion_receiver,
             safety_epoch: Arc::clone(&safety_epoch),
+            epoch_sender: epoch_sender.clone(),
             safety_wakeup: Arc::clone(&safety_wakeup),
         },
         HubRuntime {
@@ -854,6 +930,7 @@ pub fn create_hub_with_source_preferences(
             completion_sender,
             shutdown,
             v4_connection: snapshot.connections[0].clone(),
+            v4_session_generation: None,
             snapshot,
             sources,
             default_fixed_waveform: selected_waveform,
@@ -864,6 +941,7 @@ pub fn create_hub_with_source_preferences(
             initialized_source_devices: BTreeSet::new(),
             source_sync_devices: BTreeSet::new(),
             relay: None,
+            relay_events: None,
             sessions: BTreeMap::new(),
             session_events: None,
             session_identities: BTreeMap::new(),
@@ -876,12 +954,14 @@ pub fn create_hub_with_source_preferences(
             shutdown_zero_pending: BTreeSet::new(),
             output_devices: BTreeSet::new(),
             pending_stops: BTreeMap::new(),
+            pending_connection_cleanups: BTreeMap::new(),
             pending_wave_operations: HashMap::new(),
             pending_intensity_operations: BTreeMap::new(),
             pending_intensity_requests: HashMap::new(),
             intensity_lock_targets: BTreeMap::new(),
             operation_generation: 0,
             safety_epoch,
+            epoch_sender,
             safety_wakeup,
             connection_started_at: None,
             reconnect_at: None,
@@ -1183,18 +1263,22 @@ impl HubRuntime {
         self.publish();
     }
     fn device_session(&self, device: &DeviceKey) -> Result<DeviceSession, HubError> {
-        if device.connection_id == V4_CONNECTION_ID {
-            self.relay
-                .clone()
-                .map(DeviceSession::V4)
-                .ok_or(HubError::Stopped)
+        let session = if device.connection_id == V4_CONNECTION_ID {
+            self.relay.clone().map(DeviceSession::V4)
         } else {
             self.sessions
                 .get(&device.connection_id)
                 .cloned()
                 .map(DeviceSession::Local)
-                .ok_or(HubError::DeviceUnavailable)
-        }
+        };
+        session
+            .or_else(|| {
+                self.pending_connection_cleanups
+                    .get(&device.connection_id)
+                    .and_then(|pending| pending.devices.iter().find(|(key, _)| key == device))
+                    .map(|(_, session)| session.clone())
+            })
+            .ok_or(HubError::DeviceUnavailable)
     }
     fn register_session(
         &mut self,
@@ -1237,6 +1321,29 @@ impl HubRuntime {
         }
     }
 
+    fn start_v3_connection(&mut self, endpoint: String, reply: ConnectionReply) {
+        if self.session_events.is_none() {
+            reply.send(Err(HubError::Stopped));
+            return;
+        }
+        if let Some(old) = self.sessions.remove(V3_CONNECTION_ID) {
+            old.shutdown_now();
+        }
+        self.session_identities.remove(V3_CONNECTION_ID);
+        self.mark_connection_connecting(V3_CONNECTION_ID, TransportKind::WsV3, &endpoint);
+        self.register_session(V3_CONNECTION_ID.to_owned(), crate::transport::v3::spawn);
+        let handle = self.sessions[V3_CONNECTION_ID].clone();
+        let generation = self.operation_generation;
+        tokio::spawn(async move {
+            reply.send(
+                handle
+                    .connect(endpoint, None, generation)
+                    .await
+                    .map_err(Into::into),
+            );
+        });
+    }
+
     fn update_connection(&mut self, connection: TransportConnectionSnapshot) {
         if let Some(current) = self
             .snapshot
@@ -1250,9 +1357,29 @@ impl HubRuntime {
         }
     }
 
+    fn mark_connection_connecting(
+        &mut self,
+        connection_id: &str,
+        transport: TransportKind,
+        endpoint: &str,
+    ) {
+        self.update_connection(TransportConnectionSnapshot {
+            connection_id: connection_id.to_owned(),
+            transport,
+            state: ConnectionState::Connecting,
+            endpoint: endpoint.to_owned(),
+            controller_id: None,
+            pairing_url: None,
+            app_count: 0,
+            last_error: None,
+        });
+        self.publish();
+    }
+
     async fn handle_transport_action(
         &mut self,
         action: TransportAction,
+        accepted_epoch: u64,
         reply: oneshot::Sender<Result<Value, HubError>>,
     ) {
         let generation = self.operation_generation;
@@ -1272,6 +1399,10 @@ impl HubRuntime {
                     } else {
                         V3_CONNECTION_ID
                     };
+                    if self.pending_connection_cleanups.contains_key(id) {
+                        let _ = reply.send(Err(HubError::QueueBusy));
+                        return;
+                    }
                     let active = self
                         .snapshot
                         .connections
@@ -1315,36 +1446,41 @@ impl HubRuntime {
                 transport,
                 endpoint,
             } => {
-                if transport == TransportKind::WsV4 {
-                    if matches!(
-                        self.v4_connection.state,
-                        ConnectionState::Connecting
-                            | ConnectionState::Waiting
-                            | ConnectionState::Connected
-                    ) {
-                        Err(TransportError::new("already_connected", "V4 已连接或正在连接").into())
-                    } else {
-                        self.v4_connection.endpoint = endpoint;
-                        self.auto_reconnect_enabled = true;
-                        self.begin_connect();
-                        Ok(())
-                    }
+                let id = if transport == TransportKind::WsV4 {
+                    V4_CONNECTION_ID
+                } else {
+                    V3_CONNECTION_ID
+                };
+                if transport == TransportKind::Ble {
+                    Err(
+                        TransportError::new("invalid_transport", "BLE 请使用扫描设备连接命令")
+                            .into(),
+                    )
+                } else if self.pending_connection_cleanups.contains_key(id) {
+                    Err(HubError::QueueBusy)
+                } else if self
+                    .snapshot
+                    .connections
+                    .iter()
+                    .find(|connection| connection.connection_id == id)
+                    .is_some_and(|connection| {
+                        matches!(
+                            connection.state,
+                            ConnectionState::Connecting
+                                | ConnectionState::Waiting
+                                | ConnectionState::Connected
+                        )
+                    })
+                {
+                    Err(TransportError::new("already_connected", "连接已建立或正在建立").into())
+                } else if transport == TransportKind::WsV4 {
+                    self.v4_connection.endpoint = endpoint;
+                    self.auto_reconnect_enabled = true;
+                    self.begin_connect();
+                    Ok(())
                 } else if transport == TransportKind::WsV3 {
-                    let handle = self.sessions.get(V3_CONNECTION_ID).cloned();
-                    if let Some(handle) = handle {
-                        tokio::spawn(async move {
-                            let _ = reply.send(
-                                handle
-                                    .connect(endpoint, None, generation)
-                                    .await
-                                    .map(|_| Value::Null)
-                                    .map_err(Into::into),
-                            );
-                        });
-                        return;
-                    } else {
-                        Err(HubError::Stopped)
-                    }
+                    self.start_v3_connection(endpoint, ConnectionReply::Value(reply));
+                    return;
                 } else {
                     Err(
                         TransportError::new("invalid_transport", "BLE 请使用扫描设备连接命令")
@@ -1353,43 +1489,21 @@ impl HubRuntime {
                 }
             }
             TransportAction::RefreshPairing { connection_id } => {
-                if connection_id == V4_CONNECTION_ID {
-                    let epoch = self.safety_epoch.load(Ordering::Acquire);
-                    let result = self.disconnect_v4(false).await;
-                    if result.is_ok() && epoch != self.safety_epoch.load(Ordering::Acquire) {
-                        Err(HubError::QueueBusy)
-                    } else if result.is_ok() {
-                        self.auto_reconnect_enabled = true;
-                        self.begin_connect();
-                        Ok(())
-                    } else {
-                        result
-                    }
-                } else if connection_id == V3_CONNECTION_ID {
-                    if let Some(handle) = self.sessions.get(&connection_id).cloned() {
-                        let endpoint = self
-                            .snapshot
-                            .connections
-                            .iter()
-                            .find(|c| c.connection_id == connection_id)
-                            .map(|c| c.endpoint.clone())
-                            .unwrap_or_else(|| DEFAULT_V3_ENDPOINT.to_owned());
-                        self.operation_generation = self.operation_generation.saturating_add(1);
-                        let generation = self.operation_generation;
-                        handle.invalidate_operations(generation);
-                        self.remove_connection_devices(&connection_id);
-                        self.publish();
-                        tokio::spawn(async move {
-                            let result = match handle.disconnect().await {
-                                Ok(()) => handle.connect(endpoint, None, generation).await,
-                                Err(e) => Err(e),
-                            };
-                            let _ = reply.send(result.map(|_| Value::Null).map_err(Into::into));
-                        });
-                        return;
-                    } else {
-                        Err(HubError::Stopped)
-                    }
+                if matches!(connection_id.as_str(), V4_CONNECTION_ID | V3_CONNECTION_ID) {
+                    let endpoint = self
+                        .snapshot
+                        .connections
+                        .iter()
+                        .find(|connection| connection.connection_id == connection_id)
+                        .map(|connection| connection.endpoint.clone())
+                        .unwrap_or_else(|| DEFAULT_V3_ENDPOINT.to_owned());
+                    self.queue_connection_cleanup(
+                        &connection_id,
+                        Some(endpoint),
+                        accepted_epoch,
+                        Some(ConnectionReply::Value(reply)),
+                    );
+                    return;
                 } else {
                     Err(
                         TransportError::new("unsupported_operation", "仅 WS 连接支持刷新配对")
@@ -1437,13 +1551,33 @@ impl HubRuntime {
                     && !self.sessions.contains_key(&id)
                 {
                     Err(HubError::TooManyDevices)
+                } else if self.pending_connection_cleanups.contains_key(&id) {
+                    Err(HubError::QueueBusy)
+                } else if self
+                    .snapshot
+                    .connections
+                    .iter()
+                    .find(|connection| connection.connection_id == id)
+                    .is_some_and(|connection| {
+                        matches!(
+                            connection.state,
+                            ConnectionState::Connecting
+                                | ConnectionState::Waiting
+                                | ConnectionState::Connected
+                        )
+                    })
+                {
+                    Err(TransportError::new("already_connected", "蓝牙设备已连接或正在连接").into())
                 } else if self.session_events.is_some() {
-                    if !self.sessions.contains_key(&id) {
-                        let native_id = device_id.clone();
-                        self.register_session(id.clone(), |events| {
-                            crate::transport::ble::spawn(native_id, events)
-                        });
+                    if let Some(old) = self.sessions.remove(&id) {
+                        old.shutdown_now();
                     }
+                    self.session_identities.remove(&id);
+                    self.mark_connection_connecting(&id, TransportKind::Ble, &device_id);
+                    let native_id = device_id.clone();
+                    self.register_session(id.clone(), |events| {
+                        crate::transport::ble::spawn(native_id, events)
+                    });
                     let handle = self.sessions[&id].clone();
                     tokio::spawn(async move {
                         let _ = reply.send(
@@ -1488,44 +1622,256 @@ impl HubRuntime {
         let _ = reply.send(result.map(|_| Value::Null));
     }
 
-    async fn disconnect_connection(&mut self, connection_id: &str) -> Result<(), HubError> {
-        if connection_id == V4_CONNECTION_ID {
-            return self.disconnect_v4(false).await;
+    fn queue_connection_cleanup(
+        &mut self,
+        connection_id: &str,
+        restart_endpoint: Option<String>,
+        accepted_epoch: u64,
+        reply: Option<ConnectionReply>,
+    ) {
+        if self.pending_connection_cleanups.contains_key(connection_id) {
+            if let Some(reply) = reply {
+                reply.send(Err(HubError::QueueBusy));
+            }
+            return;
         }
-        let handle = self
-            .sessions
-            .get(connection_id)
-            .cloned()
-            .ok_or(HubError::DeviceUnavailable)?;
+        let v4_generation = self.v4_session_generation;
+        let connection = if connection_id == V4_CONNECTION_ID {
+            self.disable_auto_reconnect();
+            self.v4_session_generation = None;
+            self.connection_started_at = None;
+            self.apps.clear();
+            self.relay.take().map(CleanupConnection::V4)
+        } else {
+            self.session_identities.remove(connection_id);
+            self.sessions
+                .remove(connection_id)
+                .map(CleanupConnection::Local)
+        };
+        let Some(connection) = connection else {
+            let known = matches!(connection_id, V4_CONNECTION_ID | V3_CONNECTION_ID)
+                || self
+                    .snapshot
+                    .connections
+                    .iter()
+                    .any(|connection| connection.connection_id == connection_id);
+            if !known {
+                if let Some(reply) = reply {
+                    reply.send(Err(HubError::DeviceUnavailable));
+                }
+                return;
+            }
+            self.mark_connection_disconnected(connection_id);
+            self.publish();
+            if let Some(endpoint) = restart_endpoint {
+                self.resume_connection_after_cleanup(
+                    connection_id,
+                    endpoint,
+                    accepted_epoch,
+                    reply,
+                );
+            } else if let Some(reply) = reply {
+                reply.send(Ok(()));
+            }
+            return;
+        };
         self.operation_generation = self.operation_generation.saturating_add(1);
-        handle.invalidate_operations(self.operation_generation);
-        self.remove_connection_devices(connection_id);
+        let generation = self.operation_generation;
+        match &connection {
+            CleanupConnection::V4(handle) => handle.invalidate_operations(generation),
+            CleanupConnection::Local(handle) => handle.invalidate_operations(generation),
+        }
+        let device_session = match &connection {
+            CleanupConnection::V4(handle) => DeviceSession::V4(handle.clone()),
+            CleanupConnection::Local(handle) => DeviceSession::Local(handle.clone()),
+        };
+        let devices = self
+            .devices
+            .keys()
+            .filter(|device| device.connection_id == connection_id)
+            .cloned()
+            .map(|device| (device, device_session.clone()))
+            .collect::<Vec<_>>();
+        for (device, _) in &devices {
+            self.output_devices.remove(device);
+            self.reset_device_inputs(device);
+            if let Some(pending) = self.pending_stops.remove(device) {
+                for reply in pending.replies {
+                    let _ = reply.send(Err(HubError::DeviceUnavailable));
+                }
+            }
+        }
+        // Admission installs every target barrier synchronously before publishing inactive state.
+        let completions = devices
+            .iter()
+            .map(|(device, session)| {
+                session
+                    .request_stop(device, None, false, generation)
+                    .map_err(HubError::from)
+            })
+            .collect::<Vec<_>>();
+        self.mark_connection_disconnected(connection_id);
+        let cancellation = CancellationToken::new();
+        self.pending_connection_cleanups.insert(
+            connection_id.to_owned(),
+            PendingConnectionCleanup {
+                generation,
+                accepted_epoch,
+                restart_endpoint,
+                reply,
+                cancellation: cancellation.clone(),
+                devices,
+                connection: connection.clone(),
+            },
+        );
         self.publish();
-        let result = self.wait_for_ordinary_relay(handle.disconnect()).await;
-        if let Some(connection) = self
+        let commands = self.command_sender.clone();
+        let connection_id = connection_id.to_owned();
+        tokio::spawn(async move {
+            let cleanup = async {
+                let mut first_error = None;
+                let mut admitted = Vec::new();
+                for completion in completions {
+                    match completion {
+                        Ok(completion) => admitted.push(completion),
+                        Err(error) => {
+                            first_error.get_or_insert(error);
+                        }
+                    }
+                }
+                for result in futures_util::future::join_all(admitted).await {
+                    if let Err(error) = result {
+                        first_error.get_or_insert(HubError::from(error));
+                    }
+                }
+                let disconnected = match &connection {
+                    CleanupConnection::V4(handle) => handle
+                        .disconnect_session(v4_generation)
+                        .await
+                        .map_err(HubError::from),
+                    CleanupConnection::Local(handle) => {
+                        handle.disconnect().await.map_err(HubError::from)
+                    }
+                };
+                if let Err(error) = disconnected {
+                    first_error.get_or_insert(error);
+                }
+                first_error.map_or(Ok(()), Err)
+            };
+            let result = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return,
+                result = tokio::time::timeout(Duration::from_secs(10), cleanup) => result.unwrap_or_else(|_| Err(HubError::Transport(TransportError::new("transport_timeout", "连接清理超过十秒期限")))),
+            };
+            match connection {
+                CleanupConnection::V4(handle) => handle.shutdown_now(),
+                CleanupConnection::Local(handle) => handle.shutdown_now(),
+            }
+            let _ = commands
+                .send(HubCommand::ConnectionCleanupFinished {
+                    connection_id,
+                    generation,
+                    result,
+                })
+                .await;
+        });
+    }
+
+    fn mark_connection_disconnected(&mut self, connection_id: &str) {
+        self.remove_connection_devices(connection_id);
+        if let Some(state) = self
             .snapshot
             .connections
             .iter_mut()
-            .find(|c| c.connection_id == connection_id)
+            .find(|state| state.connection_id == connection_id)
         {
-            connection.state = if result.is_ok() {
-                ConnectionState::Disconnected
-            } else {
-                ConnectionState::Error
-            };
-            connection.controller_id = None;
-            connection.pairing_url = None;
-            connection.app_count = 0;
-            connection.last_error = result.as_ref().err().map(ToString::to_string);
+            state.state = ConnectionState::Disconnected;
+            state.controller_id = None;
+            state.pairing_url = None;
+            state.app_count = 0;
+            state.last_error = None;
         }
-        self.connection_started.remove(connection_id);
+        if connection_id == V4_CONNECTION_ID {
+            self.v4_connection.state = ConnectionState::Disconnected;
+            self.v4_connection.controller_id = None;
+            self.v4_connection.pairing_url = None;
+            self.v4_connection.app_count = 0;
+            self.v4_connection.last_error = None;
+        }
+    }
+
+    fn finish_connection_cleanup(
+        &mut self,
+        connection_id: &str,
+        generation: u64,
+        result: Result<(), HubError>,
+    ) {
+        if self
+            .pending_connection_cleanups
+            .get(connection_id)
+            .is_none_or(|pending| pending.generation != generation)
+        {
+            return;
+        }
+        let pending = self
+            .pending_connection_cleanups
+            .remove(connection_id)
+            .expect("pending cleanup exists");
+        if let Some(error) = result.as_ref().err() {
+            if let Some(connection) = self
+                .snapshot
+                .connections
+                .iter_mut()
+                .find(|connection| connection.connection_id == connection_id)
+            {
+                connection.state = ConnectionState::Error;
+                connection.last_error = Some(error.to_string());
+            }
+            if connection_id == V4_CONNECTION_ID {
+                self.v4_connection.state = ConnectionState::Error;
+                self.v4_connection.last_error = Some(error.to_string());
+            }
+            self.log(
+                LogLevel::Error,
+                format!("{connection_id} 清理失败：{error}"),
+            );
+        }
         self.publish();
-        if connection_id.starts_with("ble:") && !matches!(result, Err(HubError::QueueBusy)) {
-            handle.shutdown_now();
-            self.sessions.remove(connection_id);
-            self.session_identities.remove(connection_id);
+        if result.is_ok()
+            && let Some(endpoint) = pending.restart_endpoint
+        {
+            self.resume_connection_after_cleanup(
+                connection_id,
+                endpoint,
+                pending.accepted_epoch,
+                pending.reply,
+            );
+        } else if let Some(reply) = pending.reply {
+            reply.send(result);
         }
-        result
+    }
+
+    fn resume_connection_after_cleanup(
+        &mut self,
+        connection_id: &str,
+        endpoint: String,
+        accepted_epoch: u64,
+        reply: Option<ConnectionReply>,
+    ) {
+        if accepted_epoch != self.safety_epoch.load(Ordering::Acquire) {
+            if let Some(reply) = reply {
+                reply.send(Err(HubError::QueueBusy));
+            }
+        } else if connection_id == V4_CONNECTION_ID {
+            self.v4_connection.endpoint = endpoint;
+            self.auto_reconnect_enabled = true;
+            self.begin_connect();
+            if let Some(reply) = reply {
+                reply.send(Ok(()));
+            }
+        } else if let Some(reply) = reply {
+            self.start_v3_connection(endpoint, reply);
+        }
     }
 
     async fn handle_session_event(&mut self, event: SessionEvent) {
@@ -1756,8 +2102,7 @@ impl HubRuntime {
 
     pub async fn run(mut self) {
         let (event_sender, mut events) = mpsc::channel(RELAY_EVENT_CAPACITY);
-        let (relay, mut relay_task) = spawn_relay_client(event_sender, RELAY_COMMAND_CAPACITY);
-        self.relay = Some(relay);
+        self.relay_events = Some(event_sender);
         let (session_sender, mut session_events) = mpsc::channel(RELAY_EVENT_CAPACITY);
         self.session_events = Some(session_sender.clone());
         self.register_session(V3_CONNECTION_ID.to_owned(), crate::transport::v3::spawn);
@@ -1788,7 +2133,7 @@ impl HubRuntime {
                 Some((identity,event)) = session_events.recv() => self.handle_current_session_event(identity,event).await,
                 event = events.recv(), if events_open => {
                     match event {
-                        Some(event) => self.handle_relay_event(event).await,
+                        Some(event) => self.handle_current_relay_event(event).await,
                         None => events_open = false,
                     }
                 }
@@ -1810,8 +2155,23 @@ impl HubRuntime {
         self.snapshot.output.state = OutputState::Stopped;
         self.snapshot.output.last_error = None;
         self.connection_started_at = None;
+        for pending in self.pending_connection_cleanups.values() {
+            pending.cancellation.cancel();
+        }
         let mut shutdown_result = self.send_stop_operations(true).await;
-        let local_handles = self.sessions.values().cloned().collect::<Vec<_>>();
+        let local_handles = self
+            .sessions
+            .values()
+            .cloned()
+            .chain(
+                self.pending_connection_cleanups
+                    .values()
+                    .filter_map(|pending| match &pending.connection {
+                        CleanupConnection::Local(handle) => Some(handle.clone()),
+                        _ => None,
+                    }),
+            )
+            .collect::<Vec<_>>();
         let local_results =
             futures_util::future::join_all(local_handles.iter().map(|handle| handle.disconnect()))
                 .await;
@@ -1823,15 +2183,21 @@ impl HubRuntime {
         for handle in local_handles {
             handle.shutdown_now();
         }
-        let joins = self.session_tasks.drain(..).map(|mut task| async move {
-            if tokio::time::timeout(RELAY_JOIN_TIMEOUT, &mut task)
-                .await
-                .is_err()
-            {
-                task.abort();
-            }
-        });
-        futures_util::future::join_all(joins).await;
+        let old_relays = self
+            .pending_connection_cleanups
+            .values()
+            .filter_map(|pending| {
+                if let CleanupConnection::V4(handle) = &pending.connection {
+                    Some(handle.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        for relay in old_relays {
+            let _ = tokio::time::timeout(RELAY_DISCONNECT_TIMEOUT, relay.disconnect()).await;
+            relay.shutdown_now();
+        }
         if let Some(relay) = &self.relay {
             let disconnect_result =
                 tokio::time::timeout(RELAY_DISCONNECT_TIMEOUT, relay.disconnect())
@@ -1843,18 +2209,15 @@ impl HubRuntime {
             }
             relay.shutdown_now();
         }
-        let join_result = match tokio::time::timeout(RELAY_JOIN_TIMEOUT, &mut relay_task).await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => Err(HubError::Relay(format!("Relay 任务异常结束：{error}"))),
-            Err(_) => {
-                relay_task.abort();
-                let _ = relay_task.await;
-                Err(HubError::Relay("Relay 任务退出超时".to_owned()))
+        let joins = self.session_tasks.drain(..).map(|mut task| async move {
+            if tokio::time::timeout(RELAY_JOIN_TIMEOUT, &mut task)
+                .await
+                .is_err()
+            {
+                task.abort();
             }
-        };
-        if shutdown_result.is_ok() {
-            shutdown_result = join_result;
-        }
+        });
+        futures_util::future::join_all(joins).await;
         self.snapshot.output.state = OutputState::Stopped;
         self.refresh_device_snapshots();
         self.publish();
@@ -1862,7 +2225,17 @@ impl HubRuntime {
     }
 
     fn begin_connect(&mut self) {
+        if let Some(events) = self.relay_events.clone() {
+            if let Some(previous) = self.relay.take() {
+                previous.shutdown_now();
+            }
+            let (relay, task) = spawn_relay_client(events, RELAY_COMMAND_CAPACITY);
+            self.session_tasks.retain(|task| !task.is_finished());
+            self.session_tasks.push(task);
+            self.relay = Some(relay);
+        }
         self.reset_connection_state(ConnectionState::Connecting);
+        self.v4_session_generation = Some(self.operation_generation);
         self.log(LogLevel::Info, "正在连接 DG-LAB Relay");
         self.publish();
         if let Some(relay) = self.relay.clone() {
@@ -1885,125 +2258,41 @@ impl HubRuntime {
     }
 
     async fn disconnect_if_timed_out(&mut self) {
-        if self.snapshot.safety.connection_timeout_enabled {
-            let limit = Duration::from_secs(
-                u64::from(self.snapshot.safety.connection_timeout_minutes) * 60,
-            );
-            let expired = self
-                .connection_started
-                .iter()
-                .filter(|(_, started)| started.elapsed() >= limit)
-                .map(|(id, _)| id.clone())
-                .collect::<Vec<_>>();
-            for id in expired {
-                let _ = self.disconnect_connection(&id).await;
-            }
+        if !self.snapshot.safety.connection_timeout_enabled {
+            return;
         }
-        if self.connection_timed_out() {
-            let _ = self.disconnect_v4(true).await;
-        }
-    }
-
-    async fn disconnect_v4(&mut self, timed_out: bool) -> Result<(), HubError> {
-        self.disable_auto_reconnect();
-        self.connection_started_at = None;
-        // Legacy disconnect belongs to the V4 connection. Other transports keep
-        // their output, mappings and pending strength confirmations.
-        self.operation_generation = self.operation_generation.wrapping_add(1).max(1);
-        let generation = self.operation_generation;
-        if let Some(relay) = &self.relay {
-            relay.invalidate_operations(generation);
-        }
-        let devices = self
-            .devices
-            .keys()
-            .filter(|device| device.connection_id == V4_CONNECTION_ID)
-            .cloned()
-            .collect::<Vec<_>>();
-        for device in &devices {
-            self.output_devices.remove(device);
-            self.reset_device_inputs(device);
-            self.clear_pending_for_device(device);
-        }
-        if self.output_devices.is_empty() {
-            self.snapshot.output.state = OutputState::Idle;
-            self.snapshot.output.last_error = None;
-        }
-        self.refresh_device_snapshots();
-        let completions = devices
+        let limit =
+            Duration::from_secs(u64::from(self.snapshot.safety.connection_timeout_minutes) * 60);
+        let mut expired = self
+            .connection_started
             .iter()
-            .map(|device| {
-                self.device_session(device).and_then(|session| {
-                    session
-                        .request_stop(device, None, false, generation)
-                        .map_err(HubError::from)
-                })
-            })
-            .collect::<Vec<_>>();
-        let cleanup = async move {
-            let mut error = None;
-            let mut admitted = Vec::new();
-            for completion in completions {
-                match completion {
-                    Ok(completion) => admitted.push(completion),
-                    Err(e) => {
-                        error.get_or_insert(e);
-                    }
-                }
-            }
-            for result in futures_util::future::join_all(admitted).await {
-                if let Err(e) = result {
-                    error.get_or_insert(HubError::from(e));
-                }
-            }
-            error.map_or(Ok(()), Err)
-        };
-        // Already queued target cleanup survives cancellation of the ordinary wait.
-        let stop_result = self.wait_for_ordinary_relay(cleanup).await;
-        if matches!(stop_result, Err(HubError::QueueBusy)) {
-            return stop_result;
+            .filter(|(_, started)| started.elapsed() >= limit)
+            .map(|(id, _)| id.clone())
+            .collect::<BTreeSet<_>>();
+        if self.connection_timed_out() {
+            expired.insert(V4_CONNECTION_ID.into());
         }
-        let disconnect_result = if let Some(relay) = &self.relay {
-            self.wait_for_ordinary_relay(async {
-                tokio::time::timeout(RELAY_DISCONNECT_TIMEOUT, relay.disconnect())
-                    .await
-                    .map_err(|_| HubError::Relay("断开 Relay 超时".to_owned()))
-                    .and_then(|result| result.map_err(Into::into))
-            })
-            .await
-        } else {
-            Err(HubError::Stopped)
-        };
-        let result = stop_result.and(disconnect_result);
-        if result.is_ok() {
-            self.reset_connection_state(ConnectionState::Disconnected);
+        for id in expired {
+            if self.pending_connection_cleanups.contains_key(&id) {
+                continue;
+            }
+            let epoch =
+                revoke_command_epoch(&self.safety_epoch, &self.epoch_sender, &self.safety_wakeup);
+            self.queue_connection_cleanup(&id, None, epoch, None);
             self.log(
                 LogLevel::Warning,
-                if timed_out {
-                    "V4 连接时长已到，已停止所属设备并断开 Relay"
-                } else {
-                    "已断开 DG-LAB Relay"
-                },
+                format!("{id} 连接时长已到，正在清理所属设备"),
             );
-            self.publish();
-        } else if let Err(error) = &result {
-            self.v4_connection.state = ConnectionState::Error;
-            self.v4_connection.last_error = Some(error.to_string());
-            if self.output_devices.is_empty() {
-                self.snapshot.output.state = OutputState::Error;
-                self.snapshot.output.last_error = Some(error.to_string());
-            }
-            self.log(
-                LogLevel::Error,
-                format!("断开 Relay 时安全清理失败：{error}"),
-            );
-            self.publish();
         }
-        result
     }
 
     async fn handle_command(&mut self, command: HubCommand) {
         match command {
+            HubCommand::ConnectionCleanupFinished {
+                connection_id,
+                generation,
+                result,
+            } => self.finish_connection_cleanup(&connection_id, generation, result),
             HubCommand::StopOutputFinished {
                 device,
                 generation,
@@ -2039,7 +2328,8 @@ impl HubRuntime {
                 if safety_epoch != self.safety_epoch.load(Ordering::Acquire) {
                     let _ = reply.send(Err(HubError::QueueBusy));
                 } else {
-                    self.handle_transport_action(action, reply).await;
+                    self.handle_transport_action(action, safety_epoch, reply)
+                        .await;
                 }
             }
             HubCommand::RefreshPlugins { reply } => {
@@ -2185,8 +2475,12 @@ impl HubRuntime {
                 connection_id,
                 reply,
             } => {
-                let result = self.disconnect_connection(&connection_id).await;
-                let _ = reply.send(result);
+                self.queue_connection_cleanup(
+                    &connection_id,
+                    None,
+                    self.safety_epoch.load(Ordering::Acquire),
+                    Some(ConnectionReply::Unit(reply)),
+                );
             }
 
             HubSafetyCommand::ClearDeviceChannel {
@@ -2228,6 +2522,12 @@ impl HubRuntime {
                     }
                 }
             }
+        }
+    }
+
+    async fn handle_current_relay_event(&mut self, event: RelaySessionEvent) {
+        if self.v4_session_generation == Some(event.generation) {
+            self.handle_relay_event(event.event).await;
         }
     }
 
@@ -3981,7 +4281,18 @@ impl HubRuntime {
             self.set_all_intensity_lock_targets(0, 0);
         }
         let generation = self.advance_operation_generation();
-        let devices = self.devices.keys().cloned().collect::<Vec<_>>();
+        let devices = self
+            .devices
+            .keys()
+            .cloned()
+            .chain(
+                self.pending_connection_cleanups
+                    .values()
+                    .flat_map(|pending| pending.devices.iter().map(|(device, _)| device.clone())),
+            )
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
         if zero {
             self.shutdown_zero_pending.extend(devices.iter().cloned());
         }
@@ -4166,6 +4477,7 @@ impl HubRuntime {
     }
 
     fn reset_connection_state(&mut self, state: ConnectionState) {
+        self.v4_session_generation = None;
         self.connection_started_at = None;
         self.apps.clear();
         self.remove_connection_devices(V4_CONNECTION_ID);

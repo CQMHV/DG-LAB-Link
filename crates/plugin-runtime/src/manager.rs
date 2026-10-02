@@ -242,11 +242,16 @@ struct Inner {
     package_transaction: Mutex<()>,
     package_gates: RwLock<HashMap<String, Weak<tokio::sync::RwLock<()>>>>,
     handler: HandlerSlot,
+    operation_validator: RwLock<Option<OperationValidator>>,
     frames: LatestFrameStore,
     slots: Arc<Semaphore>,
     stopping: AtomicBool,
     shutdown_cancel: CancellationToken,
 }
+
+/// Host admission check, invoked under the instance lifecycle gate before use
+/// of a native process. The host retains the original task's operation epoch.
+type OperationValidator = Arc<dyn Fn(u64) -> Result<(), PluginError> + Send + Sync>;
 
 /// Cloneable host authority. Synchronous reads and bindings updates never await a plugin.
 #[derive(Clone)]
@@ -299,6 +304,7 @@ impl PluginManager {
             package_transaction: Mutex::new(()),
             package_gates: RwLock::new(HashMap::new()),
             handler: Arc::new(RwLock::new(None)),
+            operation_validator: RwLock::new(None),
             frames: LatestFrameStore::default(),
             slots: Arc::new(Semaphore::new(MAX_INSTANCES)),
             stopping: AtomicBool::new(false),
@@ -312,6 +318,17 @@ impl PluginManager {
             .handler
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(handler);
+    }
+
+    pub fn set_operation_validator(
+        &self,
+        validator: Arc<dyn Fn(u64) -> Result<(), PluginError> + Send + Sync>,
+    ) {
+        *self
+            .0
+            .operation_validator
+            .write()
+            .unwrap_or_else(|p| p.into_inner()) = Some(validator);
     }
 
     pub fn clear_business_handler(&self) {
@@ -464,6 +481,17 @@ impl PluginManager {
 
     async fn start_locked(&self, source_id: &str) -> Result<Session, PluginError> {
         self.ensure_running()?;
+        let validator = self
+            .0
+            .operation_validator
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        if let Ok(epoch) = OPERATION_EPOCH.try_with(|epoch| *epoch)
+            && let Some(validator) = validator
+        {
+            validator(epoch)?;
+        }
         let (source, plugin) = self.definition(source_id)?;
         if !source.enabled {
             return Err(PluginError::new("source_disabled", "输入源已停用"));
@@ -751,6 +779,87 @@ impl PluginManager {
         }
     }
 
+    /// Run binding configuration `[validate, apply, rollback]` actions and the
+    /// external commit against one captured process. Admission is checked while
+    /// holding the lifecycle gate; the same gate covers all phases. Rollback
+    /// never performs another lazy start.
+    pub async fn configure_binding_transaction<Admit, Commit, CommitFuture>(
+        &self,
+        source_id: &str,
+        actions: [ActionParams; 3],
+        admit: Admit,
+        commit: Commit,
+    ) -> Result<Value, PluginError>
+    where
+        Admit: FnOnce() -> Result<(), PluginError>,
+        Commit: FnOnce() -> CommitFuture,
+        CommitFuture: std::future::Future<Output = Result<(), PluginError>>,
+    {
+        let _package = self.source_package_read(source_id)?;
+        let gate = self.gate(source_id)?;
+        let _guard = gate
+            .try_lock_owned()
+            .map_err(|_| PluginError::new("queue_busy", "该输入源正在处理其他操作"))?;
+        // The caller checks its accepted context while owning the same gate
+        // used by stop, before this transaction may initialize a process.
+        admit()?;
+        let session = self.start_locked(source_id).await?;
+        let [validate, apply, rollback] = actions;
+        session
+            .request(
+                "action",
+                serde_json::to_value(validate).expect("action serialize"),
+            )
+            .await?;
+        let applied = session
+            .request(
+                "action",
+                serde_json::to_value(apply).expect("action serialize"),
+            )
+            .await;
+        let result = match applied {
+            Ok(value) => commit().await.map(|()| value),
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                if let Err(rollback) = session
+                    .request(
+                        "action",
+                        serde_json::to_value(rollback).expect("action serialize"),
+                    )
+                    .await
+                {
+                    session.shutdown().await;
+                    self.0.frames.clear_source(source_id);
+                    let failure = bounded_error(PluginError::new(
+                        "rollback_failed",
+                        format!("{error}；恢复旧配置失败，已停止插件：{rollback}"),
+                    ));
+                    if let Some(entry) = self
+                        .0
+                        .live
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .get_mut(source_id)
+                    {
+                        entry.status = SourceStatus::Faulted;
+                        entry.last_error = Some(failure.clone());
+                        entry.session = None;
+                        entry.permit = None;
+                        entry.input_sequences.clear();
+                        entry.startup_cancel.cancel();
+                        entry.generation = entry.generation.wrapping_add(1);
+                        entry.restart_blocked = true;
+                    }
+                    return Err(failure);
+                }
+                Err(error)
+            }
+        }
+    }
+
     pub async fn action(
         &self,
         source_id: &str,
@@ -932,6 +1041,11 @@ impl PluginManager {
 
     pub async fn shutdown(&self) {
         self.0.stopping.store(true, Ordering::Release);
+        self.0
+            .operation_validator
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
         self.0.shutdown_cancel.cancel();
         let sessions: Vec<_> = self
             .0

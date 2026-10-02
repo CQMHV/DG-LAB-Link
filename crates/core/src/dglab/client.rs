@@ -70,6 +70,17 @@ pub enum RelayEvent {
     },
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct RelaySessionEvent {
+    pub generation: u64,
+    pub event: RelayEvent,
+}
+
+struct RelayEventSender {
+    sender: mpsc::Sender<RelaySessionEvent>,
+    generation: u64,
+}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum RelayClientError {
     #[error("Relay 客户端已停止")]
@@ -94,6 +105,7 @@ enum RelayCommand {
         reply: oneshot::Sender<Result<(), RelayClientError>>,
     },
     Disconnect {
+        session_generation: Option<u64>,
         reply: oneshot::Sender<Result<(), RelayClientError>>,
     },
     SendMessage {
@@ -149,9 +161,19 @@ impl RelayClientHandle {
     }
 
     pub async fn disconnect(&self) -> Result<(), RelayClientError> {
+        self.disconnect_session(None).await
+    }
+
+    pub(crate) async fn disconnect_session(
+        &self,
+        session_generation: Option<u64>,
+    ) -> Result<(), RelayClientError> {
         let (reply, response) = oneshot::channel();
         self.safety_commands
-            .send(RelayCommand::Disconnect { reply })
+            .send(RelayCommand::Disconnect {
+                session_generation,
+                reply,
+            })
             .await
             .map_err(|_| RelayClientError::Stopped)?;
         response.await.map_err(|_| RelayClientError::Stopped)?
@@ -465,7 +487,7 @@ struct RelaySharedState {
 type PendingConnect = (String, u64, oneshot::Sender<Result<(), RelayClientError>>);
 
 pub fn spawn_relay_client(
-    event_sender: mpsc::Sender<RelayEvent>,
+    event_sender: mpsc::Sender<RelaySessionEvent>,
     command_capacity: usize,
 ) -> (RelayClientHandle, JoinHandle<()>) {
     let (command_sender, command_receiver) = mpsc::channel(command_capacity.max(1));
@@ -512,7 +534,7 @@ enum SessionExit {
 async fn run_relay_client(
     mut commands: mpsc::Receiver<RelayCommand>,
     mut safety_commands: mpsc::Receiver<RelayCommand>,
-    events: mpsc::Sender<RelayEvent>,
+    events: mpsc::Sender<RelaySessionEvent>,
     shared: RelaySharedState,
 ) {
     let RelaySharedState {
@@ -538,7 +560,7 @@ async fn run_relay_client(
                     generation,
                     reply,
                 }) => (endpoint, generation, reply),
-                Some(RelayCommand::Disconnect { reply }) => {
+                Some(RelayCommand::Disconnect { reply, .. }) => {
                     let _ = reply.send(Ok(()));
                     continue;
                 }
@@ -569,6 +591,10 @@ async fn run_relay_client(
             },
         };
 
+        let events = RelayEventSender {
+            sender: events.clone(),
+            generation,
+        };
         let changed = operation_changed.notified();
         tokio::pin!(changed);
         changed.as_mut().enable();
@@ -682,7 +708,7 @@ async fn run_session(
     mut socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
     safety_commands: &mut mpsc::Receiver<RelayCommand>,
     commands: &mut mpsc::Receiver<RelayCommand>,
-    events: &mpsc::Sender<RelayEvent>,
+    events: &RelayEventSender,
     shutdown: &CancellationToken,
     minimum_operation_generation: &mut u64,
     operation_floor: &AtomicU64,
@@ -771,7 +797,11 @@ async fn run_session(
                             break;
                         }
                     }
-                    Some(RelayCommand::Disconnect { reply }) => {
+                    Some(RelayCommand::Disconnect { session_generation, reply }) => {
+                        if session_generation.is_some_and(|generation| generation != events.generation) {
+                            let _ = reply.send(Ok(()));
+                            continue;
+                        }
                         let result = close_socket(&mut socket).await;
                         let _ = reply.send(result);
                         disconnect_reason = "用户已断开 Relay".to_owned();
@@ -899,7 +929,7 @@ async fn receive_command(
     }
 }
 
-async fn handle_text(text: &str, events: &mpsc::Sender<RelayEvent>) {
+async fn handle_text(text: &str, events: &RelayEventSender) {
     let value: Value = match serde_json::from_str(text) {
         Ok(value) => value,
         Err(_) => return,
@@ -970,8 +1000,15 @@ fn validate_endpoint(endpoint: &str) -> Result<String, RelayClientError> {
     Ok(url.to_string())
 }
 
-async fn emit(events: &mpsc::Sender<RelayEvent>, event: RelayEvent) {
-    let _ = timeout(EVENT_SEND_TIMEOUT, events.send(event)).await;
+async fn emit(events: &RelayEventSender, event: RelayEvent) {
+    let _ = timeout(
+        EVENT_SEND_TIMEOUT,
+        events.sender.send(RelaySessionEvent {
+            generation: events.generation,
+            event,
+        }),
+    )
+    .await;
 }
 
 #[cfg(test)]
@@ -1269,21 +1306,21 @@ mod tests {
         client.connect(format!("ws://{address}/v4")).await.unwrap();
 
         assert!(matches!(
-            events.recv().await,
+            events.recv().await.map(|event| event.event),
             Some(RelayEvent::Connecting { .. })
         ));
         assert!(matches!(
-            events.recv().await,
+            events.recv().await.map(|event| event.event),
             Some(RelayEvent::Connected { .. })
         ));
         assert_eq!(
-            events.recv().await,
+            events.recv().await.map(|event| event.event),
             Some(RelayEvent::Hello {
                 controller_id: "controller-1".to_owned()
             })
         );
         assert_eq!(
-            events.recv().await,
+            events.recv().await.map(|event| event.event),
             Some(RelayEvent::ClientAttached {
                 client_id: "app-1".to_owned()
             })
@@ -1429,5 +1466,49 @@ mod tests {
         server.await.unwrap();
         client.shutdown_now();
         task.await.unwrap();
+    }
+    #[tokio::test]
+    async fn delayed_disconnect_for_an_old_session_cannot_close_the_new_socket() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("ws://{}/v4", listener.local_addr().unwrap());
+        let (observed, observation) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut first = accept_async(stream).await.unwrap();
+            assert!(matches!(first.next().await, Some(Ok(Message::Close(_)))));
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut second = accept_async(stream).await.unwrap();
+            let Some(Ok(Message::Text(text))) = second.next().await else {
+                panic!("old disconnect closed the new socket");
+            };
+            let frame: Value = serde_json::from_str(text.as_ref()).unwrap();
+            assert_eq!(frame["data"]["reqId"], "new-session");
+            observed.send(()).unwrap();
+            assert!(matches!(second.next().await, Some(Ok(Message::Close(_)))));
+        });
+        let (events, mut received) = mpsc::channel(32);
+        let (client, task) = spawn_relay_client(events, 16);
+        client.connect_at(endpoint.clone(), 1).await.unwrap();
+        client.connect_at(endpoint, 2).await.unwrap();
+        client.disconnect_session(Some(1)).await.unwrap();
+        client
+            .send_message("app", json!({"reqId":"new-session"}))
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(2), observation)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut connected_generations = Vec::new();
+        while let Ok(event) = received.try_recv() {
+            if matches!(event.event, RelayEvent::Connected { .. }) {
+                connected_generations.push(event.generation);
+            }
+        }
+        assert_eq!(connected_generations, [1, 2]);
+        client.disconnect_session(Some(2)).await.unwrap();
+        client.shutdown_now();
+        task.await.unwrap();
+        server.await.unwrap();
     }
 }

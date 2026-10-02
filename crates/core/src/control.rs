@@ -67,6 +67,16 @@ impl ControlService {
                 .unwrap_or_else(|| DEFAULT_V3_ENDPOINT.to_owned()),
         );
         let plugins = PluginManager::open(config_dir.join("plugins")).map_err(plugin_error)?;
+        let operation_hub = hub.clone();
+        plugins.set_operation_validator(Arc::new(move |epoch| {
+            if epoch != operation_hub.command_epoch() {
+                return Err(PluginError::new(
+                    "queue_busy",
+                    "操作上下文已被停止撤销，请重新发起操作",
+                ));
+            }
+            Ok(())
+        }));
         runtime.set_plugin_manager(plugins.clone(), preferences.default_source_id());
         let service = Self {
             hub,
@@ -150,8 +160,32 @@ impl ControlService {
     }
 
     pub async fn execute(&self, command: ControlCommand) -> Result<Value, ControlError> {
-        self.execute_scoped(command, Some(self.hub.safety_generation()))
-            .await
+        let epoch = self.accept_command(command.is_safety());
+        self.execute_received(command, epoch).await
+    }
+
+    /// Capture the core's operation epoch when an entry point receives a command.
+    /// Safety commands revoke older operations immediately, before scheduling.
+    pub fn accept_command(&self, safety: bool) -> u64 {
+        self.hub.accept_command(safety)
+    }
+
+    pub fn command_epoch(&self) -> u64 {
+        self.hub.command_epoch()
+    }
+
+    pub fn subscribe_command_epoch(&self) -> watch::Receiver<u64> {
+        self.hub.subscribe_command_epoch()
+    }
+
+    /// Forward the same command with its original acceptance epoch. Never sample
+    /// a new epoch after a queued operation has been revoked by another entry.
+    pub async fn execute_received(
+        &self,
+        command: ControlCommand,
+        epoch: u64,
+    ) -> Result<Value, ControlError> {
+        self.execute_scoped(command, Some(epoch)).await
     }
 
     async fn execute_scoped(
@@ -159,9 +193,9 @@ impl ControlService {
         command: ControlCommand,
         operation_epoch: Option<u64>,
     ) -> Result<Value, ControlError> {
-        let epoch = operation_epoch.unwrap_or_else(|| self.hub.safety_generation());
+        let epoch = operation_epoch.unwrap_or_else(|| self.command_epoch());
         if command.may_resume_output()
-            && (operation_epoch.is_none() || epoch != self.hub.safety_generation())
+            && (operation_epoch.is_none() || epoch != self.command_epoch())
         {
             return Err(ControlError::new(
                 "queue_busy",
@@ -196,6 +230,9 @@ impl ControlService {
                 epoch,
                 async move {
                     let _permit = permit;
+                    if command.may_resume_output() && epoch != service.command_epoch() {
+                        return Err(HubError::QueueBusy.into());
+                    }
                     service.execute_inner(command).await
                 },
             ))
@@ -220,7 +257,7 @@ impl ControlService {
                 async move {
                     let _permit = permit;
                     let _transaction = service.configuration.lock().await;
-                    if may_reconnect && accepted_epoch != service.hub.safety_generation() {
+                    if may_reconnect && accepted_epoch != service.command_epoch() {
                         return Err(HubError::QueueBusy.into());
                     }
                     service.execute_inner(command).await
@@ -269,7 +306,9 @@ impl ControlService {
                 endpoint,
             } => self.set_relay_endpoint(transport, endpoint).await?,
             DisconnectConnection { connection_id } => {
-                self.hub.disconnect_connection(connection_id).await?
+                self.hub
+                    .enqueue_disconnect_connection(connection_id)
+                    .await?
             }
             RefreshConnectionPairing { connection_id } => {
                 self.hub
@@ -294,7 +333,9 @@ impl ControlService {
             }
             DisconnectBluetooth { device_id } => {
                 let connection_id = self.bluetooth_device(&device_id)?.connection_id;
-                self.hub.disconnect_connection(connection_id).await?;
+                self.hub
+                    .enqueue_disconnect_connection(connection_id)
+                    .await?;
             }
             GetBluetoothConfig { device_id } => {
                 return serialize(
@@ -368,7 +409,7 @@ impl ControlService {
                     .await?
             }
             StartOutput { device_id } => {
-                let epoch = self.hub.safety_generation();
+                let epoch = dg_lab_link_plugin_sdk::OPERATION_EPOCH.with(|epoch| *epoch);
                 let device = self
                     .snapshot()
                     .devices
@@ -390,7 +431,7 @@ impl ControlService {
                     }
                 }
                 self.hub.refresh_plugins().await?;
-                if epoch != self.hub.safety_generation() {
+                if epoch != self.command_epoch() {
                     return Err(HubError::QueueBusy.into());
                 }
                 self.hub.start_output(device_id).await?;
@@ -402,7 +443,7 @@ impl ControlService {
                     .await?;
                 return Ok(serde_json::json!({"bindingId":binding_id,"generation":generation}));
             }
-            StopOutput { device_id } => self.hub.stop_output(device_id).await?,
+            StopOutput { device_id } => self.hub.enqueue_stop_output(device_id).await?,
             ListPlugins => return serialize(self.plugins.snapshot().plugins),
             InstallPlugin { path } => {
                 let plugin = self
@@ -728,57 +769,47 @@ impl ControlService {
                 value: serde_json::json!({"bindingId":binding_id,"config":config,"validateOnly":validate_only}),
                 binding_id: Some(binding_id.clone()),
             };
-            self.plugins
-                .action(&source_id, make_action(config.clone(), true))
-                .await
-                .map_err(plugin_error)?;
-            let value = match self
+            let actions = [
+                make_action(config.clone(), true),
+                make_action(config.clone(), false),
+                make_action(previous, false),
+            ];
+            let accepted_epoch = dg_lab_link_plugin_sdk::OPERATION_EPOCH.with(|epoch| *epoch);
+            let hub = self.hub.clone();
+            let commit_source = source_id.clone();
+            let result = self
                 .plugins
-                .action(&source_id, make_action(config.clone(), false))
-                .await
-            {
-                Ok(value) => value,
-                Err(error) => {
-                    if let Err(rollback) = self
-                        .plugins
-                        .action(&source_id, make_action(previous, false))
+                .configure_binding_transaction(
+                    &source_id,
+                    actions,
+                    || {
+                        if accepted_epoch != self.command_epoch() {
+                            return Err(PluginError::new(
+                                "queue_busy",
+                                "操作上下文已被停止撤销，请重新发起操作",
+                            ));
+                        }
+                        Ok(())
+                    },
+                    move || async move {
+                        hub.set_plugin_binding_config(
+                            commit_source,
+                            binding_id,
+                            config,
+                            expected_revision,
+                        )
                         .await
-                    {
-                        let _ = self.plugins.stop(&source_id).await;
-                        let _ = self.hub.refresh_plugins().await;
-                        return Err(ControlError::new(
-                            "rollback_failed",
-                            format!("{error}；恢复旧通道配置失败：{rollback}"),
-                        ));
-                    }
-                    return Err(plugin_error(error));
-                }
-            };
-            if let Err(error) = self
-                .hub
-                .set_plugin_binding_config(
-                    source_id.clone(),
-                    binding_id.clone(),
-                    config,
-                    expected_revision,
+                        .map_err(|error| PluginError::new(error.code(), error.to_string()))
+                    },
                 )
-                .await
+                .await;
+            if result
+                .as_ref()
+                .is_err_and(|error| error.code == "rollback_failed")
             {
-                if let Err(rollback) = self
-                    .plugins
-                    .action(&source_id, make_action(previous, false))
-                    .await
-                {
-                    let _ = self.plugins.stop(&source_id).await;
-                    let _ = self.hub.refresh_plugins().await;
-                    return Err(ControlError::new(
-                        "rollback_failed",
-                        format!("{error}；恢复旧通道配置失败：{rollback}"),
-                    ));
-                }
-                return Err(error.into());
+                let _ = self.hub.refresh_plugins().await;
             }
-            Ok(value)
+            result.map_err(plugin_error)
         } else {
             let value = self
                 .plugins
@@ -898,7 +929,7 @@ struct CorePluginBusiness {
 impl BusinessHandler for CorePluginBusiness {
     fn begin_operation<'a>(&'a self, _source_id: &'a str) -> BusinessFuture<'a> {
         Box::pin(async move {
-            Ok(serde_json::json!({ "operationEpoch": self.service.hub.safety_generation() }))
+            Ok(serde_json::json!({ "operationEpoch": self.service.accept_command(false) }))
         })
     }
 
@@ -917,6 +948,11 @@ impl BusinessHandler for CorePluginBusiness {
                     "插件接口仅开放核心业务命令",
                 ));
             }
+            let operation_epoch = if command.is_safety() {
+                Some(self.service.accept_command(true))
+            } else {
+                operation_epoch
+            };
             self.service
                 .execute_scoped(command, operation_epoch)
                 .await
@@ -966,13 +1002,31 @@ mod tests {
         let callback = CorePluginBusiness {
             service: service.clone(),
         };
-        let old_epoch = service.hub.safety_generation();
-        service
-            .execute(ControlCommand::DisconnectConnection {
-                connection_id: "ws-v4".into(),
-            })
+        let old_epoch = service.accept_command(false);
+        let mut epochs = service.subscribe_command_epoch();
+        let queued_start = service.execute_received(
+            ControlCommand::StartOutput {
+                device_id: "device".into(),
+            },
+            old_epoch,
+        );
+        // A plugin stop enters directly through CorePluginBusiness, outside the
+        // WebSocket dispatcher, and must revoke commands accepted there too.
+        callback
+            .call(
+                "plugin",
+                serde_json::json!({"command":"disconnect_connection","params":{"connectionId":"ws-v4"}}),
+                None,
+            )
             .await
             .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), epochs.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(*epochs.borrow_and_update(), old_epoch + 1);
+        assert_eq!(service.command_epoch(), old_epoch + 1);
+        assert_eq!(queued_start.await.unwrap_err().code, "queue_busy");
         let start = serde_json::json!({"command":"start_output","params":{"deviceId":"device"}});
         assert_eq!(
             callback
@@ -992,7 +1046,7 @@ mod tests {
         );
         let new_context = callback.begin_operation("plugin").await.unwrap();
         let new_epoch = new_context["operationEpoch"].as_u64().unwrap();
-        assert_eq!(new_epoch, service.hub.safety_generation());
+        assert_eq!(new_epoch, service.command_epoch());
         assert_ne!(new_epoch, old_epoch);
         assert_eq!(
             callback
@@ -1020,6 +1074,93 @@ mod tests {
                 .await
                 .is_ok()
         );
+        let before_source_stop = service.command_epoch();
+        assert_eq!(
+            callback
+                .call(
+                    "plugin",
+                    serde_json::json!({"command":"stop_source","params":{"sourceId":"missing"}}),
+                    Some(old_epoch),
+                )
+                .await
+                .unwrap_err()
+                .code,
+            "source_not_found"
+        );
+        // A safety callback gets a fresh epoch even with an obsolete context,
+        // and its source lifecycle branch must not revoke it a second time.
+        assert_eq!(service.command_epoch(), before_source_stop + 1);
+        assert_eq!(
+            service
+                .execute_received(
+                    ControlCommand::GetSourceUi {
+                        source_id: "missing".into(),
+                        params: Default::default(),
+                    },
+                    before_source_stop,
+                )
+                .await
+                .unwrap_err()
+                .code,
+            "queue_busy"
+        );
+        service.shutdown().await.unwrap();
+        hub.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn source_stop_revokes_configuration_spawned_before_its_first_poll() {
+        let directory = tempfile::tempdir().unwrap();
+        let plugins = directory.path().join("plugins");
+        std::fs::create_dir(&plugins).unwrap();
+        // A preserved instance remains stoppable after uninstalling its package.
+        // It must not reach configure/start after this successful lifecycle stop.
+        std::fs::write(
+            plugins.join("registry.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "sources": {
+                    "source-test": {
+                        "id":"source-test", "pluginId":"example.pulse-source",
+                        "name":"Stopped instance", "enabled":true, "config":{}
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let (service, runtime) =
+            ControlService::create(directory.path().to_owned(), "ws://127.0.0.1:1/v4".into())
+                .unwrap();
+        let hub = tokio::spawn(runtime.run());
+        let old_epoch = service.accept_command(false);
+        let configure = service.execute_received(
+            ControlCommand::SetSourceConfig {
+                source_id: "source-test".into(),
+                config: serde_json::json!({"intensity":90}),
+                binding_id: None,
+                expected_revision: 0,
+            },
+            old_epoch,
+        );
+        let mut configure = std::pin::pin!(configure);
+        // This runs the outer check and creates the transaction task. On this
+        // current-thread executor the task cannot run before we yield below.
+        assert!(futures_util::poll!(configure.as_mut()).is_pending());
+        service
+            .execute(ControlCommand::StopSource {
+                source_id: "source-test".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(service.command_epoch(), old_epoch + 1);
+        assert_eq!(configure.await.unwrap_err().code, "queue_busy");
+        let source = service.plugins.snapshot().sources.remove(0);
+        assert_eq!(
+            source.status,
+            dg_lab_link_plugin_runtime::SourceStatus::Stopped
+        );
+        assert_eq!(source.revision, 0);
+        assert_eq!(source.spec.config, serde_json::json!({}));
         service.shutdown().await.unwrap();
         hub.await.unwrap();
     }

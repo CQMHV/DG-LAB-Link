@@ -392,6 +392,12 @@ async fn third_party_native_frames_reach_v4_and_stop_only_their_binding() {
     assert_eq!(from_plugin["devices"][0]["controlId"], device);
     assert_eq!(from_plugin["devices"][0]["sourceIdA"], source);
 
+    // Use another client so its local stop counter remains unchanged. These
+    // commands must be rejected by the shared core epoch, not just local IPC.
+    let observer = Client::connect(core._directory.path(), "delayed source requests", None)
+        .await
+        .unwrap();
+    let old_source_operation = observer.accept_command(false);
     client
         .call(ControlCommand::StopSource {
             source_id: source.clone(),
@@ -416,16 +422,64 @@ async fn third_party_native_frames_reach_v4_and_stop_only_their_binding() {
     assert_eq!(capture.clear_index(Some(1)), None);
     assert_eq!(capture.clear_index(None), None);
     let state = snapshot(&client).await;
+    assert_eq!(
+        state
+            .sources
+            .iter()
+            .find(|entry| entry.id == source)
+            .unwrap()
+            .runtime_status,
+        "stopped"
+    );
     assert!(state.devices[0].output_active);
     assert_eq!(state.devices[0].intensity_a, 12);
     assert_eq!(state.devices[0].intensity_b, 23);
 
+    for command in [
+        ControlCommand::StartSource {
+            source_id: source.clone(),
+        },
+        ControlCommand::GetSourceUi {
+            source_id: source.clone(),
+            params: Default::default(),
+        },
+    ] {
+        assert_eq!(
+            observer
+                .call_received(command, old_source_operation)
+                .await
+                .unwrap_err()
+                .code,
+            "queue_busy"
+        );
+        assert_eq!(
+            snapshot(&client)
+                .await
+                .sources
+                .iter()
+                .find(|entry| entry.id == source)
+                .unwrap()
+                .runtime_status,
+            "stopped"
+        );
+    }
+    observer.release().await.unwrap();
     client
         .call(ControlCommand::StartSource {
             source_id: source.clone(),
         })
         .await
         .unwrap();
+    assert_eq!(
+        snapshot(&client)
+            .await
+            .sources
+            .iter()
+            .find(|entry| entry.id == source)
+            .unwrap()
+            .runtime_status,
+        "running"
+    );
     let b_before = capture.waves(1);
     wait_for(
         "restarting source alone retains faulted A while B continues",

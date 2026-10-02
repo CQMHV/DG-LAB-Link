@@ -229,6 +229,7 @@ impl ControlCommand {
         matches!(
             self,
             Self::StopOutput { .. }
+                | Self::StopSource { .. }
                 | Self::DisconnectConnection { .. }
                 | Self::DisconnectBluetooth { .. }
         )
@@ -350,7 +351,7 @@ fn command_description(name: &str) -> &str {
             "按 connectionId 刷新 V4 或 V3 APP 配对；会断开该连接已有的 APP 和设备。"
         }
         "set_relay_endpoint" => {
-            "持久保存 ws_v4 或 ws_v3 端点；连接运行时先断开，支持 ws:// 与 wss://。"
+            "持久保存 ws_v4 或 ws_v3 端点；修改运行中的连接地址前，请先按 connectionId 断开连接，支持 ws:// 与 wss://。"
         }
         "scan_bluetooth" => {
             "主动扫描郊狼 3.0 BLE 广播，durationMs 为扫描毫秒数；结果包含发现 deviceId，不自动连接或输出。"

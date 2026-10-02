@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use axum::Router;
@@ -17,7 +17,7 @@ use dg_lab_link_core::{ControlCommand, ControlError, ControlService};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, Semaphore, mpsc, watch};
+use tokio::sync::{Mutex, Semaphore, mpsc};
 use tokio::time::{Instant, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -50,9 +50,6 @@ pub(crate) struct Shared {
     pub normal_requests: Arc<Semaphore>,
     pub safety_requests: Arc<Semaphore>,
     websocket_clients: Arc<Semaphore>,
-    stop_epoch: AtomicU64,
-    epoch_updates: watch::Sender<u64>,
-    enqueue_gate: std::sync::Mutex<()>,
 }
 
 #[derive(Clone, Copy)]
@@ -75,24 +72,11 @@ impl Shared {
             normal_requests: Arc::new(Semaphore::new(32)),
             safety_requests: Arc::new(Semaphore::new(16)),
             websocket_clients: Arc::new(Semaphore::new(MAX_WEBSOCKET_CLIENTS as usize)),
-            stop_epoch: AtomicU64::new(0),
-            epoch_updates: watch::channel(0).0,
-            enqueue_gate: std::sync::Mutex::new(()),
         })
     }
 
     pub fn accept_command(&self, safety: bool) -> CommandEpoch {
-        let _gate = self
-            .enqueue_gate
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        CommandEpoch(if safety {
-            let epoch = self.stop_epoch.fetch_add(1, Ordering::AcqRel) + 1;
-            self.epoch_updates.send_replace(epoch);
-            epoch
-        } else {
-            self.stop_epoch.load(Ordering::Acquire)
-        })
+        CommandEpoch(self.service.accept_command(safety))
     }
 
     #[cfg(test)]
@@ -118,37 +102,17 @@ impl Shared {
             &self.normal_requests
         };
         let _permit = semaphore.try_acquire().map_err(|_| busy())?;
-        let gated = command.is_safety() || command.may_resume_output();
-        let resume = command.may_resume_output();
-        let mut first_poll = true;
-        let mut execution = std::pin::pin!(self.service.execute(command));
-        let guarded_execution = std::future::poll_fn(|context| {
-            if !gated || !first_poll {
-                return execution.as_mut().poll(context);
-            }
-            // Only enqueueing output/control takes this short synchronous gate.
-            // No response wait, import parsing or persistence holds the gate.
-            let _gate = self
-                .enqueue_gate
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            first_poll = false;
-            if resume && epoch.0 != self.stop_epoch.load(Ordering::Acquire) {
-                return std::task::Poll::Ready(Err(ControlError::new(
-                    "queue_busy",
-                    "输出请求已被后续停止操作取消",
-                )));
-            }
-            execution.as_mut().poll(context)
-        });
-        let value = timeout(REQUEST_TIMEOUT, guarded_execution)
-            .await
-            .map_err(|_| {
-                ControlError::new(
-                    "runtime_timeout",
-                    "请求执行超时；写操作可能已执行，请读取状态后再决定是否重试",
-                )
-            })??;
+        let value = timeout(
+            REQUEST_TIMEOUT,
+            self.service.execute_received(command, epoch.0),
+        )
+        .await
+        .map_err(|_| {
+            ControlError::new(
+                "runtime_timeout",
+                "请求执行超时；写操作可能已执行，请读取状态后再决定是否重试",
+            )
+        })??;
         if serde_json::to_vec(&value)
             .map_err(|error| ControlError::new("runtime_protocol_error", error.to_string()))?
             .len()
@@ -479,7 +443,7 @@ async fn websocket(mut socket: WebSocket, state: Arc<Shared>) {
         holder: holder.clone(),
         runtime: state.runtime_info().await,
         snapshot: Box::new(state.service.snapshot()),
-        command_epoch: state.stop_epoch.load(Ordering::Acquire),
+        command_epoch: state.service.command_epoch(),
     };
     if !matches!(
         timeout(
@@ -717,7 +681,7 @@ async fn write_socket(
     cancelled: CancellationToken,
 ) {
     let mut snapshots = state.service.subscribe();
-    let mut epochs = state.epoch_updates.subscribe();
+    let mut epochs = state.service.subscribe_command_epoch();
     let mut catalogue = Vec::new();
     epochs.mark_changed();
     loop {
@@ -741,7 +705,7 @@ async fn write_socket(
             },
         };
         if let Response::Result { command_epoch, .. } = &mut response {
-            *command_epoch = state.stop_epoch.load(Ordering::Acquire);
+            *command_epoch = state.service.command_epoch();
         }
         let Ok(text) = serde_json::to_string(&response) else {
             break;
@@ -1035,6 +999,199 @@ mod tests {
         state.service.shutdown().await.unwrap();
         hub.await.unwrap();
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn source_stop_revokes_delayed_source_requests_once() {
+        let (state, runtime, directory) = shared();
+        let hub = tokio::spawn(runtime.run());
+        let old_epoch = state.accept_command(false);
+        let delayed_start = state.execute_received(
+            ControlCommand::StartSource {
+                source_id: "missing-plugin".into(),
+            },
+            old_epoch,
+        );
+        let delayed_ui = state.execute_received(
+            ControlCommand::GetSourceUi {
+                source_id: "missing-plugin".into(),
+                params: Default::default(),
+            },
+            old_epoch,
+        );
+        let stop = ControlCommand::StopSource {
+            source_id: "missing-plugin".into(),
+        };
+        assert!(stop.is_safety());
+        let stop_epoch = state.accept_command(stop.is_safety());
+        assert_eq!(stop_epoch.0, old_epoch.0 + 1);
+        // Even a rejected lifecycle stop revokes earlier accepted operations;
+        // execute_received must not accept it a second time.
+        assert_eq!(
+            state
+                .execute_received(stop, stop_epoch)
+                .await
+                .unwrap_err()
+                .code,
+            "source_not_found"
+        );
+        assert_eq!(state.service.command_epoch(), stop_epoch.0);
+        assert_eq!(delayed_start.await.unwrap_err().code, "queue_busy");
+        assert_eq!(delayed_ui.await.unwrap_err().code, "queue_busy");
+        assert_eq!(
+            state
+                .execute(ControlCommand::StartSource {
+                    source_id: "missing-plugin".into(),
+                })
+                .await
+                .unwrap_err()
+                .code,
+            "source_not_found"
+        );
+        state.service.shutdown().await.unwrap();
+        hub.await.unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn direct_core_stop_revokes_requests_accepted_by_the_shared_dispatcher() {
+        let (state, runtime, directory) = shared();
+        let hub = tokio::spawn(runtime.run());
+        let mut epochs = state.service.subscribe_command_epoch();
+        for command in [
+            ControlCommand::StartOutput {
+                device_id: "device".into(),
+            },
+            ControlCommand::AdjustIntensity {
+                device_id: "device".into(),
+                channel: Channel::A,
+                delta: 1,
+            },
+            ControlCommand::SourceAction {
+                source_id: "plugin".into(),
+                params: dg_lab_link_contracts::ActionParams {
+                    action: "play".into(),
+                    ..Default::default()
+                },
+            },
+            ControlCommand::ConnectTransport {
+                transport: dg_lab_link_contracts::transport::TransportKind::WsV4,
+                endpoint: None,
+            },
+        ] {
+            let accepted = state.accept_command(false);
+            let delayed = state.execute_received(command, accepted);
+            // Native plugin core.call stops bypass Shared and enter this service.
+            state
+                .service
+                .execute(ControlCommand::DisconnectConnection {
+                    connection_id: "ws-v4".into(),
+                })
+                .await
+                .unwrap();
+            timeout(Duration::from_secs(1), epochs.changed())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(*epochs.borrow_and_update(), accepted.0 + 1);
+            assert_eq!(state.accept_command(false).0, accepted.0 + 1);
+            assert_eq!(delayed.await.unwrap_err().code, "queue_busy");
+        }
+        assert_eq!(
+            state.service.snapshot().connections[0].state,
+            dg_lab_link_core::hub::ConnectionState::Disconnected
+        );
+        state.service.shutdown().await.unwrap();
+        hub.await.unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn websocket_broadcasts_direct_core_stop_epoch_and_accepts_a_new_operation() {
+        use tokio_tungstenite::tungstenite::Message as ClientMessage;
+        let directory = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut config = LocalConfig::load(directory.path()).unwrap();
+        config.port = listener.local_addr().unwrap().port();
+        let (service, runtime) =
+            ControlService::create(directory.path().to_owned(), "ws://127.0.0.1:1/v4".into())
+                .unwrap();
+        let state = Shared::new(service, config, directory.path().to_owned());
+        let hub = tokio::spawn(runtime.run());
+        let app = Router::new()
+            .route("/control", get(websocket_upgrade))
+            .with_state(state.clone());
+        let terminated = state.terminated.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(terminated.cancelled_owned())
+                .await
+                .unwrap();
+        });
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+            "ws://127.0.0.1:{}/control",
+            state.config.port
+        ))
+        .await
+        .unwrap();
+        socket.send(ClientMessage::Text(json!({"id":1,"operation":{"type":"observe","params":{"id":"epoch-observer","label":"HTTP MCP observer","pid":1}}}).to_string().into())).await.unwrap();
+        let hello: Value =
+            serde_json::from_slice(&socket.next().await.unwrap().unwrap().into_data()).unwrap();
+        let old_epoch = hello["commandEpoch"].as_u64().unwrap();
+        state
+            .service
+            .execute(ControlCommand::DisconnectConnection {
+                connection_id: "ws-v4".into(),
+            })
+            .await
+            .unwrap();
+        let fresh_epoch = state.service.command_epoch();
+        assert_eq!(fresh_epoch, old_epoch + 1);
+        timeout(Duration::from_secs(1), async {
+            loop {
+                let event: Value =
+                    serde_json::from_slice(&socket.next().await.unwrap().unwrap().into_data())
+                        .unwrap();
+                if event["type"] == "command_epoch" && event["epoch"] == fresh_epoch {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("a direct plugin/core stop broadcasts the authoritative epoch");
+        for (id, epoch, expected_error) in
+            [(2, old_epoch, Some("queue_busy")), (3, fresh_epoch, None)]
+        {
+            socket.send(ClientMessage::Text(json!({"id":id,"commandEpoch":epoch,"operation":{"type":"call","params":ControlCommand::ConnectTransport { transport: dg_lab_link_contracts::transport::TransportKind::WsV4, endpoint: None }}}).to_string().into())).await.unwrap();
+            timeout(Duration::from_secs(1), async {
+                loop {
+                    let response: Value =
+                        serde_json::from_slice(&socket.next().await.unwrap().unwrap().into_data())
+                            .unwrap();
+                    if response["type"] != "result" || response["id"] != id {
+                        continue;
+                    }
+                    assert_eq!(response["commandEpoch"], fresh_epoch);
+                    match expected_error {
+                        Some(code) => assert_eq!(response["error"]["code"], code),
+                        None => assert!(response["error"].is_null()),
+                    }
+                    break;
+                }
+            })
+            .await
+            .unwrap();
+        }
+        // The new explicit operation succeeds once; the obsolete request was not replayed.
+        assert_ne!(
+            state.service.snapshot().connections[0].state,
+            dg_lab_link_core::hub::ConnectionState::Disconnected
+        );
+        socket.close(None).await.unwrap();
+        state.service.shutdown().await.unwrap();
+        state.terminated.cancel();
+        hub.await.unwrap();
+        server.await.unwrap();
     }
 
     #[tokio::test]
