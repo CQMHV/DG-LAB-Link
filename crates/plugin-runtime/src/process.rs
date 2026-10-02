@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -422,7 +422,20 @@ impl Session {
         }
     }
 
-    pub fn update_bindings(&self, bindings: Vec<Binding>) {
+    pub fn update_bindings(&self, bindings: Vec<Binding>, invalidated: &HashSet<String>) {
+        if !invalidated.is_empty() {
+            self.inputs
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .retain(|_, input| {
+                    input
+                        .binding_id
+                        .as_ref()
+                        .is_some_and(|id| !invalidated.contains(id))
+                });
+        }
+        // Clear stale pending input before publishing the replacement bindings.
+        // The manager's live lock prevents a new input from interleaving here.
         *self
             .bindings
             .lock()
@@ -537,5 +550,89 @@ impl Drop for WindowsJob {
                 self.0 as windows_sys::Win32::Foundation::HANDLE,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session() -> Session {
+        let (sender, _) = mpsc::channel(64);
+        Session {
+            sender,
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            request_id: Arc::new(AtomicU64::new(0)),
+            cancellation: CancellationToken::new(),
+            bindings: Arc::new(Mutex::new(None)),
+            bindings_ready: Arc::new(Notify::new()),
+            inputs: Arc::new(Mutex::new(HashMap::new())),
+            input_ready: Arc::new(Notify::new()),
+            finished: Arc::new(Notify::new()),
+            exited: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            initialized_config: Value::Null,
+        }
+    }
+
+    fn input(binding_id: Option<&str>) -> InputParams {
+        InputParams {
+            action: "touch".into(),
+            owner: "pointer-owner".into(),
+            sequence: 8,
+            binding_id: binding_id.map(str::to_owned),
+            value: serde_json::json!({"pointers":[{"x":0.5,"y":0.5}]}),
+        }
+    }
+
+    fn bindings() -> Vec<Binding> {
+        vec![
+            Binding {
+                binding_id: "device/a".into(),
+                control_id: "device".into(),
+                channel: Channel::A,
+                generation: 2,
+                config: empty_object(),
+                active: true,
+            },
+            Binding {
+                binding_id: "device/b".into(),
+                control_id: "device".into(),
+                channel: Channel::B,
+                generation: 1,
+                config: empty_object(),
+                active: true,
+            },
+        ]
+    }
+
+    #[test]
+    fn publishing_new_binding_clears_stale_channel_and_instance_input_but_keeps_other_channel() {
+        let session = session();
+        session.input(input(Some("device/a"))).unwrap();
+        session.input(input(Some("device/b"))).unwrap();
+        session.input(input(None)).unwrap();
+        session.update_bindings(bindings(), &HashSet::from(["device/a".into()]));
+        let pending = session.inputs.lock().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending.values().next().unwrap().binding_id.as_deref(),
+            Some("device/b")
+        );
+        assert_eq!(pending.values().next().unwrap().sequence, 8);
+        drop(pending);
+        assert_eq!(
+            session.bindings.lock().unwrap().as_ref().unwrap()[0].generation,
+            2
+        );
+    }
+
+    #[test]
+    fn an_update_without_invalidated_bindings_preserves_all_pending_input() {
+        let session = session();
+        session.input(input(Some("device/a"))).unwrap();
+        session.input(input(Some("device/b"))).unwrap();
+        session.input(input(None)).unwrap();
+        session.update_bindings(bindings(), &HashSet::new());
+        assert_eq!(session.inputs.lock().unwrap().len(), 3);
     }
 }

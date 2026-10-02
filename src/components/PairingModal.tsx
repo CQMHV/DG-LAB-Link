@@ -85,10 +85,6 @@ export const PairingModal = ({
                     "button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])",
                 ) ?? [],
             );
-            const emergencyStop = document.querySelector<HTMLButtonElement>("button[data-emergency-stop]:not([disabled])");
-            if (emergencyStop) {
-                focusable.push(emergencyStop);
-            }
             if (focusable.length === 0) {
                 event.preventDefault();
                 return;

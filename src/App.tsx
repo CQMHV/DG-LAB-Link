@@ -16,7 +16,6 @@ import { WindowChrome } from "./components/WindowChrome";
 import { useHubSnapshot } from "./hooks/useHubSnapshot";
 import {
     adjustIntensity,
-    audioControl,
     connectRelay,
     connectTransport,
     disconnectConnection,
@@ -25,7 +24,6 @@ import {
     scanBluetooth,
     connectBluetooth,
     disconnectBluetooth,
-    emergencyStop,
     setBluetoothConfig,
     deleteCustomWaveform,
     getAppPreferences,
@@ -37,8 +35,6 @@ import {
     setAutoStart,
     setDefaultSource,
     setFixedWaveform,
-    setAudioConfig,
-    setTouchConfig,
     setCloseToTray,
     setDeviceChannelSource,
     setDeviceChannelSourceSync,
@@ -117,11 +113,10 @@ export default function App() {
         windowContext.deviceId,
     );
     const [pendingAction, setPendingAction] = useState<string | null>(null);
+    const stoppingDevices = useRef(new Set<string>());
+    const [stoppingDeviceIds, setStoppingDeviceIds] = useState<string[]>([]);
     const [overviewDeviceId, setOverviewDeviceId] = useState<string | null>(null);
     const [syncBaseDeviceId, setSyncBaseDeviceId] = useState<string | null>(null);
-    const [emergencyPending, setEmergencyPending] = useState(false);
-    const emergencyInFlight = useRef(false);
-    const actionEpoch = useRef(0);
     const [actionError, setActionError] = useState<string | null>(null);
     const [dismissedExternalError, setDismissedExternalError] = useState<
         string | null
@@ -132,21 +127,16 @@ export default function App() {
 
     const runAction = useCallback(
         async (name: string, action: () => Promise<void>) => {
-            if (pendingAction || emergencyInFlight.current) {
+            if (pendingAction) {
                 return;
             }
             setPendingAction(name);
             setActionError(null);
-            const acceptedEpoch = actionEpoch.current;
             try {
                 await action();
-                if (acceptedEpoch === actionEpoch.current) {
-                    await refresh();
-                }
+                await refresh();
             } catch (actionFailure) {
-                if (acceptedEpoch === actionEpoch.current) {
-                    setActionError(getErrorMessage(actionFailure));
-                }
+                setActionError(getErrorMessage(actionFailure));
             } finally {
                 setPendingAction(null);
             }
@@ -174,26 +164,14 @@ export default function App() {
     };
 
     const handleStopOutput = (deviceId: string) => {
-        void runAction(`output-${deviceId}`, () => stopOutput(deviceId));
-    };
-
-    const handleEmergencyStop = async () => {
-        if (emergencyInFlight.current) {
-            return;
-        }
-        emergencyInFlight.current = true;
-        actionEpoch.current += 1;
-        setEmergencyPending(true);
+        if (stoppingDevices.current.has(deviceId)) return;
+        stoppingDevices.current.add(deviceId);
+        setStoppingDeviceIds([...stoppingDevices.current]);
         setActionError(null);
-        try {
-            await emergencyStop();
-            await refresh();
-        } catch (failure) {
-            setActionError(getErrorMessage(failure));
-        } finally {
-            emergencyInFlight.current = false;
-            setEmergencyPending(false);
-        }
+        void stopOutput(deviceId).then(refresh).catch((failure) => setActionError(getErrorMessage(failure))).finally(() => {
+            stoppingDevices.current.delete(deviceId);
+            setStoppingDeviceIds([...stoppingDevices.current]);
+        });
     };
 
     const handleSafetySave = (update: SafetyUpdate) => {
@@ -201,7 +179,7 @@ export default function App() {
     };
 
     const handleCloseToTrayChange = (enabled: boolean) => {
-        if (pendingAction || emergencyInFlight.current) {
+        if (pendingAction) {
             return;
         }
         const previous = appPreferences;
@@ -217,7 +195,7 @@ export default function App() {
     };
 
     const handleAutoStartChange = (enabled: boolean) => {
-        if (pendingAction || emergencyInFlight.current) {
+        if (pendingAction) {
             return;
         }
         const previous = appPreferences;
@@ -233,7 +211,7 @@ export default function App() {
     };
 
     const handleStartMinimizedChange = (enabled: boolean) => {
-        if (pendingAction || emergencyInFlight.current) {
+        if (pendingAction) {
             return;
         }
         const previous = appPreferences;
@@ -468,7 +446,7 @@ export default function App() {
     const safetyDeviceId = !windowContext.detached && page === "devices"
         ? selectedOverviewDeviceId
         : activeDashboardDeviceId;
-    const ordinaryPendingAction = emergencyPending ? "emergency-stop" : pendingAction;
+    const ordinaryPendingAction = pendingAction;
 
     useEffect(() => {
         if (windowContext.detached) {
@@ -676,8 +654,6 @@ export default function App() {
                                 }
                                 onStartOutput={handleStartOutput}
                                 onStopOutput={handleStopOutput}
-                                onAudioControl={(action) => runAction("audio-control", () => audioControl(action))}
-                                onSetAudioConfig={(deviceId, channel, config) => void runAction(`audio-config-${deviceId}-${channel}`, () => setAudioConfig(deviceId, channel, config))}
                                 onSetFixedWaveform={(deviceId, channel, config) =>
                                     void runAction(
                                         `fixed-waveform-${deviceId}-${channel}`,
@@ -696,8 +672,6 @@ export default function App() {
                         )}
                         {!windowContext.detached && page === "sources" && (
                             <SourcesPage
-                                onSetTouchConfig={(config) => void runAction("touch-config", () => setTouchConfig(config))}
-                                onAudioControl={(action) => runAction("audio-control", () => audioControl(action))}
                                 onDeleteCustomWaveform={(presetId) =>
                                     void runAction("delete-custom-waveform", () =>
                                         deleteCustomWaveform(presetId),
@@ -720,6 +694,7 @@ export default function App() {
                         )}
                         {!windowContext.detached && page === "devices" && (
                             <DevicesPage
+                                stoppingDeviceIds={stoppingDeviceIds}
                                 syncBaseDeviceId={syncBaseDeviceId ?? snapshot.devices.find((device) => device.initialization === "ready")?.controlId ?? null}
                                 onSelectSyncBaseDevice={setSyncBaseDeviceId}
                                 selectedDeviceId={selectedOverviewDeviceId}
@@ -800,8 +775,7 @@ export default function App() {
 
             <SafetyActionBar
                 deviceId={safetyDeviceId}
-                emergencyPending={emergencyPending}
-                onEmergencyStop={() => void handleEmergencyStop()}
+                stoppingDeviceIds={stoppingDeviceIds}
                 onStartOutput={handleStartOutput}
                 onStopOutput={handleStopOutput}
                 pendingAction={pendingAction}

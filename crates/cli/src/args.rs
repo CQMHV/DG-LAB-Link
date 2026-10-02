@@ -70,10 +70,15 @@ pub enum Command {
         #[arg(long, allow_hyphen_values = true)]
         delta: i32,
     },
-    /// 设备输出启停或全局紧急停止
+    /// 按设备 controlId 开始或停止输出
     Output {
         #[command(subcommand)]
         command: OutputCommand,
+    },
+    /// 本地输入源插件包管理
+    Plugins {
+        #[command(subcommand)]
+        command: PluginCommand,
     },
     /// 输入源列表、绑定及默认值
     Sources {
@@ -209,12 +214,75 @@ pub enum OutputCommand {
         #[arg(long)]
         device: String,
     },
-    EmergencyStop,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PluginCommand {
+    List,
+    Install {
+        path: PathBuf,
+    },
+    Update {
+        path: PathBuf,
+    },
+    Uninstall {
+        plugin: String,
+        #[arg(long)]
+        delete_data: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
 pub enum SourceCommand {
     List,
+    Create {
+        plugin: String,
+        #[arg(long)]
+        name: String,
+    },
+    Delete {
+        source: String,
+        #[arg(long)]
+        delete_data: bool,
+    },
+    Enable {
+        source: String,
+        #[arg(value_enum)]
+        enabled: Toggle,
+    },
+    Start {
+        source: String,
+    },
+    Stop {
+        source: String,
+    },
+    Config {
+        source: String,
+        #[arg(long)]
+        binding: Option<String>,
+        #[command(flatten)]
+        input: JsonInput,
+    },
+    Ui {
+        source: String,
+        #[arg(long)]
+        binding: Option<String>,
+        #[arg(long)]
+        control: bool,
+    },
+    Action {
+        source: String,
+        action: String,
+        #[arg(long)]
+        binding: Option<String>,
+        #[command(flatten)]
+        input: JsonInput,
+    },
+    Input {
+        source: String,
+        #[command(flatten)]
+        input: JsonInput,
+    },
     Bind {
         #[arg(long)]
         device: String,

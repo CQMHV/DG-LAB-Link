@@ -2,7 +2,6 @@ use std::fmt;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -232,18 +231,6 @@ impl WaveChunk {
     pub fn duration(&self) -> Duration {
         WaveFrame::DURATION.saturating_mul(self.frames.len() as u32)
     }
-}
-
-/// 可持久化的输入源实例定义。每种 factory 自行解释并校验 `config`。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct SourceSpec {
-    pub id: SourceId,
-    pub name: String,
-    pub kind: String,
-    pub enabled: bool,
-    #[serde(default)]
-    pub config: Value,
 }
 
 #[cfg(test)]

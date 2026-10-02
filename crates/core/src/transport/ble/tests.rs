@@ -255,7 +255,7 @@ async fn normal_waves_never_repeat_relative_delta_and_b1_confirms_only_matching_
 }
 
 #[tokio::test]
-async fn emergency_stop_bypasses_b1_and_stale_wave_queue_and_late_ack() {
+async fn zero_stop_bypasses_b1_and_stale_wave_queue_and_late_ack() {
     let (fake, handle, task, mut receiver) = setup().await;
     fake.clear();
     fake.strength_ack.store(false, Ordering::Release);

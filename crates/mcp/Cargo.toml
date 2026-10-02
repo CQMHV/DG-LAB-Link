@@ -20,6 +20,7 @@ tokio-util = { workspace = true, features = ["codec", "rt"] }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation"] }
 
 [dev-dependencies]
+dg-lab-link-plugin-runtime = { path = "../plugin-runtime" }
 tempfile = "3.27"
 reqwest = { version = "0.13.5", default-features = false, features = ["json"] }
 tokio-tungstenite.workspace = true

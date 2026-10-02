@@ -1258,7 +1258,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn emergency_stop_cancels_a_waiting_step_without_waiting_for_feedback() {
+    async fn zero_stop_cancels_a_waiting_step_without_waiting_for_feedback() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (first_step, first_seen) = oneshot::channel();
@@ -1434,7 +1434,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn emergency_stop_precedes_a_full_ordinary_wave_queue() {
+    async fn zero_stop_precedes_a_full_ordinary_wave_queue() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {

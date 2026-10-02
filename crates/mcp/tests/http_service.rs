@@ -1,4 +1,6 @@
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use dg_lab_link_core::hub::{ConnectionState, HubSnapshot};
@@ -126,6 +128,7 @@ async fn mcp_negotiates_and_uses_the_same_service_and_error_codes() {
     let tools = listed["result"]["tools"].as_array().unwrap();
     assert_eq!(tools.len(), ControlCommand::descriptors().len());
     assert!(!tools.iter().any(|tool| tool["name"] == "set_close_to_tray"));
+    assert!(!tools.iter().any(|tool| tool["name"] == "emergency_stop"));
     let adjust = tools
         .iter()
         .find(|tool| tool["name"] == "adjust_intensity")
@@ -170,15 +173,19 @@ async fn mcp_negotiates_and_uses_the_same_service_and_error_codes() {
         .await;
     assert_eq!(
         resources["result"]["resources"].as_array().unwrap().len(),
-        6
+        7 + snapshot.sources.len()
     );
     let status = core.mcp(json!({"jsonrpc": "2.0", "id": 6, "method": "resources/read", "params": {"uri": "dglab://status"}})).await;
     let resource_snapshot: HubSnapshot =
         serde_json::from_str(status["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
-    assert_eq!(resource_snapshot, snapshot);
+    assert!(resource_snapshot.revision >= snapshot.revision);
+    let mut expected_snapshot = snapshot.clone();
+    expected_snapshot.revision = resource_snapshot.revision;
+    assert_eq!(resource_snapshot, expected_snapshot);
     for (id, uri, expected) in [
         (7, "dglab://connections", json!(snapshot.connections)),
         (8, "dglab://bluetooth", json!(snapshot.bluetooth)),
+        (9, "dglab://plugins", json!(snapshot.plugins)),
     ] {
         assert!(
             resources["result"]["resources"]
@@ -195,6 +202,16 @@ async fn mcp_negotiates_and_uses_the_same_service_and_error_codes() {
                 .unwrap();
         assert_eq!(actual, expected);
         assert!(actual.is_array());
+    }
+    for source in &snapshot.sources {
+        let uri = format!("dglab://sources/{}", source.id);
+        let result = core
+            .mcp(json!({"jsonrpc":"2.0","id":10,"method":"resources/read","params":{"uri":uri}}))
+            .await;
+        let actual: Value =
+            serde_json::from_str(result["result"]["contents"][0]["text"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(actual, json!(source));
     }
     assert_eq!(
         gui.runtime_info().await.unwrap().holder_count,
@@ -269,7 +286,7 @@ async fn silent_tcp_connections_cannot_monopolize_all_capacity() {
         futures_util::future::join_all((0..128).map(|_| tokio::net::TcpStream::connect(&address)))
             .await;
     assert!(connections.iter().all(Result::is_ok));
-    timeout(Duration::from_secs(8), core.mcp(json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {"name": "emergency_stop", "arguments": {}}}))).await.unwrap();
+    timeout(Duration::from_secs(8), core.mcp(json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {"name": "disconnect_relay", "arguments": {}}}))).await.unwrap();
     assert_eq!(holder.runtime_info().await.unwrap().holder_count, 1);
     drop(connections);
     holder.release().await.unwrap();
@@ -282,6 +299,8 @@ async fn simulated_relay_is_one_shared_controller_for_gui_cli_and_mcp() {
         .await
         .unwrap();
     let endpoint = format!("ws://{}/v4", listener.local_addr().unwrap());
+    let draining = Arc::new(AtomicBool::new(false));
+    let relay_draining = draining.clone();
     let relay = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
@@ -307,8 +326,20 @@ async fn simulated_relay_is_one_shared_controller_for_gui_cli_and_mcp() {
         let mut cleared = false;
         let mut pulse_seen = false;
         let mut zeroed = std::collections::BTreeSet::new();
-        while let Some(Ok(message)) = socket.next().await {
+        let mut reply_errors = Vec::new();
+        let mut read_error = None;
+        let mut peer_closed = false;
+        let mut operation_order = Vec::new();
+        while let Some(incoming) = socket.next().await {
+            let message = match incoming {
+                Ok(message) => message,
+                Err(error) => {
+                    read_error = Some(error.to_string());
+                    break;
+                }
+            };
             if matches!(message, Message::Close(_)) {
+                peer_closed = true;
                 break;
             }
             let Message::Text(text) = message else {
@@ -329,7 +360,10 @@ async fn simulated_relay_is_one_shared_controller_for_gui_cli_and_mcp() {
                 assert_eq!(frame["clientId"], "app-1");
                 assert_eq!(operation["s"], "slot-a");
                 match operation["t"].as_u64().unwrap() {
-                    0 => pulse_seen = true,
+                    0 => {
+                        pulse_seen = true;
+                        operation_order.push("wave");
+                    }
                     3 => {
                         assert_eq!(operation["c"], 0);
                         let delta = operation["v"].as_i64().unwrap();
@@ -341,6 +375,7 @@ async fn simulated_relay_is_one_shared_controller_for_gui_cli_and_mcp() {
                         assert_eq!(operation["v"], 0);
                         let channel = operation["c"].as_u64().unwrap();
                         zeroed.insert(channel);
+                        operation_order.push(if channel == 0 { "zero-a" } else { "zero-b" });
                         if channel == 0 {
                             intensity_a = 0;
                         } else {
@@ -352,14 +387,16 @@ async fn simulated_relay_is_one_shared_controller_for_gui_cli_and_mcp() {
             }
             if request["m"] == "device.op.clear" {
                 cleared = true;
+                operation_order.push("clear");
             }
-            // Shutdown waits for the safety frames to reach the socket, not
-            // for an application RPC reply. The controller may already have
-            // sent Close while this fake application consumes those frames.
+            // Shutdown promises a wire write, not an APP RPC acknowledgment.
+            // After the last holder is released, drain inbound cleanup frames:
+            // a late RPC write to the closing TCP socket can abort that socket
+            // on Windows and discard unread clear/zero frames in this mock.
             if !(request["m"] == "device.op" && operation["t"] == 7)
                 && request["m"] != "device.op.clear"
-            {
-                let _ = socket
+                && !relay_draining.load(Ordering::Acquire)
+                && let Err(error) = socket
                     .send(Message::Text(
                         json!({"type": "message", "clientId": "app-1", "data": {
                             "t": "resp", "reqId": request["reqId"], "result": result
@@ -367,9 +404,14 @@ async fn simulated_relay_is_one_shared_controller_for_gui_cli_and_mcp() {
                         .to_string()
                         .into(),
                     ))
-                    .await;
+                    .await
+            {
+                reply_errors.push(error.to_string());
             }
-            if request["m"] == "device.op" && operation["t"] == 3 {
+            if request["m"] == "device.op"
+                && operation["t"] == 3
+                && !relay_draining.load(Ordering::Acquire)
+            {
                 socket.send(Message::Text(json!({"type": "message", "clientId": "app-1", "data": {
                     "t": "ev", "ev": "slots.patch", "slots": [{"slotId": "slot-a", "props": {"intensityA": intensity_a, "intensityB": intensity_b}}]
                 }}).to_string().into())).await.unwrap();
@@ -377,8 +419,27 @@ async fn simulated_relay_is_one_shared_controller_for_gui_cli_and_mcp() {
         }
         assert_eq!(deltas, vec![1, 2, 3]);
         assert!(pulse_seen, "the shared session streamed output");
-        assert!(cleared);
-        assert_eq!(zeroed, std::collections::BTreeSet::from([0, 1]));
+        assert!(
+            cleared,
+            "read error: {read_error:?}; RPC reply errors: {reply_errors:?}"
+        );
+        assert_eq!(
+            zeroed,
+            std::collections::BTreeSet::from([0, 1]),
+            "read error: {read_error:?}; RPC reply errors: {reply_errors:?}"
+        );
+        assert!(
+            peer_closed,
+            "controller sent a WebSocket Close: {read_error:?}"
+        );
+        assert!(
+            reply_errors.is_empty(),
+            "normal RPC reply errors: {reply_errors:?}"
+        );
+        assert_eq!(
+            operation_order[operation_order.len() - 3..],
+            ["clear", "zero-a", "zero-b"]
+        );
     });
     let (core, gui) = Core::start(Some(endpoint)).await;
     let cli = Client::connect(&core.directory, "cli", None).await.unwrap();
@@ -442,10 +503,37 @@ async fn simulated_relay_is_one_shared_controller_for_gui_cli_and_mcp() {
         gui.snapshot().connection.state,
         ConnectionState::Disconnected
     );
+    #[cfg(windows)]
+    let audio_source = paused_audio_plugin(&gui).await;
+    cli.call(ControlCommand::StartOutput {
+        device_id: id.clone(),
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let stopped = core.mcp(json!({"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"stop_output","arguments":{"deviceId":id}}})).await;
+    assert_eq!(stopped["result"]["isError"], false, "{stopped}");
+    let state = gui.call(ControlCommand::GetHubSnapshot).await.unwrap();
+    assert_eq!(state["devices"][0]["outputActive"], false);
+    assert_eq!(state["devices"][0]["intensityA"], 11);
+    assert_eq!(state["devices"][0]["intensityB"], 6);
+    #[cfg(windows)]
+    {
+        let audio = state["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|source| source["id"] == audio_source)
+            .unwrap();
+        assert_eq!(audio["runtimeStatus"], "running");
+        assert_eq!(
+            audio["state"]["audio"]["state"], "paused",
+            "ordinary device stop does not stop or reset the audio plugin"
+        );
+    }
     cli.call(ControlCommand::StartOutput { device_id: id })
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
     cli.release().await.unwrap();
     let running: HubSnapshot =
         serde_json::from_value(gui.call(ControlCommand::GetHubSnapshot).await.unwrap()).unwrap();
@@ -453,12 +541,93 @@ async fn simulated_relay_is_one_shared_controller_for_gui_cli_and_mcp() {
         running.devices[0].output_active,
         "releasing one holder preserves another holder's session"
     );
+    draining.store(true, Ordering::Release);
     gui.release().await.unwrap();
     core.finish().await;
     timeout(Duration::from_secs(2), relay)
         .await
         .unwrap()
         .unwrap();
+}
+
+#[cfg(windows)]
+async fn paused_audio_plugin(client: &Client) -> String {
+    let temporary = tempfile::tempdir().unwrap();
+    let payload = temporary.path().join("payload");
+    std::fs::create_dir(&payload).unwrap();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_dg-lab-link-mcp"))
+        .with_file_name("dg-lab-link-audio.exe");
+    assert!(
+        executable.is_file(),
+        "build the native audio plugin before integration tests"
+    );
+    std::fs::copy(executable, payload.join("audio.exe")).unwrap();
+    std::fs::write(payload.join("plugin.json"),json!({"id":"test.dglab.audio","version":"1.0.0","protocolVersion":1,"name":"音频测试","publisher":"Integration test","license":"AGPL-3.0-only","executable":"audio.exe"}).to_string()).unwrap();
+    let package = temporary.path().join("audio.dglabplugin");
+    let packaging_payload = payload.clone();
+    let packaging_output = package.clone();
+    tokio::task::spawn_blocking(move || {
+        dg_lab_link_plugin_runtime::package::pack_directory(&packaging_payload, &packaging_output)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    client
+        .call(ControlCommand::InstallPlugin {
+            path: package.to_string_lossy().into_owned(),
+        })
+        .await
+        .unwrap();
+    let source = client
+        .call(ControlCommand::CreateSource {
+            plugin_id: "test.dglab.audio".to_owned(),
+            name: "普通停止保留音频状态".to_owned(),
+        })
+        .await
+        .unwrap();
+    let source_id = source["id"].as_str().unwrap().to_owned();
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../builtin-plugins/src/sources/audio/testdata/video-aac.mp4");
+    client.call(ControlCommand::from_call("source_action",json!({"sourceId":source_id,"params":{"action":"audio_control","value":{"action":{"type":"loadFile","path":path.to_string_lossy()}}}})).unwrap()).await.unwrap();
+    timeout(Duration::from_secs(3), async {
+        loop {
+            let snapshot = client.call(ControlCommand::GetHubSnapshot).await.unwrap();
+            if snapshot["sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|source| {
+                    source["id"] == source_id
+                        && source["state"]["audio"]["fileName"] == "video-aac.mp4"
+                })
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    client.call(ControlCommand::from_call("source_action",json!({"sourceId":source_id,"params":{"action":"audio_control","value":{"action":{"type":"pause"}}}})).unwrap()).await.unwrap();
+    timeout(Duration::from_secs(3), async {
+        loop {
+            let snapshot = client.call(ControlCommand::GetHubSnapshot).await.unwrap();
+            if snapshot["sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|source| {
+                    source["id"] == source_id && source["state"]["audio"]["state"] == "paused"
+                })
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    source_id
 }
 
 async fn wait_intensity(client: &Client, expected: u16) {

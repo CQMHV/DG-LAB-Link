@@ -90,9 +90,9 @@ pub(crate) fn zero_intensity_request(slot_id: &str, channel: Channel) -> Value {
     })
 }
 
-pub(crate) fn stop_operation_requests(slot_id: &str, emergency: bool) -> Vec<Value> {
+pub(crate) fn stop_operation_requests(slot_id: &str, zero: bool) -> Vec<Value> {
     let mut requests = vec![clear_request(slot_id)];
-    if emergency {
+    if zero {
         requests.extend(Channel::ALL.map(|channel| zero_intensity_request(slot_id, channel)));
     }
     requests

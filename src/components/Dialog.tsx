@@ -48,7 +48,6 @@ export const Dialog = ({
 
             const focusable = [
                 ...Array.from(dialogRef.current?.querySelectorAll<HTMLElement>(focusableSelector) ?? []),
-                ...Array.from(document.querySelectorAll<HTMLButtonElement>("button[data-emergency-stop]:not([disabled])")),
             ].filter((element, index, elements) =>
                 element.tabIndex >= 0 &&
                 element.getClientRects().length > 0 &&

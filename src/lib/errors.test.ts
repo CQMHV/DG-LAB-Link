@@ -13,8 +13,8 @@ describe("getErrorMessage", () => {
     });
 
     it("对未知拒绝值使用指定回退文案", () => {
-        expect(getErrorMessage({ unexpected: true }, "紧急停止失败")).toBe(
-            "紧急停止失败",
+        expect(getErrorMessage({ unexpected: true }, "停止输出失败")).toBe(
+            "停止输出失败",
         );
     });
 });

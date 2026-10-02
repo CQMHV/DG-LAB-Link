@@ -18,13 +18,15 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Semaphore, mpsc, watch};
-use tokio::time::{Instant, timeout};
+use tokio::time::{Instant, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::config::LocalConfig;
 use crate::wire::{HolderInfo, Operation, Request, Response, RuntimeInfo};
 use crate::{HEARTBEAT_TIMEOUT, MAX_REQUEST_BYTES, REQUEST_TIMEOUT, SOCKET_WRITE_TIMEOUT};
+
+const MAX_WEBSOCKET_CLIENTS: u32 = 32;
 
 struct Holder {
     info: HolderInfo,
@@ -62,6 +64,7 @@ pub(crate) fn may_resume_output(command: &ControlCommand) -> bool {
         ControlCommand::StartOutput { .. }
             | ControlCommand::AdjustIntensity { .. }
             | ControlCommand::UpdateTouchInput { .. }
+            | ControlCommand::SourceInput { .. }
             | ControlCommand::AudioControl { .. }
             | ControlCommand::SetSyncAllDevices { .. }
             | ControlCommand::ConnectRelay
@@ -89,7 +92,7 @@ impl Shared {
             terminated: CancellationToken::new(),
             normal_requests: Arc::new(Semaphore::new(32)),
             safety_requests: Arc::new(Semaphore::new(16)),
-            websocket_clients: Arc::new(Semaphore::new(32)),
+            websocket_clients: Arc::new(Semaphore::new(MAX_WEBSOCKET_CLIENTS as usize)),
             stop_epoch: AtomicU64::new(0),
             epoch_updates: watch::channel(0).0,
             enqueue_gate: std::sync::Mutex::new(()),
@@ -217,7 +220,7 @@ impl Shared {
         Ok(())
     }
 
-    async fn release_holder(&self, id: &str, cancel_socket: bool) -> Result<(), ControlError> {
+    async fn remove_holder(&self, id: &str, cancel_socket: bool) -> Result<bool, ControlError> {
         let mut holders = self.holders.lock().await;
         let holder = holders
             .entries
@@ -226,8 +229,15 @@ impl Shared {
         if cancel_socket {
             holder.cancelled.cancel();
         }
-        if holders.entries.is_empty() && holders.ever_held {
+        let last_holder = holders.entries.is_empty() && holders.ever_held;
+        if last_holder {
             self.stopping.store(true, Ordering::Release);
+        }
+        Ok(last_holder)
+    }
+
+    async fn release_holder(&self, id: &str, cancel_socket: bool) -> Result<(), ControlError> {
+        if self.remove_holder(id, cancel_socket).await? {
             self.shutdown_requested.cancel();
         }
         Ok(())
@@ -282,6 +292,11 @@ pub async fn run_core(
     let (service, runtime) = ControlService::create(directory.clone(), endpoint)?;
     let state = Shared::new(service, config, directory);
     let mut hub_task = tokio::spawn(runtime.run());
+    if let Err(error) = state.service.initialize_plugins().await {
+        let _ = state.service.shutdown().await;
+        hub_task.abort();
+        return Err(error);
+    }
     let app = Router::new()
         .route("/control", get(websocket_upgrade))
         .layer(middleware::from_fn_with_state(state.clone(), authenticate))
@@ -311,21 +326,34 @@ pub async fn run_core(
         _ = &mut hub_task => { hub_finished = true; },
     }
     state.stopping.store(true, Ordering::Release);
-    let cleanup = timeout(Duration::from_secs(10), state.service.shutdown()).await;
+    // Cleanup and interface teardown share one deadline, including slow peers.
+    let shutdown_deadline = Instant::now() + Duration::from_secs(10);
+    let cleanup = timeout_at(shutdown_deadline, state.service.shutdown()).await;
     state.terminated.cancel();
     idle_task.abort();
-    if !hub_finished
-        && timeout(Duration::from_secs(1), &mut hub_task)
-            .await
-            .is_err()
-    {
+    let close_deadline = shutdown_deadline.min(Instant::now() + SOCKET_WRITE_TIMEOUT);
+    let finish = async {
+        let _ = tokio::join!(
+            async {
+                if !hub_finished {
+                    let _ = (&mut hub_task).await;
+                }
+            },
+            async {
+                if server_failed.is_none() {
+                    let _ = (&mut server_task).await;
+                }
+            },
+            // Axum upgraded sockets have independent tasks. Wait for their
+            // permits too, so a fast core exit cannot drop a queued release ACK.
+            state
+                .websocket_clients
+                .clone()
+                .acquire_many_owned(MAX_WEBSOCKET_CLIENTS)
+        );
+    };
+    if timeout_at(close_deadline, finish).await.is_err() {
         hub_task.abort();
-    }
-    if server_failed.is_none()
-        && timeout(Duration::from_secs(1), &mut server_task)
-            .await
-            .is_err()
-    {
         server_task.abort();
     }
     drop(lock);
@@ -491,7 +519,7 @@ async fn websocket(mut socket: WebSocket, state: Arc<Shared>) {
     let (safety_responses, safety_rx) = mpsc::channel::<Outgoing>(8);
     let write_cancelled = cancelled.clone();
     let write_state = state.clone();
-    let write_task = tokio::spawn(async move {
+    let mut write_task = tokio::spawn(async move {
         write_socket(writer, response_rx, safety_rx, write_state, write_cancelled).await
     });
     let per_client = Arc::new(Semaphore::new(8));
@@ -541,30 +569,32 @@ async fn websocket(mut socket: WebSocket, state: Arc<Shared>) {
             }
             Operation::Release => {
                 let result = if holding {
-                    state
-                        .release_holder(&holder.id, false)
-                        .await
-                        .map(|_| Value::Null)
+                    state.remove_holder(&holder.id, false).await
                 } else {
-                    Ok(Value::Null)
+                    Ok(false)
                 };
-                if safety_responses
-                    .try_send((Response::result(id, result), true))
-                    .is_err()
-                {
-                    break;
+                let last_holder = result.as_ref().is_ok_and(|last| *last);
+                // Queue the acknowledgement before waking fast idle cleanup.
+                // Safety responses are drained before termination/cancellation.
+                let _ = safety_responses
+                    .try_send((Response::result(id, result.map(|_| Value::Null)), true));
+                if last_holder {
+                    state.shutdown_requested.cancel();
                 }
+                break;
             }
             Operation::ReleaseHolder { id: target } => {
                 let self_release = holding && target == holder.id;
-                let result = state
-                    .release_holder(&target, !self_release)
-                    .await
-                    .map(|_| Value::Null);
-                if safety_responses
-                    .try_send((Response::result(id, result), self_release))
-                    .is_err()
-                {
+                let result = state.remove_holder(&target, !self_release).await;
+                let last_holder = result.as_ref().is_ok_and(|last| *last);
+                let queued = safety_responses.try_send((
+                    Response::result(id, result.map(|_| Value::Null)),
+                    self_release,
+                ));
+                if last_holder {
+                    state.shutdown_requested.cancel();
+                }
+                if self_release || queued.is_err() {
                     break;
                 }
             }
@@ -674,7 +704,27 @@ async fn websocket(mut socket: WebSocket, state: Arc<Shared>) {
     if holding {
         let _ = state.release_holder(&holder.id, false).await;
     }
-    let _ = timeout(Duration::from_secs(1), write_task).await;
+    // Sending Close does not finish the WebSocket handshake. Retain and drain
+    // the reader while the writer sends queued ACKs and Close; none of these
+    // trailing messages may enter the request dispatcher. Dropping unread TCP
+    // data here can turn a successful short CLI call into a Windows TCP reset.
+    let drain = async {
+        while let Some(Ok(message)) = reader.next().await {
+            if matches!(message, Message::Close(_)) {
+                break;
+            }
+        }
+    };
+    if timeout(SOCKET_WRITE_TIMEOUT, async {
+        let _ = tokio::join!(&mut write_task, drain);
+    })
+    .await
+    .is_err()
+        && !write_task.is_finished()
+    {
+        write_task.abort();
+        let _ = write_task.await;
+    }
 }
 
 async fn write_socket(
@@ -911,7 +961,10 @@ mod tests {
             let epoch = state.accept_command(false);
             // A received WS request can remain unpolled in its spawned task.
             let delayed_command = state.execute_received(command, epoch);
-            state.execute(ControlCommand::EmergencyStop).await.unwrap();
+            state
+                .execute(ControlCommand::DisconnectRelay)
+                .await
+                .unwrap();
             assert_eq!(delayed_command.await.unwrap_err().code, "queue_busy");
         }
         assert_eq!(
@@ -944,7 +997,7 @@ mod tests {
         );
         timeout(
             Duration::from_secs(1),
-            state.execute(ControlCommand::EmergencyStop),
+            state.execute(ControlCommand::DisconnectRelay),
         )
         .await
         .unwrap()

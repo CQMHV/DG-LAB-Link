@@ -19,7 +19,13 @@ import type {
     TouchConfig,
     TouchInput,
     WaveformConfig,
+    SourceActionParams,
+    SourceInputParams,
+    SourceSnapshot,
 } from "./contracts";
+import { createPluginDemoDocument } from "./pluginDemo";
+import { OFFICIAL_WAVEFORMS } from "./waveforms";
+import type { PluginCommand } from "./plugins";
 import { defaultAudioConfig, defaultTouchConfig } from "./inputModes";
 import { isTauriRuntime } from "./tauri";
 import { defaultBleParameters, defaultV4Capabilities } from "./transports";
@@ -58,6 +64,7 @@ const createDefaultMockSnapshot = (): HubSnapshot => {
         capabilities: defaultV4Capabilities(),
         bleParameters: null,
         configurationStatus: null,
+        bindingIdA: null, bindingIdB: null,
         id: "coyote-030-demo",
         name: "郊狼 3.0",
         type: "COYOTE_030",
@@ -146,9 +153,10 @@ const createDefaultMockSnapshot = (): HubSnapshot => {
             selectedPresetId: null,
             selectedPresetName: null,
         },
-        { id: "source-touch", kind: "builtin.touch", name: "触控模式", enabled: true, assignedChannelCount: 0, selectedPresetId: null, selectedPresetName: null },
-        { id: "source-audio", kind: "builtin.audio", name: "音频模式", enabled: true, assignedChannelCount: 0, selectedPresetId: null, selectedPresetName: null },
+        { id: "source-touch", kind: "plugin", pluginId: "cn.dglab.link.touch", runtimeStatus: "stopped", config: {}, state: {}, name: "触控模式", enabled: true, assignedChannelCount: 0, selectedPresetId: null, selectedPresetName: null },
+        { id: "source-audio", kind: "plugin", pluginId: "cn.dglab.link.audio", runtimeStatus: "stopped", config: {}, state: {}, name: "音频模式", enabled: true, assignedChannelCount: 0, selectedPresetId: null, selectedPresetName: null },
     ],
+    plugins: [{ manifest: { id: "cn.dglab.link.touch", version: "0.1.0", protocolVersion: 1, name: "触控输入", publisher: "DG-LAB Link", license: "AGPL-3.0-only", executable: "touch.exe" }, digest: "demo-touch", preinstalled: true }, { manifest: { id: "cn.dglab.link.audio", version: "0.1.0", protocolVersion: 1, name: "音频输入", publisher: "DG-LAB Link", license: "AGPL-3.0-only", executable: "audio.exe" }, digest: "demo-audio", preinstalled: true }],
     customWaveforms: [
         {
             id: "custom-demo",
@@ -242,6 +250,15 @@ const updateMockSnapshot = (
     const next = cloneSnapshot(mockSnapshot);
     next.revision += 1;
     updater(next);
+    for (const device of next.devices) {
+        device.bindingIdA = next.sources.find((source) => source.id === device.sourceIdA)?.pluginId ? `${device.controlId}/a` : null;
+        device.bindingIdB = next.sources.find((source) => source.id === device.sourceIdB)?.pluginId ? `${device.controlId}/b` : null;
+    }
+    for (const source of next.sources) {
+        if (source.pluginId === "cn.dglab.link.touch") { source.config = structuredClone(next.inputModes.touchConfig) as unknown as Record<string, unknown>; source.state = { touchConfig: next.inputModes.touchConfig }; }
+        if (source.pluginId === "cn.dglab.link.audio") source.state = { audio: next.inputModes.audio };
+    }
+    refreshMockSourceCounts(next);
     mockSnapshot = next;
     emitMockSnapshot();
     return cloneSnapshot(next);
@@ -646,7 +663,7 @@ export const startOutput = async (deviceId: string): Promise<void> => {
     const acceptedGeneration = mockSafetyGeneration;
     await mockStartOutputCompletion;
     if (acceptedGeneration !== mockSafetyGeneration) {
-        throw new Error("输出请求已被紧急停止取消");
+        throw new Error("输出请求已被停止取消");
     }
     updateMockSnapshot((snapshot) => {
         const device = snapshot.devices.find(
@@ -688,6 +705,7 @@ export const stopOutput = async (deviceId: string): Promise<void> => {
         return;
     }
 
+    mockSafetyGeneration += 1;
     updateMockSnapshot((snapshot) => {
         const device = snapshot.devices.find(
             (candidate) => candidate.controlId === deviceId,
@@ -710,37 +728,6 @@ export const stopOutput = async (deviceId: string): Promise<void> => {
             snapshot.channels.b.status = device.channelBStatus;
         }
         prependMockLog(snapshot, "info", `${device.name} 的波形输出已停止`);
-    });
-};
-
-export const emergencyStop = async (): Promise<void> => {
-    if (isTauriRuntime()) {
-        await invoke("emergency_stop");
-        return;
-    }
-
-    mockSafetyGeneration += 1;
-    mockTouchInput = null;
-    updateMockSnapshot((snapshot) => {
-        snapshot.output.state = "stopped";
-        snapshot.outputDeviceCount = 0;
-        snapshot.devices.forEach((device) => {
-            device.outputActive = false;
-            device.intensityA = 0;
-            device.intensityB = 0;
-            device.channelAStatus =
-                device.channelAStatus === "active" ? "ready" : device.channelAStatus;
-            device.channelBStatus =
-                device.channelBStatus === "active" ? "ready" : device.channelBStatus;
-        });
-        snapshot.channels.a.status = snapshot.device ? "ready" : "disconnected";
-        snapshot.channels.b.status = snapshot.device ? "ready" : "disconnected";
-        snapshot.inputModes.audio.state = "idle";
-        snapshot.inputModes.audio.levelLeft = 0;
-        snapshot.inputModes.audio.levelRight = 0;
-        refreshMockDeviceSelection(snapshot);
-        snapshot.output.state = "stopped";
-        prependMockLog(snapshot, "warning", "已执行紧急停止并清空输出队列");
     });
 };
 
@@ -1223,4 +1210,76 @@ export const __setMockStartOutputCompletion = (
     completion: Promise<void> | null,
 ): void => {
     mockStartOutputCompletion = completion;
+};
+
+export const pluginDemoCall = async (command: PluginCommand): Promise<unknown> => {
+    const params = command.params ?? {};
+    const sourceId = String(params.sourceId ?? "");
+    const source = mockSnapshot.sources.find((item) => item.id === sourceId);
+    const requireSource = (): SourceSnapshot => {
+        if (!source?.pluginId) throw new Error("插件输入源不存在");
+        return source;
+    };
+    switch (command.command) {
+        case "list_plugins": return structuredClone(mockSnapshot.plugins ?? []);
+        case "list_waveforms": return { official: OFFICIAL_WAVEFORMS, custom: [...mockWaveformConfigs.values()] };
+        case "get_source_ui": {
+            const item = requireSource();
+            if (!item.enabled) throw new Error("输入源实例已停用");
+            if (item.runtimeStatus === "faulted") throw new Error("插件进程运行异常，请显式重试");
+            if (item.runtimeStatus === "stopped") updateMockSnapshot((snapshot) => { snapshot.sources.find((candidate) => candidate.id === sourceId)!.runtimeStatus = "running"; });
+            return createPluginDemoDocument(mockSnapshot, mockSnapshot.sources.find((candidate) => candidate.id === sourceId)!, (params.params ?? {}) as { bindingId?: string; surface?: string });
+        }
+        case "install_plugin": case "update_plugin": return updateMockSnapshot((snapshot) => {
+            const id = "example.sample";
+            const existing = snapshot.plugins?.find((item) => item.manifest.id === id);
+            if (existing) { if (command.command === "install_plugin") throw new Error("插件已安装，请使用更新"); existing.manifest.version = "0.2.0"; }
+            else { if (command.command === "update_plugin") throw new Error("插件尚未安装"); snapshot.plugins ??= []; snapshot.plugins.push({ manifest: { id, name: "示例插件", version: "0.1.0", protocolVersion: 1, publisher: "示例开发者", license: "MIT", executable: "sample.exe" }, digest: "demo-sample", preinstalled: false }); }
+        }).plugins;
+        case "uninstall_plugin": return updateMockSnapshot((snapshot) => {
+            const ids = snapshot.sources.filter((item) => item.pluginId === params.pluginId).map((item) => item.id);
+            snapshot.plugins = snapshot.plugins?.filter((item) => item.manifest.id !== params.pluginId);
+            snapshot.sources = snapshot.sources.filter((item) => !ids.includes(item.id));
+            for (const device of snapshot.devices) { if (ids.includes(device.sourceIdA ?? "")) device.sourceIdA = null; if (ids.includes(device.sourceIdB ?? "")) device.sourceIdB = null; if (!device.sourceIdA || !device.sourceIdB) device.outputActive = false; }
+            refreshMockDeviceSelection(snapshot);
+        });
+        case "create_source": {
+            const plugin = mockSnapshot.plugins?.find((item) => item.manifest.id === params.pluginId);
+            if (!plugin) throw new Error("插件尚未安装");
+            const id = `source-${globalThis.crypto?.randomUUID?.() ?? Date.now()}`;
+            updateMockSnapshot((snapshot) => { snapshot.sources.push({ id, kind: "plugin", pluginId: plugin.manifest.id, name: String(params.name), enabled: true, assignedChannelCount: 0, selectedPresetId: null, selectedPresetName: null, runtimeStatus: "stopped", config: {}, state: {} }); });
+            return id;
+        }
+        case "delete_source": requireSource(); return updateMockSnapshot((snapshot) => { snapshot.sources = snapshot.sources.filter((item) => item.id !== sourceId); for (const device of snapshot.devices) { if (device.sourceIdA === sourceId) device.sourceIdA = null; if (device.sourceIdB === sourceId) device.sourceIdB = null; if (!device.sourceIdA || !device.sourceIdB) device.outputActive = false; } refreshMockDeviceSelection(snapshot); });
+        case "set_source_enabled": case "start_source": case "stop_source": requireSource(); return updateMockSnapshot((snapshot) => {
+            const item = snapshot.sources.find((item) => item.id === sourceId)!;
+            if (command.command === "set_source_enabled") { item.enabled = Boolean(params.enabled); item.runtimeStatus = item.enabled ? "stopped" : "disabled"; }
+            else item.runtimeStatus = command.command === "start_source" ? "running" : "stopped";
+        });
+        case "set_source_config": {
+            const item = requireSource();
+            if (item.pluginId === "cn.dglab.link.touch") return setTouchConfig(params.config as unknown as TouchConfig);
+            if (item.pluginId === "cn.dglab.link.audio" && params.bindingId) {
+                const binding = mockSnapshot.devices.flatMap((device) => (["a", "b"] as const).map((channel) => ({ device, channel, id: channel === "a" ? device.bindingIdA : device.bindingIdB }))).find((item) => item.id === params.bindingId);
+                if (!binding) throw new Error("输入源通道绑定已失效");
+                return setAudioConfig(binding.device.controlId, binding.channel, params.config as unknown as AudioChannelConfig);
+            }
+            return updateMockSnapshot((snapshot) => { snapshot.sources.find((item) => item.id === sourceId)!.config = structuredClone(params.config as Record<string, unknown>); });
+        }
+        case "source_action": {
+            const item = requireSource(); const action = params.params as SourceActionParams;
+            if (action.action === "audio_control") return audioControl(action.value as AudioAction);
+            if (action.action === "configure") return pluginDemoCall({ command: "set_source_config", params: { sourceId: item.id, config: action.value, bindingId: action.bindingId } });
+            return {};
+        }
+        case "source_input": {
+            requireSource(); const input = params.params as SourceInputParams;
+            const binding = mockSnapshot.devices.flatMap((device) => (["a", "b"] as const).map((channel) => ({ device, channel, id: channel === "a" ? device.bindingIdA : device.bindingIdB }))).find((item) => item.id === input.bindingId);
+            if (!binding) throw new Error("输入源通道绑定已失效");
+            const pointers = (input.value as { pointers: TouchInput["pointers"] }).pointers.map((pointer) => ({ ...pointer, channel: binding.channel }));
+            const existing = mockTouchInput?.deviceId === binding.device.controlId ? mockTouchInput.pointers.filter((pointer) => pointer.channel !== binding.channel) : [];
+            return updateTouchInput({ deviceId: binding.device.controlId, ownerId: input.owner, sequence: input.sequence, pointers: [...existing, ...pointers] });
+        }
+        default: throw new Error(`演示模式不支持命令：${command.command}`);
+    }
 };

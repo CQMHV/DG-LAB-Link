@@ -391,10 +391,72 @@ fn business_request(command: Command) -> Result<Request, ControlError> {
         Command::Output { command } => match command {
             OutputCommand::Start { device } => C::StartOutput { device_id: device },
             OutputCommand::Stop { device } => C::StopOutput { device_id: device },
-            OutputCommand::EmergencyStop => C::EmergencyStop,
+        },
+        Command::Plugins { command } => match command {
+            PluginCommand::List => C::ListPlugins,
+            PluginCommand::Install { path } => C::InstallPlugin {
+                path: path_text(&path)?,
+            },
+            PluginCommand::Update { path } => C::UpdatePlugin {
+                path: path_text(&path)?,
+            },
+            PluginCommand::Uninstall {
+                plugin,
+                delete_data,
+            } => C::UninstallPlugin {
+                plugin_id: plugin,
+                delete_data,
+            },
         },
         Command::Sources { command } => match command {
             SourceCommand::List => return Ok(Request::SnapshotField("sources")),
+            SourceCommand::Create { plugin, name } => C::CreateSource {
+                plugin_id: plugin,
+                name,
+            },
+            SourceCommand::Delete {
+                source,
+                delete_data,
+            } => C::DeleteSource {
+                source_id: source,
+                delete_data,
+            },
+            SourceCommand::Enable { source, enabled } => C::SetSourceEnabled {
+                source_id: source,
+                enabled: enabled.enabled(),
+            },
+            SourceCommand::Start { source } => C::StartSource { source_id: source },
+            SourceCommand::Stop { source } => C::StopSource { source_id: source },
+            SourceCommand::Config {
+                source,
+                binding,
+                input,
+            } => C::SetSourceConfig {
+                source_id: source,
+                config: read_json(input)?,
+                binding_id: binding,
+            },
+            SourceCommand::Ui {
+                source,
+                binding,
+                control,
+            } => C::from_call(
+                "get_source_ui",
+                json!({"sourceId":source,"params":{"bindingId":binding,"surface":if control {"control"} else {"settings"}}}),
+            )?,
+            SourceCommand::Action {
+                source,
+                action,
+                binding,
+                input,
+            } => C::from_call(
+                "source_action",
+                json!({"sourceId":source,"params":{"action":action,"value":read_json(input)?,"bindingId":binding}}),
+            )?,
+            SourceCommand::Input { source, input } => C::from_call(
+                "source_input",
+                json!({"sourceId":source,"params":read_json(input)?}),
+            )?,
             SourceCommand::Bind {
                 device,
                 channel,
@@ -489,6 +551,8 @@ fn business_request(command: Command) -> Result<Request, ControlError> {
         }
         _ => return Err(ControlError::new("invalid_command", "该命令不是业务调用")),
     };
+    let mut command = command;
+    normalize_audio_paths(&mut command)?;
     Ok(Request::Command(command))
 }
 
@@ -517,6 +581,10 @@ fn audio_action(command: AudioCommand) -> Result<AudioAction, ControlError> {
 }
 
 fn normalize_audio_paths(command: &mut ControlCommand) -> Result<(), ControlError> {
+    if let ControlCommand::InstallPlugin { path } | ControlCommand::UpdatePlugin { path } = command
+    {
+        *path = path_text(Path::new(path))?;
+    }
     if let ControlCommand::AudioControl {
         action: AudioAction::LoadFile { path } | AudioAction::SaveRecording { path },
     } = command
@@ -773,6 +841,59 @@ mod tests {
             panic!()
         };
         assert!(Path::new(&path).is_absolute());
+    }
+
+    #[test]
+    fn plugin_commands_normalize_packages_and_keep_explicit_instance_and_binding() {
+        let cli =
+            Cli::try_parse_from(["cli", "plugins", "install", "example.dglabplugin", "--json"])
+                .unwrap();
+        let Request::Command(ControlCommand::InstallPlugin { path }) =
+            business_request(cli.command).unwrap()
+        else {
+            panic!("expected install")
+        };
+        assert!(Path::new(&path).is_absolute());
+        let cli = Cli::try_parse_from([
+            "cli",
+            "sources",
+            "config",
+            "source-123",
+            "--binding",
+            "device/a",
+            "--params",
+            r#"{"gain":2}"#,
+        ])
+        .unwrap();
+        let Request::Command(ControlCommand::SetSourceConfig {
+            source_id,
+            binding_id,
+            config,
+        }) = business_request(cli.command).unwrap()
+        else {
+            panic!("expected config")
+        };
+        assert_eq!(source_id, "source-123");
+        assert_eq!(binding_id.as_deref(), Some("device/a"));
+        assert_eq!(config, json!({"gain":2}));
+        let cli = Cli::try_parse_from([
+            "cli",
+            "sources",
+            "ui",
+            "source-123",
+            "--binding",
+            "device/b",
+            "--control",
+        ])
+        .unwrap();
+        let Request::Command(ControlCommand::GetSourceUi { params, .. }) =
+            business_request(cli.command).unwrap()
+        else {
+            panic!("expected UI")
+        };
+        assert_eq!(params.binding_id.as_deref(), Some("device/b"));
+        assert_eq!(serde_json::to_value(params.surface).unwrap(), "control");
+        assert!(Cli::try_parse_from(["cli", "output", "emergency-stop"]).is_err());
     }
 
     #[test]

@@ -6,9 +6,7 @@ use dg_lab_link_core::hub::HubSnapshot;
 use dg_lab_link_core::model::Channel;
 use dg_lab_link_core::preferences::AppPreferencesSnapshot;
 use dg_lab_link_core::sources::WaveformConfig;
-use dg_lab_link_core::sources::audio::{
-    AUDIO_FILE_EXTENSIONS, AudioAction, AudioChannelConfig, VIDEO_FILE_EXTENSIONS,
-};
+use dg_lab_link_core::sources::audio::{AudioAction, AudioChannelConfig};
 use dg_lab_link_core::sources::touch::{TouchConfig, TouchInput};
 use dg_lab_link_core::transport::{
     BleParameters, BluetoothDevice, TransportConnectionSnapshot, TransportKind,
@@ -201,24 +199,7 @@ pub async fn parse_waveform_files(
 
 #[tauri::command]
 pub async fn choose_audio_file() -> Result<Option<String>, CommandError> {
-    tauri::async_runtime::spawn_blocking(|| {
-        rfd::FileDialog::new()
-            .set_title("选择音频或视频文件")
-            .add_filter(
-                "音频或视频",
-                &AUDIO_FILE_EXTENSIONS
-                    .iter()
-                    .chain(VIDEO_FILE_EXTENSIONS.iter())
-                    .copied()
-                    .collect::<Vec<_>>(),
-            )
-            .add_filter("音频", AUDIO_FILE_EXTENSIONS)
-            .add_filter("视频（使用音轨）", VIDEO_FILE_EXTENSIONS)
-            .pick_file()
-            .map(|path| path.to_string_lossy().into_owned())
-    })
-    .await
-    .map_err(|error| ControlError::new("dialog_error", error.to_string()))
+    choose_plugin_file().await
 }
 
 #[tauri::command]
@@ -397,11 +378,6 @@ pub async fn start_output(
 #[tauri::command]
 pub async fn stop_output(client: State<'_, Client>, device_id: String) -> Result<(), CommandError> {
     call(&client, ControlCommand::StopOutput { device_id }).await
-}
-
-#[tauri::command]
-pub async fn emergency_stop(client: State<'_, Client>) -> Result<(), CommandError> {
-    call(&client, ControlCommand::EmergencyStop).await
 }
 
 #[tauri::command]
@@ -589,4 +565,43 @@ mod tests {
             );
         }
     }
+}
+
+#[tauri::command]
+pub async fn plugin_call(
+    client: State<'_, Client>,
+    command: ControlCommand,
+) -> Result<serde_json::Value, CommandError> {
+    if !command.is_business() {
+        return Err(ControlError::new(
+            "invalid_command",
+            "插件调用仅支持核心业务命令",
+        ));
+    }
+    client.call(command).await
+}
+
+#[tauri::command]
+pub async fn choose_plugin_package() -> Result<Option<String>, CommandError> {
+    tauri::async_runtime::spawn_blocking(|| {
+        rfd::FileDialog::new()
+            .set_title("选择输入源插件包")
+            .add_filter("DG-LAB Link 插件", &["dglabplugin"])
+            .pick_file()
+            .map(|path| path.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|error| ControlError::new("file_dialog_error", error.to_string()))
+}
+
+#[tauri::command]
+pub async fn choose_plugin_file() -> Result<Option<String>, CommandError> {
+    tauri::async_runtime::spawn_blocking(|| {
+        rfd::FileDialog::new()
+            .set_title("选择插件文件")
+            .pick_file()
+            .map(|path| path.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|error| ControlError::new("file_dialog_error", error.to_string()))
 }

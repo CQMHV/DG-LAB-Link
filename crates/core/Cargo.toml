@@ -6,14 +6,13 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-cpal = "0.18.2"
+dg-lab-link-plugin-sdk.workspace = true
+dg-lab-link-plugin-runtime.workspace = true
 futures-util.workspace = true
-rustfft = "6.4.1"
 rustls = { version = "0.23.43", default-features = false, features = ["ring", "std"] }
 serde.workspace = true
 serde_json.workspace = true
 schemars.workspace = true
-symphonia = { version = "0.6.1", features = ["aac", "alac", "mp3", "isomp4"] }
 thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true

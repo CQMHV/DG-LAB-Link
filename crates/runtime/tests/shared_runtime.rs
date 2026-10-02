@@ -12,6 +12,7 @@ use dg_lab_link_core::{ControlCommand, ControlError};
 use dg_lab_link_runtime::{Client, LocalConfig, MAX_REQUEST_BYTES, run_core};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
+use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
@@ -108,6 +109,141 @@ async fn holders_share_state_and_only_last_release_terminates_core() {
 }
 
 #[tokio::test]
+async fn released_socket_drains_tail_requests_until_peer_close_without_executing_them() {
+    let (core, owner) = Core::start(None).await;
+    owner
+        .call(ControlCommand::SetDefaultSource {
+            source_id: Some("source-fixed-waveform".to_owned()),
+        })
+        .await
+        .unwrap();
+    let mut request = format!("ws://127.0.0.1:{}/control", core.config.port)
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        "Authorization",
+        format!("Bearer {}", core.config.token).parse().unwrap(),
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    socket
+        .send(Message::Text(
+            json!({"id":1,"operation":{"type":"hello","params":{"id":"short-raw-holder","label":"short connection","pid":1}}})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    let hello: Value = serde_json::from_str(
+        socket
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .into_text()
+            .unwrap()
+            .as_str(),
+    )
+    .unwrap();
+    assert_eq!(hello["type"], "hello");
+    socket
+        .feed(Message::Text(
+            json!({"id":2,"operation":{"type":"release"}})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    // These bytes were already in flight when the server released the holder.
+    // They must be read for a graceful TCP close, but must never be dispatched.
+    socket
+        .feed(Message::Text(
+            json!({"id":3,"operation":{"type":"call","params":ControlCommand::SetDefaultSource { source_id: None }}})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    for id in 4..20 {
+        socket
+            .feed(Message::Text(
+                json!({"id":id,"operation":{"type":"heartbeat"}})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+    }
+    socket.flush().await.unwrap();
+    let mut released = false;
+    timeout(Duration::from_secs(2), async {
+        loop {
+            match socket.next().await.unwrap().unwrap() {
+                Message::Text(text) => {
+                    let response: Value = serde_json::from_str(&text).unwrap();
+                    if response["type"] == "result" {
+                        assert_eq!(response["id"], 2, "tail request was dispatched");
+                        assert!(response["error"].is_null());
+                        released = true;
+                    }
+                }
+                Message::Close(_) => break,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(released, "release acknowledgement precedes the close frame");
+    assert_eq!(owner.runtime_info().await.unwrap().holder_count, 1);
+    assert_eq!(
+        owner.call(ControlCommand::GetHubSnapshot).await.unwrap()["defaultSourceId"],
+        "source-fixed-waveform"
+    );
+    // Reading the close frame queues our reply, but does not flush it. The
+    // server must keep the TCP reader alive until that reply arrives; dropping
+    // it early aborts queued client bytes on Windows (10053/10054).
+    let mut byte = [0];
+    assert!(
+        timeout(Duration::from_millis(100), socket.get_mut().read(&mut byte))
+            .await
+            .is_err(),
+        "server dropped TCP before the peer completed its close handshake"
+    );
+    socket.flush().await.unwrap();
+    owner.release().await.unwrap();
+    core.finish().await;
+}
+
+#[tokio::test]
+async fn repeated_short_clients_release_without_losing_acknowledgements() {
+    let (core, owner) = Core::start(None).await;
+    let instance = owner.runtime_info().await.unwrap().instance_id;
+    for attempt in 0..100 {
+        let client = Client::connect(&core.directory, "short CLI", None)
+            .await
+            .unwrap();
+        assert_eq!(client.runtime_info().await.unwrap().instance_id, instance);
+        assert_eq!(client.holders().await.unwrap().len(), 2);
+        client
+            .release()
+            .await
+            .unwrap_or_else(|error| panic!("short connection {attempt} lost release ACK: {error}"));
+    }
+    assert_eq!(owner.runtime_info().await.unwrap().holder_count, 1);
+    owner.release().await.unwrap();
+    core.finish().await;
+}
+
+#[tokio::test]
+async fn last_holder_release_acknowledgement_precedes_fast_core_shutdown() {
+    for _ in 0..8 {
+        let (core, holder) = Core::start(None).await;
+        holder.release().await.unwrap();
+        core.finish().await;
+    }
+}
+
+#[tokio::test]
 async fn explicit_release_closes_only_the_named_holder() {
     let (core, owner) = Core::start(None).await;
     let other = Client::connect(&core.directory, "background holder", Some("background-id"))
@@ -167,13 +303,13 @@ async fn observers_share_control_and_follow_the_last_holder_without_holding_core
 }
 
 #[tokio::test]
-async fn stops_from_other_clients_invalidate_output_accepted_before_forwarding() {
+async fn disconnects_from_other_clients_invalidate_output_accepted_before_forwarding() {
     let (core, gui) = Core::start(None).await;
     let observer = Client::connect_observer(&core.directory).await.unwrap();
     let cli = Client::connect(&core.directory, "cli", None).await.unwrap();
     let old_http_command = observer.accept_command(false);
     let old_gui_command = gui.accept_command(false);
-    cli.call(ControlCommand::EmergencyStop).await.unwrap();
+    cli.call(ControlCommand::DisconnectRelay).await.unwrap();
     for (client, epoch) in [(&observer, old_http_command), (&gui, old_gui_command)] {
         let error = client
             .call_received(
@@ -350,7 +486,10 @@ async fn silent_tcp_connections_cannot_monopolize_all_capacity() {
     })
     .await
     .unwrap();
-    observer.call(ControlCommand::EmergencyStop).await.unwrap();
+    observer
+        .call(ControlCommand::DisconnectRelay)
+        .await
+        .unwrap();
     assert_eq!(holder.runtime_info().await.unwrap().holder_count, 1);
     drop(connections);
     observer.release().await.unwrap();
@@ -723,6 +862,38 @@ async fn mixed_websocket_sessions_share_clients_and_cleanup_on_final_holder_rele
     })
     .await
     .unwrap();
+    mcp.call(ControlCommand::StopOutput {
+        device_id: v3.clone(),
+    })
+    .await
+    .unwrap();
+    let ordinary_stopped: HubSnapshot =
+        serde_json::from_value(mcp.call(ControlCommand::GetHubSnapshot).await.unwrap()).unwrap();
+    let stopped_device = ordinary_stopped
+        .devices
+        .iter()
+        .find(|device| device.control_id == v3)
+        .unwrap();
+    assert!(!stopped_device.output_active);
+    assert_eq!(
+        stopped_device.intensity_a, 11,
+        "ordinary stop preserves the current base intensity"
+    );
+    assert_eq!(stopped_device.intensity_b, 20);
+    assert!(
+        ordinary_stopped
+            .devices
+            .iter()
+            .find(|device| device.control_id == v4)
+            .unwrap()
+            .output_active,
+        "stopping one device preserves the other connection's output"
+    );
+    mcp.call(ControlCommand::StartOutput {
+        device_id: v3.clone(),
+    })
+    .await
+    .unwrap();
     cli.call(ControlCommand::DisconnectRelay).await.unwrap();
     let remaining = wait_runtime_snapshot(&mcp, |snapshot| {
         snapshot.devices.len() == 1 && snapshot.devices[0].control_id == v3
@@ -766,13 +937,13 @@ async fn mixed_websocket_sessions_share_clients_and_cleanup_on_final_holder_rele
 }
 
 #[tokio::test]
-async fn stale_transport_connects_are_rejected_after_another_entrypoint_stops() {
+async fn stale_transport_connects_are_rejected_after_another_entrypoint_disconnects() {
     let (core, gui) = Core::start(None).await;
     let mcp = Client::connect_observer(&core.directory).await.unwrap();
     let cli = Client::connect(&core.directory, "CLI", None).await.unwrap();
     let v3_epoch = mcp.accept_command(false);
     let ble_epoch = gui.accept_command(false);
-    cli.call(ControlCommand::EmergencyStop).await.unwrap();
+    cli.call(ControlCommand::DisconnectRelay).await.unwrap();
     let v3_error = mcp
         .call_received(
             ControlCommand::ConnectTransport {

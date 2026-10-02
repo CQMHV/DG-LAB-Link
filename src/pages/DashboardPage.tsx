@@ -16,15 +16,10 @@ import {
     type DeviceViewTab,
 } from "../components/DeviceTabs";
 import { FixedWaveformChannelDashboard } from "../components/FixedWaveformDashboard";
-import { AudioChannelSettings, AudioPlayer } from "../components/AudioSourceControls";
-import { TouchBoard, TouchInputProvider } from "../components/TouchBoard";
-import { audioControl, setAudioConfig } from "../lib/bridge";
-import { defaultAudioConfig } from "../lib/inputModes";
+import { PluginSourcePanel } from "../components/PluginSourcePanel";
 import { displayChannelStatus, transportName } from "../lib/transports";
 import type {
     HubChannel,
-    AudioAction,
-    AudioChannelConfig,
     HubSnapshot,
     WaveformConfig,
 } from "../lib/contracts";
@@ -69,8 +64,6 @@ interface DashboardPageProps {
         deviceId: string,
         enabled: boolean,
     ) => void;
-    onSetAudioConfig?: (deviceId: string, channel: HubChannel, config: AudioChannelConfig) => void;
-    onAudioControl?: (action: AudioAction) => Promise<void>;
 }
 
 export const DashboardPage = ({
@@ -98,8 +91,6 @@ export const DashboardPage = ({
     onStopOutput,
     onSetDeviceChannelSource,
     onSetDeviceChannelSourceSync,
-    onSetAudioConfig = (deviceId, channel, config) => { void setAudioConfig(deviceId, channel, config); },
-    onAudioControl = audioControl,
 }: DashboardPageProps) => {
     const device = activeDeviceId
         ? snapshot.devices.find(
@@ -310,13 +301,6 @@ export const DashboardPage = ({
                                 </button>}
                             </header>
                             <div className="device-dashboard-content">
-                                <TouchInputProvider
-                                    active={deviceSources.a?.kind === "builtin.touch" || deviceSources.b?.kind === "builtin.touch"}
-                                    config={snapshot.inputModes.touchConfig}
-                                    deviceId={device.controlId}
-                                    disabled={!isConnected || !device.outputActive}
-                                    key={device.controlId}
-                                >
                                     <div className="realtime-stage" aria-label="双通道实时控制">
                                         {(["a", "b"] as const).map((channel) => {
                                             const source = deviceSources[channel];
@@ -376,36 +360,19 @@ export const DashboardPage = ({
                                                             }
                                                         />
                                                     )}
-                                                    {source?.kind === "builtin.touch" && (
-                                                        <TouchBoard
-                                                            channel={channel}
-                                                            config={snapshot.inputModes.touchConfig}
-                                                            deviceId={device.controlId}
-                                                            disabled={!isConnected || !device.outputActive}
-                                                        />
-                                                    )}
-                                                    {source?.kind === "builtin.audio" && (
-                                                        <>
-                                                            <AudioPlayer
-                                                                audio={snapshot.inputModes.audio}
-                                                                channel={channel}
-                                                                disabled={busy}
-                                                                onControl={onAudioControl}
-                                                            />
-                                                            <AudioChannelSettings
-                                                                channel={channel}
-                                                                config={snapshot.inputModes.audioBindings.find((binding) => binding.deviceId === device.controlId && binding.channel === channel)?.config ?? defaultAudioConfig()}
-                                                                disabled={busy}
-                                                                onSave={(config) => onSetAudioConfig(device.controlId, channel, config)}
-                                                                onCopy={(config) => onSetAudioConfig(device.controlId, channel === "a" ? "b" : "a", config)}
-                                                            />
-                                                        </>
-                                                    )}
+                                                    {source && source.kind !== "builtin.fixed_waveform" && <PluginSourcePanel
+                                                        key={`${source.id}:${channel === "a" ? device.bindingIdA : device.bindingIdB}`}
+                                                        source={source}
+                                                        channel={channel}
+                                                        bindingId={(channel === "a" ? device.bindingIdA : device.bindingIdB) ?? undefined}
+                                                        surface="control"
+                                                        disabled={!isConnected || !device.outputActive}
+                                                        revision={snapshot.revision}
+                                                    />}
                                                 </ChannelControl>
                                             );
                                         })}
                                     </div>
-                                </TouchInputProvider>
                             </div>
                         </>
                     ) : deviceUnavailable ? (

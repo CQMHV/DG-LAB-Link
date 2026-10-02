@@ -1,0 +1,25 @@
+.plugin-source-panel { display: grid; min-width: 0; gap: 14px; }
+.plugin-node { display: grid; gap: 12px; min-width: 0; }
+.plugin-node h3, .plugin-form h3 { margin: 0; color: var(--text); font-size: 14px; }
+.plugin-form { display: grid; gap: 16px; padding: 16px; border: 1px solid var(--border); border-radius: 8px; }
+.plugin-form-fields { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+.plugin-form-fields > label, .plugin-source-panel > label { display: grid; gap: 7px; color: var(--muted); font-size: 12px; }
+.plugin-source-panel input:not([type=checkbox]):not([type=range]), .plugin-source-panel select { min-width: 0; width: 100%; min-height: 36px; padding: 7px 10px; color: var(--text); border: 1px solid var(--border); border-radius: 6px; background: var(--surface-raised); }
+.plugin-form-fields > .plugin-switch { display: flex; align-items: center; }
+.plugin-key-value { display: grid; gap: 8px; }
+.plugin-key-value > div { display: flex; justify-content: space-between; gap: 12px; }
+.plugin-key-value dd { margin: 0; }
+.plugin-file-field { display: flex; gap: 8px; }
+.plugin-pointer-control { display: grid; gap: 12px; }
+.plugin-pointer-control h3 { margin: 0; font-size: 14px; }
+.plugin-xy-pad { position: relative; height: 200px; border: 1px solid var(--gold); border-radius: 8px; background: linear-gradient(135deg, #24241c, #141516); touch-action: none; user-select: none; }
+.plugin-xy-pad > small { position: absolute; left: 12px; bottom: 10px; color: var(--muted); }
+.plugin-xy-pad > span { position: absolute; width: 22px; height: 22px; border: 2px solid var(--gold); border-radius: 50%; transform: translate(-50%, -50%); }
+.plugin-xy-pad[aria-disabled=true], .plugin-grid-control > div[aria-disabled=true] { opacity: .45; cursor: not-allowed; }
+.plugin-grid-control { display: grid; gap: 8px; }
+.plugin-grid-control > div { display: grid; place-items: center; min-height: 65px; padding: 8px; border: 1px solid var(--border); border-radius: 6px; touch-action: none; user-select: none; }
+.plugin-grid-control > div.is-held { border-color: var(--gold); color: var(--gold); }
+.plugin-waveform-picker { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; grid-column: 1 / -1; min-width: 0; border: 1px solid var(--border); border-radius: 6px; padding: 12px; }
+.plugin-waveform-picker > label { display: grid; gap: 6px; font-size: 11px; color: var(--muted); }
+.plugin-meter-array { display: flex; gap: 16px; }
+.plugin-meter-array > label { display: grid; gap: 5px; font-size: 11px; color: var(--muted); }

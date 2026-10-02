@@ -140,10 +140,15 @@ async fn authenticate(
         .ok()
         .is_some_and(|message| {
             message["method"] == "tools/call"
-                && matches!(
-                    message["params"]["name"].as_str(),
-                    Some("emergency_stop" | "stop_output" | "disconnect_relay")
-                )
+                && message["params"]["name"].as_str().is_some_and(|name| {
+                    crate::handler::priority_tool(
+                        name,
+                        message["params"]
+                            .get("arguments")
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!({})),
+                    )
+                })
         });
     let queue = if safety {
         state.safety.clone()
@@ -386,7 +391,7 @@ mod tests {
     use tower::ServiceExt;
 
     #[tokio::test]
-    async fn saturated_ordinary_http_capacity_still_stops_and_rejects_late_output() {
+    async fn saturated_ordinary_http_capacity_still_disconnects_and_rejects_late_output() {
         let directory = tempfile::tempdir().unwrap();
         let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let mcp_reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -442,7 +447,7 @@ mod tests {
         assert_eq!(ordinary_response.status(), StatusCode::TOO_MANY_REQUESTS);
         let stopped = timeout(
             Duration::from_secs(1),
-            app.clone().oneshot(request("emergency_stop")),
+            app.clone().oneshot(request("disconnect_relay")),
         )
         .await
         .expect("ordinary saturation cannot block a stop")

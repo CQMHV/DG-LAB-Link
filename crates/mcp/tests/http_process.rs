@@ -95,9 +95,12 @@ async fn independent_http_process_observes_core_and_rejects_untrusted_requests()
         ControlCommand::descriptors().len()
     );
     let resources = common::request(&config, "resources/list", json!({})).await;
-    assert_eq!(
-        resources["result"]["resources"].as_array().unwrap().len(),
-        6
+    assert!(
+        resources["result"]["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|resource| resource["uri"] == "dglab://plugins")
     );
     let selected = common::request(
         &config,
@@ -109,9 +112,11 @@ async fn independent_http_process_observes_core_and_rejects_untrusted_requests()
     .await;
     assert_eq!(selected["result"]["isError"], false);
     let status = common::request(&config, "resources/read", json!({"uri": "dglab://status"})).await;
-    let status: serde_json::Value =
+    let mut status: serde_json::Value =
         serde_json::from_str(status["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
     let gui_status = gui.call(ControlCommand::GetHubSnapshot).await.unwrap();
+    assert!(gui_status["revision"].as_u64().unwrap() >= status["revision"].as_u64().unwrap());
+    status["revision"] = gui_status["revision"].clone();
     assert_eq!(gui_status, status);
     assert_eq!(status["defaultSourceId"], "source-fixed-waveform");
     assert_eq!(status["connection"]["state"], "disconnected");
@@ -193,7 +198,7 @@ async fn independent_http_process_observes_core_and_rejects_untrusted_requests()
             &config,
             "tools/call",
             json!({
-                "name": "emergency_stop", "arguments": {}
+                "name": "disconnect_relay", "arguments": {}
             }),
         ),
     )

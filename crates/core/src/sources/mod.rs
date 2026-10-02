@@ -7,17 +7,13 @@ pub mod touch;
 pub use preset::{DEFAULT_WAVEFORM_ID, FixedWaveformFactory, WaveformConfig};
 pub use registry::{SourceDescriptor, SourceError, SourceFactory, SourceRegistry, WaveSource};
 
-/// 返回项目随二进制编译的输入源注册表。
+/// 固定波形是唯一核心基础输入源；动态输入源由插件管理器提供。
 ///
-/// 增加内置输入源时在此处显式注册，以便启动时即可发现重复 kind，且不引入
+/// 固定波形是唯一的核心输入源；扩展输入源经原生插件运行，核心不引入
 /// Rust ABI 不稳定的动态库插件。
 pub fn builtin_registry() -> SourceRegistry {
-    SourceRegistry::new([
-        Box::new(FixedWaveformFactory) as Box<dyn SourceFactory>,
-        Box::new(touch::TouchFactory),
-        Box::new(audio::AudioFactory),
-    ])
-    .expect("内置输入源 kind 必须唯一")
+    SourceRegistry::new([Box::new(FixedWaveformFactory) as Box<dyn SourceFactory>])
+        .expect("内置输入源 kind 必须唯一")
 }
 
 #[cfg(test)]
@@ -33,9 +29,6 @@ mod tests {
             .map(|descriptor| descriptor.kind)
             .collect();
 
-        assert_eq!(
-            kinds,
-            ["builtin.fixed_waveform", "builtin.touch", "builtin.audio"]
-        );
+        assert_eq!(kinds, ["builtin.fixed_waveform"]);
     }
 }

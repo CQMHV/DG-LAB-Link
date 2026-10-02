@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use dg_lab_link_plugin_runtime::{BusinessFuture, BusinessHandler, PluginManager};
+use dg_lab_link_plugin_sdk::{ActionParams, InputParams, PluginError, SourceSpec, UiParams};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -77,10 +79,62 @@ pub enum ControlCommand {
     StartOutput {
         device_id: String,
     },
+    ClearDeviceChannel {
+        device_id: String,
+        channel: Channel,
+    },
     StopOutput {
         device_id: String,
     },
-    EmergencyStop,
+    ListPlugins,
+    InstallPlugin {
+        path: String,
+    },
+    UpdatePlugin {
+        path: String,
+    },
+    UninstallPlugin {
+        plugin_id: String,
+        #[serde(default)]
+        delete_data: bool,
+    },
+    CreateSource {
+        plugin_id: String,
+        name: String,
+    },
+    DeleteSource {
+        source_id: String,
+        #[serde(default)]
+        delete_data: bool,
+    },
+    SetSourceEnabled {
+        source_id: String,
+        enabled: bool,
+    },
+    StartSource {
+        source_id: String,
+    },
+    StopSource {
+        source_id: String,
+    },
+    SetSourceConfig {
+        source_id: String,
+        config: Value,
+        #[serde(default)]
+        binding_id: Option<String>,
+    },
+    GetSourceUi {
+        source_id: String,
+        params: UiParams,
+    },
+    SourceAction {
+        source_id: String,
+        params: ActionParams,
+    },
+    SourceInput {
+        source_id: String,
+        params: InputParams,
+    },
     SetDeviceChannelSource {
         device_id: String,
         channel: Channel,
@@ -214,7 +268,7 @@ impl ControlCommand {
                 | "connect_relay"
                 | "disconnect_relay"
                 | "refresh_pairing"
-                | "emergency_stop"
+                | "list_plugins"
                 | "list_waveforms"
         );
         if !unit || (params != Value::Null && params != serde_json::json!({})) {
@@ -227,8 +281,7 @@ impl ControlCommand {
     pub fn is_safety(&self) -> bool {
         matches!(
             self,
-            Self::EmergencyStop
-                | Self::StopOutput { .. }
+            Self::StopOutput { .. }
                 | Self::DisconnectRelay
                 | Self::DisconnectConnection { .. }
                 | Self::DisconnectBluetooth { .. }
@@ -248,7 +301,6 @@ impl ControlCommand {
             Self::SetCloseToTray { .. }
                 | Self::SetStartMinimized { .. }
                 | Self::SetDefaultSource { .. }
-                | Self::SetTouchConfig { .. }
                 | Self::UpdateSafety { .. }
                 | Self::ImportCustomWaveforms { .. }
                 | Self::ImportWaveformFiles { .. }
@@ -274,7 +326,7 @@ impl ControlCommand {
             if let Some(definitions) = schema.get("$defs") {
                 input_schema["$defs"] = definitions.clone();
             }
-            let read_only = name.starts_with("get_") || name.starts_with("list_") || name == "parse_waveform_files";
+            let read_only = name != "get_source_ui" && (name.starts_with("get_") || name.starts_with("list_") || name == "parse_waveform_files");
             CommandDescriptor { description: command_description(&name).to_owned(), name, input_schema, read_only }
         }).filter(|descriptor| !matches!(descriptor.name.as_str(), "get_app_preferences" | "set_close_to_tray" | "set_start_minimized")).collect()
     }
@@ -286,6 +338,8 @@ pub struct ControlService {
     preferences: Arc<PreferencesState>,
     configuration: Arc<Mutex<()>>,
     configuration_slots: Arc<Semaphore>,
+    plugins: PluginManager,
+    plugin_configuration: Arc<std::sync::Mutex<std::collections::BTreeMap<String, Arc<Mutex<()>>>>>,
 }
 
 impl ControlService {
@@ -296,7 +350,7 @@ impl ControlService {
         crate::initialize_tls();
         let preferences = PreferencesState::load(config_dir.clone()).unwrap_or_else(|error| {
             eprintln!("{error}；本次运行使用默认设置");
-            PreferencesState::with_defaults(config_dir)
+            PreferencesState::with_defaults(config_dir.clone())
         });
         let (connection_timeout_enabled, connection_timeout_minutes, allow_app_intensity_control) =
             preferences.safety_settings();
@@ -318,18 +372,76 @@ impl ControlService {
                 .relay_endpoint(TransportKind::WsV3)
                 .unwrap_or_else(|| DEFAULT_V3_ENDPOINT.to_owned()),
         );
-        if let Err(error) = runtime.set_initial_touch_config(preferences.touch_config()) {
-            eprintln!("{error}；本次运行使用默认触控配置");
+        let plugins = PluginManager::open(config_dir.join("plugins")).map_err(plugin_error)?;
+        runtime.set_plugin_manager(plugins.clone(), preferences.default_source_id());
+        let service = Self {
+            hub,
+            preferences: Arc::new(preferences),
+            configuration: Arc::new(Mutex::new(())),
+            configuration_slots: Arc::new(Semaphore::new(8)),
+            plugins: plugins.clone(),
+            plugin_configuration: Arc::new(
+                std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            ),
+        };
+        plugins.set_business_handler(Arc::new(CorePluginBusiness {
+            service: service.clone(),
+        }));
+        Ok((service, runtime))
+    }
+
+    pub async fn initialize_plugins(&self) -> Result<(), ControlError> {
+        let executable = std::env::current_exe()?;
+        let mut binary_dir = executable
+            .parent()
+            .ok_or_else(|| ControlError::new("plugin_bundle_missing", "无法找到程序目录"))?
+            .to_path_buf();
+        if binary_dir.file_name().is_some_and(|name| name == "deps") {
+            binary_dir.pop();
         }
-        Ok((
-            Self {
-                hub,
-                preferences: Arc::new(preferences),
-                configuration: Arc::new(Mutex::new(())),
-                configuration_slots: Arc::new(Semaphore::new(8)),
-            },
-            runtime,
-        ))
+        let packages = [
+            (
+                "cn.dglab.link.touch",
+                "source-touch",
+                "触控",
+                serde_json::to_value(self.preferences.touch_config())
+                    .map_err(|e| ControlError::new("invalid_params", e.to_string()))?,
+            ),
+            (
+                "cn.dglab.link.audio",
+                "source-audio",
+                "音频",
+                serde_json::json!({}),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(plugin_id, id, name, config)| {
+            let path = binary_dir
+                .join("plugins")
+                .join(format!("{plugin_id}.dglabplugin"));
+            path.is_file().then(|| {
+                (
+                    path,
+                    SourceSpec {
+                        id: id.into(),
+                        plugin_id: plugin_id.into(),
+                        name: name.into(),
+                        enabled: true,
+                        config,
+                    },
+                )
+            })
+        })
+        .collect();
+        self.plugins
+            .seed_preinstalled(packages)
+            .await
+            .map_err(plugin_error)?;
+        self.hub.refresh_plugins().await?;
+        if let Some(id) = self.preferences.default_source_id() {
+            let _ = self.hub.set_default_source(Some(id)).await;
+        }
+        Ok(())
     }
 
     pub fn snapshot(&self) -> HubSnapshot {
@@ -339,10 +451,37 @@ impl ControlService {
         self.hub.subscribe()
     }
     pub async fn shutdown(&self) -> Result<(), ControlError> {
-        self.hub.shutdown_gracefully().await.map_err(Into::into)
+        let (result, ()) = tokio::join!(self.hub.shutdown_gracefully(), self.plugins.shutdown());
+        self.plugins.clear_business_handler();
+        result.map_err(Into::into)
     }
 
     pub async fn execute(&self, command: ControlCommand) -> Result<Value, ControlError> {
+        let plugin_transaction = matches!(
+            &command,
+            ControlCommand::SetSourceConfig { .. }
+                | ControlCommand::SetTouchConfig { .. }
+                | ControlCommand::InstallPlugin { .. }
+                | ControlCommand::UpdatePlugin { .. }
+                | ControlCommand::UninstallPlugin { .. }
+                | ControlCommand::CreateSource { .. }
+                | ControlCommand::DeleteSource { .. }
+                | ControlCommand::SetSourceEnabled { .. }
+        ) || matches!(&command, ControlCommand::SourceAction { params, .. } if params.action == "configure");
+        if plugin_transaction {
+            let permit = self
+                .configuration_slots
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| ControlError::from(HubError::QueueBusy))?;
+            let service = self.clone();
+            return tokio::spawn(async move {
+                let _permit = permit;
+                service.execute_inner(command).await
+            })
+            .await
+            .map_err(|error| ControlError::new("internal_error", error.to_string()))?;
+        }
         if command.persists() {
             let permit = self
                 .configuration_slots
@@ -501,9 +640,146 @@ impl ControlService {
                     .adjust_device_intensity(Some(device_id), channel, delta)
                     .await?
             }
-            StartOutput { device_id } => self.hub.start_output(device_id).await?,
+            StartOutput { device_id } => {
+                let epoch = self.hub.safety_generation();
+                let device = self
+                    .snapshot()
+                    .devices
+                    .into_iter()
+                    .find(|device| device.control_id == device_id)
+                    .ok_or(HubError::DeviceUnavailable)?;
+                for source_id in [device.source_id_a, device.source_id_b]
+                    .into_iter()
+                    .flatten()
+                {
+                    if self
+                        .plugins
+                        .snapshot()
+                        .sources
+                        .iter()
+                        .any(|source| source.spec.id == source_id)
+                    {
+                        self.plugins.start(&source_id).await.map_err(plugin_error)?;
+                    }
+                }
+                self.hub.refresh_plugins().await?;
+                if epoch != self.hub.safety_generation() {
+                    return Err(HubError::QueueBusy.into());
+                }
+                self.hub.start_output(device_id).await?;
+            }
+            ClearDeviceChannel { device_id, channel } => {
+                let generation = self
+                    .hub
+                    .clear_device_channel(device_id.clone(), channel)
+                    .await?;
+                return Ok(
+                    serde_json::json!({"bindingId":format!("{device_id}/{channel}"),"generation":generation}),
+                );
+            }
             StopOutput { device_id } => self.hub.stop_output(device_id).await?,
-            EmergencyStop => self.hub.emergency_stop().await?,
+            ListPlugins => return serialize(self.plugins.snapshot().plugins),
+            InstallPlugin { path } => {
+                let plugin = self
+                    .plugins
+                    .install(absolute_path(&path)?, false)
+                    .await
+                    .map_err(plugin_error)?;
+                self.hub.refresh_plugins().await?;
+                return serialize(plugin);
+            }
+            UpdatePlugin { path } => {
+                let plugin = self
+                    .plugins
+                    .update(absolute_path(&path)?)
+                    .await
+                    .map_err(plugin_error)?;
+                self.hub.refresh_plugins().await?;
+                return serialize(plugin);
+            }
+            UninstallPlugin {
+                plugin_id,
+                delete_data,
+            } => {
+                self.plugins
+                    .uninstall(&plugin_id, delete_data)
+                    .await
+                    .map_err(plugin_error)?;
+                self.hub.refresh_plugins().await?;
+            }
+            CreateSource { plugin_id, name } => {
+                let source = SourceSpec {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    plugin_id,
+                    name,
+                    enabled: true,
+                    config: serde_json::json!({}),
+                };
+                let state = self
+                    .plugins
+                    .create_source(source)
+                    .await
+                    .map_err(plugin_error)?;
+                self.hub.refresh_plugins().await?;
+                return serialize(state);
+            }
+            DeleteSource {
+                source_id,
+                delete_data,
+            } => {
+                self.plugins
+                    .delete_source(&source_id, delete_data)
+                    .await
+                    .map_err(plugin_error)?;
+                self.hub.refresh_plugins().await?;
+            }
+            SetSourceEnabled { source_id, enabled } => {
+                self.plugins
+                    .set_enabled(&source_id, enabled)
+                    .await
+                    .map_err(plugin_error)?;
+                self.hub.refresh_plugins().await?;
+            }
+            StartSource { source_id } => {
+                self.plugins.start(&source_id).await.map_err(plugin_error)?;
+                self.hub.refresh_plugins().await?;
+            }
+            StopSource { source_id } => {
+                self.plugins.stop(&source_id).await.map_err(plugin_error)?;
+                self.hub.refresh_plugins().await?;
+            }
+            SetSourceConfig {
+                source_id,
+                config,
+                binding_id,
+            } => return self.configure_source(source_id, config, binding_id).await,
+            GetSourceUi { source_id, params } => {
+                return serialize(
+                    self.plugins
+                        .ui(&source_id, params)
+                        .await
+                        .map_err(plugin_error)?,
+                );
+            }
+            SourceAction { source_id, params } => {
+                if params.action == "configure" {
+                    return self
+                        .configure_source(source_id, params.value, params.binding_id)
+                        .await;
+                }
+                let value = self
+                    .plugins
+                    .action(&source_id, params)
+                    .await
+                    .map_err(plugin_error)?;
+                self.hub.refresh_plugins().await?;
+                return Ok(value);
+            }
+            SourceInput { source_id, params } => {
+                self.plugins
+                    .try_input(&source_id, params)
+                    .map_err(plugin_error)?;
+            }
             SetDeviceChannelSource {
                 device_id,
                 channel,
@@ -655,25 +931,59 @@ impl ControlService {
                 }
             }
             SetTouchConfig { config } => {
-                let previous = self.snapshot().input_modes.touch_config;
-                self.hub.set_touch_config(config.clone()).await?;
-                if let Err(error) = self.preferences.set_touch_config(config) {
-                    self.hub
-                        .set_touch_config(previous)
-                        .await
-                        .map_err(|rollback| rollback_error(&error, rollback))?;
-                    return Err(error.into());
-                }
+                return self
+                    .configure_source("source-touch".into(), serialize(config)?, None)
+                    .await;
             }
-            UpdateTouchInput { input } => self.hub.update_touch_input(input)?,
+            UpdateTouchInput { input } => {
+                let device = self
+                    .snapshot()
+                    .devices
+                    .into_iter()
+                    .find(|device| device.control_id == input.device_id)
+                    .ok_or(HubError::DeviceUnavailable)?;
+                if !device.output_active {
+                    return Err(HubError::SourceUnavailable("请先开始触控输出".into()).into());
+                }
+                self.plugins
+                    .try_input(
+                        "source-touch",
+                        InputParams {
+                            action: "update_touch_input".into(),
+                            value: serialize(&input)?,
+                            binding_id: None,
+                            owner: input.owner_id,
+                            sequence: input.sequence,
+                        },
+                    )
+                    .map_err(plugin_error)?;
+            }
             SetAudioConfig {
                 device_id,
                 channel,
                 config,
             } => {
-                self.hub
-                    .set_audio_config(device_id, channel, config)
-                    .await?
+                config
+                    .validate()
+                    .map_err(|e| ControlError::new("invalid_source_config", e.to_string()))?;
+                let device = self
+                    .snapshot()
+                    .devices
+                    .into_iter()
+                    .find(|device| device.control_id == device_id)
+                    .ok_or(HubError::DeviceUnavailable)?;
+                let (source, binding) = match channel {
+                    Channel::A => (device.source_id_a, device.binding_id_a),
+                    Channel::B => (device.source_id_b, device.binding_id_b),
+                };
+                if source.as_deref() != Some("source-audio") {
+                    return Err(
+                        HubError::SourceUnavailable("目标通道未绑定默认音频实例".into()).into(),
+                    );
+                }
+                return self
+                    .configure_source("source-audio".into(), serialize(config)?, binding)
+                    .await;
             }
             AudioControl { action } => {
                 if let AudioAction::LoadFile { path } | AudioAction::SaveRecording { path } =
@@ -685,10 +995,135 @@ impl ControlService {
                         "音频文件和录音保存路径必须为绝对路径",
                     ));
                 }
-                self.hub.audio_control(action).await?;
+                self.plugins
+                    .action(
+                        "source-audio",
+                        ActionParams {
+                            action: "audio_control".into(),
+                            value: serde_json::json!({"action":action}),
+                            binding_id: None,
+                        },
+                    )
+                    .await
+                    .map_err(plugin_error)?;
+                self.hub.refresh_plugins().await?;
             }
         }
         Ok(Value::Null)
+    }
+
+    async fn configure_source(
+        &self,
+        source_id: String,
+        config: Value,
+        binding_id: Option<String>,
+    ) -> Result<Value, ControlError> {
+        let live_sources = self
+            .plugins
+            .snapshot()
+            .sources
+            .into_iter()
+            .map(|source| source.spec.id)
+            .collect::<std::collections::BTreeSet<_>>();
+        if !live_sources.contains(&source_id) {
+            return Err(ControlError::new("unknown_source", "输入源实例不存在"));
+        }
+        let gate = {
+            let mut gates = self
+                .plugin_configuration
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            gates.retain(|_, gate| Arc::strong_count(gate) > 1);
+            if !gates.contains_key(&source_id) && gates.len() >= 64 {
+                return Err(HubError::QueueBusy.into());
+            }
+            gates
+                .entry(source_id.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let _gate = gate
+            .try_lock_owned()
+            .map_err(|_| ControlError::from(HubError::QueueBusy))?;
+        if let Some(binding_id) = binding_id {
+            let belongs = self.snapshot().devices.iter().any(|device| {
+                (device.binding_id_a.as_ref() == Some(&binding_id)
+                    && device.source_id_a.as_ref() == Some(&source_id))
+                    || (device.binding_id_b.as_ref() == Some(&binding_id)
+                        && device.source_id_b.as_ref() == Some(&source_id))
+            });
+            if !belongs {
+                return Err(ControlError::new("source_unavailable", "通道绑定已变更"));
+            }
+            let previous = self
+                .snapshot()
+                .source_bindings
+                .into_iter()
+                .find(|binding| {
+                    binding.source_id == source_id && binding.binding.binding_id == binding_id
+                })
+                .map(|binding| binding.binding.config)
+                .unwrap_or_else(|| serde_json::json!({}));
+            let make_action = |config: Value, validate_only: bool| ActionParams {
+                action: "configure_binding".into(),
+                value: serde_json::json!({"bindingId":binding_id,"config":config,"validateOnly":validate_only}),
+                binding_id: Some(binding_id.clone()),
+            };
+            self.plugins
+                .action(&source_id, make_action(config.clone(), true))
+                .await
+                .map_err(plugin_error)?;
+            let value = match self
+                .plugins
+                .action(&source_id, make_action(config.clone(), false))
+                .await
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    if let Err(rollback) = self
+                        .plugins
+                        .action(&source_id, make_action(previous, false))
+                        .await
+                    {
+                        let _ = self.plugins.stop(&source_id).await;
+                        let _ = self.hub.refresh_plugins().await;
+                        return Err(ControlError::new(
+                            "rollback_failed",
+                            format!("{error}；恢复旧通道配置失败：{rollback}"),
+                        ));
+                    }
+                    return Err(plugin_error(error));
+                }
+            };
+            if let Err(error) = self
+                .hub
+                .set_plugin_binding_config(source_id.clone(), binding_id.clone(), config)
+                .await
+            {
+                if let Err(rollback) = self
+                    .plugins
+                    .action(&source_id, make_action(previous, false))
+                    .await
+                {
+                    let _ = self.plugins.stop(&source_id).await;
+                    let _ = self.hub.refresh_plugins().await;
+                    return Err(ControlError::new(
+                        "rollback_failed",
+                        format!("{error}；恢复旧通道配置失败：{rollback}"),
+                    ));
+                }
+                return Err(error.into());
+            }
+            Ok(value)
+        } else {
+            let value = self
+                .plugins
+                .configure(&source_id, config)
+                .await
+                .map_err(plugin_error)?;
+            self.hub.refresh_plugins().await?;
+            Ok(value)
+        }
     }
 
     fn bluetooth_device(
@@ -779,6 +1214,42 @@ impl ControlService {
     }
 }
 
+fn plugin_error(error: PluginError) -> ControlError {
+    ControlError::new(error.code, error.message)
+}
+fn absolute_path(path: &str) -> Result<PathBuf, ControlError> {
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Err(ControlError::new(
+            "invalid_params",
+            "插件包路径必须是绝对路径",
+        ))
+    }
+}
+struct CorePluginBusiness {
+    service: ControlService,
+}
+impl BusinessHandler for CorePluginBusiness {
+    fn call<'a>(&'a self, _source_id: &'a str, command: Value) -> BusinessFuture<'a> {
+        Box::pin(async move {
+            let command: ControlCommand = serde_json::from_value(command)
+                .map_err(|error| PluginError::new("invalid_params", error.to_string()))?;
+            if !command.is_business() {
+                return Err(PluginError::new(
+                    "invalid_command",
+                    "插件接口仅开放核心业务命令",
+                ));
+            }
+            self.service
+                .execute(command)
+                .await
+                .map_err(|error| PluginError::new(error.code, error.message))
+        })
+    }
+}
+
 fn serialize(value: impl Serialize) -> Result<Value, ControlError> {
     serde_json::to_value(value)
         .map_err(|error| ControlError::new("internal_error", error.to_string()))
@@ -831,10 +1302,25 @@ fn command_description(name: &str) -> &str {
             "按 deviceId（设备 controlId）和 a/b 通道相对调整强度，受设备上限与同步设置约束。"
         }
         "start_output" => "开始指定 deviceId 的输出；两路必须先完成输入源分配。",
-        "stop_output" => "停止指定 deviceId 的输出，其他设备继续运行。",
-        "emergency_stop" => {
-            "紧急停止所有在线设备，优先清空波形并将两路强度归零，同时停止音频活动。"
+        "clear_device_channel" => {
+            "清空指定设备的一路旧波形，保持基础强度与输出活动；返回绑定代次，不代表设备已确认。"
         }
+        "stop_output" => "停止指定 deviceId 的输出，其他设备继续运行。",
+        "list_plugins" => "读取已安装插件、版本、发布者和预装来源。",
+        "install_plugin" => "从绝对路径的本地 .dglabplugin 包安装插件。",
+        "update_plugin" => "更新本地插件包；保留实例与配置，停止相关输出，失败回滚。",
+        "uninstall_plugin" => "卸载插件并解除绑定；deleteData 为 true 时清除保存数据。",
+        "create_source" => "从已安装插件创建独立输入源实例。",
+        "delete_source" => "删除实例并解除绑定；deleteData 为 true 时清除数据。",
+        "set_source_enabled" => "持久保存实例启用状态；启用后按需启动。",
+        "start_source" => "启动插件实例进程；设备输出仍需单独开始。",
+        "stop_source" => "停止插件实例和关联通道波形；其他实例继续运行。",
+        "set_source_config" => {
+            "校验并应用配置；无 bindingId 时持久保存实例配置，有 bindingId 时更新当前会话通道配置。"
+        }
+        "get_source_ui" => "按 settings/control surface 读取公开语义界面与动作 Schema。",
+        "source_action" => "调用插件声明的动作；configure 使用核心配置事务。",
+        "source_input" => "提交带 owner、sequence 的持续输入；处理使用独立有界队列。",
         "update_touch_input" => {
             "提交触控坐标；ownerId、递增 sequence 和一秒租期限制同 GUI，不续租会释放触点。"
         }
@@ -884,10 +1370,7 @@ mod tests {
             )
             .is_err()
         );
-        assert!(matches!(
-            ControlCommand::from_call("emergency_stop", serde_json::json!({})).unwrap(),
-            ControlCommand::EmergencyStop
-        ));
+        assert!(ControlCommand::from_call("emergency_stop", serde_json::json!({})).is_err());
         let descriptors = ControlCommand::descriptors();
         let names = descriptors
             .iter()
@@ -895,7 +1378,7 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(names.len(), descriptors.len());
         assert!(
-            names.contains("emergency_stop")
+            names.contains("source_action")
                 && names.contains("audio_control")
                 && names.contains("import_waveform_files")
         );
@@ -996,7 +1479,7 @@ mod tests {
         let _guard = service.configuration.lock().await;
         tokio::time::timeout(
             Duration::from_secs(1),
-            service.execute(ControlCommand::EmergencyStop),
+            service.execute(ControlCommand::DisconnectRelay),
         )
         .await
         .unwrap()
@@ -1116,7 +1599,7 @@ mod tests {
         });
         tokio::task::yield_now().await;
         service
-            .execute(ControlCommand::EmergencyStop)
+            .execute(ControlCommand::DisconnectRelay)
             .await
             .unwrap();
         drop(lock);

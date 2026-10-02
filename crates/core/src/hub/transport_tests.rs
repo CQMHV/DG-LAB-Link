@@ -92,7 +92,7 @@ async fn typed_devices_preserve_unknown_metadata_and_cancelled_wave_does_not_sto
 }
 
 #[tokio::test]
-async fn emergency_stop_dispatches_to_other_sessions_before_a_slow_ack_and_invalidates_idle_connections()
+async fn shutdown_stop_dispatches_to_other_sessions_before_a_slow_ack_and_invalidates_idle_connections()
  {
     let (_hub, mut runtime) = create_hub("ws://127.0.0.1:9000/".to_owned());
     let v3 = install(&mut runtime, V3_CONNECTION_ID).await;
@@ -292,7 +292,7 @@ async fn physical_wheel_sync_keeps_the_explicit_baseline_after_gui_focus_changes
 }
 
 #[tokio::test]
-async fn emergency_zeroing_blocks_sync_until_both_channels_of_every_device_report_zero() {
+async fn shutdown_zeroing_blocks_sync_until_both_channels_of_every_device_report_zero() {
     let (_hub, mut runtime) = create_hub("ws://127.0.0.1:9000/".to_owned());
     let baseline = install(&mut runtime, "ble:baseline").await;
     let other = install(&mut runtime, "ble:other").await;
@@ -310,19 +310,19 @@ async fn emergency_zeroing_blocks_sync_until_both_channels_of_every_device_repor
                 reply, zero: true, ..
             }) = queue.safety.recv().await
             else {
-                panic!("emergency zero")
+                panic!("shutdown zero")
             };
             reply.send(Ok(())).unwrap();
         }
     };
     let (result, ()) = tokio::join!(stop, acknowledge);
     result.unwrap();
-    assert_eq!(runtime.emergency_zero_pending.len(), 2);
+    assert_eq!(runtime.shutdown_zero_pending.len(), 2);
     runtime.devices.get_mut(&other).unwrap()["props"]["intensityA"] = json!(0);
     runtime.devices.get_mut(&other).unwrap()["props"]["intensityB"] = json!(0);
     runtime.reconcile_intensity_lock();
     assert_eq!(
-        runtime.emergency_zero_pending,
+        runtime.shutdown_zero_pending,
         BTreeSet::from([baseline.clone()])
     );
     assert!(qa.commands.try_recv().is_err());
@@ -337,10 +337,10 @@ async fn emergency_zeroing_blocks_sync_until_both_channels_of_every_device_repor
     ));
     runtime.devices.get_mut(&baseline).unwrap()["props"]["intensityA"] = json!(0);
     runtime.reconcile_intensity_lock();
-    assert!(!runtime.emergency_zero_pending.is_empty());
+    assert!(!runtime.shutdown_zero_pending.is_empty());
     runtime.devices.get_mut(&baseline).unwrap()["props"]["intensityB"] = json!(0);
     runtime.reconcile_intensity_lock();
-    assert!(runtime.emergency_zero_pending.is_empty());
+    assert!(runtime.shutdown_zero_pending.is_empty());
     assert!(qa.commands.try_recv().is_err());
     assert!(qb.commands.try_recv().is_err());
 }

@@ -6,13 +6,12 @@ import {
     Circle,
     DeviceMobile,
     DotsThree,
-    HandTap,
     LinkSimple,
     Plugs,
     Plus,
     Pulse,
+    PuzzlePiece,
     SlidersHorizontal,
-    SpeakerHigh,
     Square,
     Tabs,
 } from "@phosphor-icons/react";
@@ -39,6 +38,7 @@ interface DevicesPageProps {
     syncBaseDeviceId: string | null;
     onSelectSyncBaseDevice: (deviceId: string) => void;
     onStopOutput: (deviceId: string) => void;
+    stoppingDeviceIds?: string[];
     onOpenInNewTab: (deviceId: string) => void;
     onOpenInNewWindow: (deviceId: string) => void;
     onOpenPairing: (connectionId?: string) => void;
@@ -105,10 +105,7 @@ const SourceLabel = ({
     waveformName: string | null;
 }) => {
     const source = snapshot.sources.find((item) => item.id === sourceId);
-    const SourceIcon = source?.kind === "builtin.audio"
-        ? SpeakerHigh
-        : source?.kind === "builtin.touch" ? HandTap
-            : source?.kind === "builtin.fixed_waveform" ? Pulse : LinkSimple;
+    const SourceIcon = source?.kind === "builtin.fixed_waveform" ? Pulse : source ? PuzzlePiece : LinkSimple;
     const label = !sourceId ? "未绑定输入源"
         : !source ? "输入源不可用"
             : source.kind === "builtin.fixed_waveform"
@@ -130,6 +127,7 @@ export const DevicesPage = ({
     syncBaseDeviceId,
     onSelectSyncBaseDevice,
     onStopOutput,
+    stoppingDeviceIds = [],
     onOpenInNewTab,
     onOpenInNewWindow,
     onOpenPairing,
@@ -320,7 +318,7 @@ export const DevicesPage = ({
                                             <button
                                                 aria-label={`停止 ${device.name} 输出`}
                                                 className="overview-stop-button"
-                                                disabled={disabled}
+                                                disabled={stoppingDeviceIds.includes(device.controlId)}
                                                 onClick={() => onStopOutput(device.controlId)}
                                                 type="button"
                                             ><Square aria-hidden="true" size={12} weight="fill" />停止输出</button>

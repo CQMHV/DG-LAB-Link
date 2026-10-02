@@ -24,6 +24,7 @@ const INPUT_OWNER_IDLE: Duration = Duration::from_secs(1);
 struct InputSequence {
     sequence: u64,
     last_seen: Instant,
+    binding_id: Option<String>,
 }
 
 #[derive(Default)]
@@ -64,15 +65,57 @@ impl InputSequenceCache {
         Ok(true)
     }
 
-    fn record(&mut self, key: String, sequence: u64, now: Instant) {
+    fn record_scoped(
+        &mut self,
+        key: String,
+        sequence: u64,
+        now: Instant,
+        binding_id: Option<&str>,
+    ) {
         self.0.insert(
             key,
             InputSequence {
                 sequence,
                 last_seen: now,
+                binding_id: binding_id.map(str::to_owned),
             },
         );
     }
+
+    #[cfg(test)]
+    fn record(&mut self, key: String, sequence: u64, now: Instant) {
+        self.record_scoped(key, sequence, now, None);
+    }
+
+    fn invalidate_bindings(&mut self, invalidated: &HashSet<String>) {
+        if invalidated.is_empty() {
+            return;
+        }
+        self.0.retain(|_, entry| {
+            entry
+                .binding_id
+                .as_ref()
+                .is_some_and(|id| !invalidated.contains(id))
+        });
+    }
+}
+
+fn invalidated_bindings(previous: &[Binding], current: &[Binding]) -> HashSet<String> {
+    previous
+        .iter()
+        .filter(|old| {
+            current
+                .iter()
+                .find(|new| new.binding_id == old.binding_id)
+                .is_none_or(|new| {
+                    new.generation != old.generation
+                        || new.active != old.active
+                        || new.control_id != old.control_id
+                        || new.channel != old.channel
+                })
+        })
+        .map(|binding| binding.binding_id.clone())
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -309,11 +352,12 @@ impl PluginManager {
         if entry.bindings == bindings {
             return Ok(());
         }
+        let invalidated = invalidated_bindings(&entry.bindings, bindings);
         self.0.frames.replace_bindings(source_id, bindings);
         entry.bindings = bindings.to_vec();
-        entry.input_sequences.clear();
+        entry.input_sequences.invalidate_bindings(&invalidated);
         if let Some(session) = &entry.session {
-            session.update_bindings(entry.bindings.clone());
+            session.update_bindings(entry.bindings.clone(), &invalidated);
         }
         let start = enabled
             && !bindings.is_empty()
@@ -483,7 +527,7 @@ impl PluginManager {
                 entry.status = SourceStatus::Running;
                 entry.last_error = None;
                 self.0.frames.replace_bindings(source_id, &entry.bindings);
-                session.update_bindings(entry.bindings.clone());
+                session.update_bindings(entry.bindings.clone(), &HashSet::new());
                 entry.session = Some(session.clone());
                 Ok(session)
             }
@@ -691,7 +735,12 @@ impl PluginManager {
             return Ok(());
         }
         session.input(params.clone())?;
-        entry.input_sequences.record(key, params.sequence, now);
+        entry.input_sequences.record_scoped(
+            key,
+            params.sequence,
+            now,
+            params.binding_id.as_deref(),
+        );
         Ok(())
     }
 
@@ -1214,6 +1263,63 @@ fn validate_source(source: &SourceSpec) -> Result<(), PluginError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn binding(id: &str, channel: Channel) -> Binding {
+        Binding {
+            binding_id: id.into(),
+            control_id: "device".into(),
+            channel,
+            generation: 1,
+            config: empty_object(),
+            active: true,
+        }
+    }
+
+    #[test]
+    fn binding_identity_changes_invalidate_only_affected_inputs() {
+        let first = binding("device/a", Channel::A);
+        let second = binding("device/b", Channel::B);
+        let old = vec![first.clone(), second.clone()];
+        let mut config_only = first.clone();
+        config_only.config = serde_json::json!({"frequency":100});
+        assert!(invalidated_bindings(&old, &[config_only, second.clone()]).is_empty());
+        assert_eq!(
+            invalidated_bindings(&old, std::slice::from_ref(&second)),
+            HashSet::from([first.binding_id.clone()])
+        );
+        for changed in [
+            Binding {
+                generation: 2,
+                ..first.clone()
+            },
+            Binding {
+                active: false,
+                ..first.clone()
+            },
+            Binding {
+                control_id: "another-device".into(),
+                ..first.clone()
+            },
+            Binding {
+                channel: Channel::B,
+                ..first.clone()
+            },
+        ] {
+            assert_eq!(
+                invalidated_bindings(&old, &[changed, second.clone()]),
+                HashSet::from([first.binding_id.clone()])
+            );
+        }
+        let mut cache = InputSequenceCache::default();
+        let now = Instant::now();
+        cache.record_scoped("a-owner".into(), 9, now, Some("device/a"));
+        cache.record_scoped("b-owner".into(), 9, now, Some("device/b"));
+        cache.record_scoped("instance-owner".into(), 9, now, None);
+        cache.invalidate_bindings(&HashSet::from([first.binding_id]));
+        assert!(cache.will_accept("a-owner", 1, now).unwrap());
+        assert!(!cache.will_accept("b-owner", 8, now).unwrap());
+        assert!(cache.will_accept("instance-owner", 1, now).unwrap());
+    }
 
     #[test]
     fn old_ui_owners_are_reclaimed_without_evicting_an_active_owner() {

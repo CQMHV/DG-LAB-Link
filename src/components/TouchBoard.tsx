@@ -1,5 +1,5 @@
 import { HandTap } from "@phosphor-icons/react";
-import { createContext, useCallback, useContext, useEffect, useRef, useState, type PointerEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
 import { updateTouchInput } from "../lib/bridge";
 import type { HubChannel, TouchConfig, TouchInput } from "../lib/contracts";
 import { getErrorMessage } from "../lib/errors";
@@ -130,22 +130,7 @@ const useTouchController = ({ config, deviceId, disabled, onInput = updateTouchI
 };
 
 type TouchController = ReturnType<typeof useTouchController>;
-const TouchContext = createContext<TouchController | null>(null);
-
-// Both channel panels must use one device lease and one ordered input queue.
-export const TouchInputProvider = ({ children, active, ...props }: TouchBoardProps & { active: boolean; children: ReactNode }) => {
-    const controller = useTouchController(props, active);
-    return <TouchContext.Provider value={controller}>{children}</TouchContext.Provider>;
-};
-
 export const TouchBoard = (props: TouchBoardProps) => {
-    const controller = useContext(TouchContext);
-    return controller
-        ? <TouchBoardView {...props} controller={controller} />
-        : <StandaloneTouchBoard {...props} />;
-};
-
-const StandaloneTouchBoard = (props: TouchBoardProps) => {
     const controller = useTouchController(props);
     return <TouchBoardView {...props} controller={controller} />;
 };

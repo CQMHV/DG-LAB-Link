@@ -1,0 +1,22 @@
+.source-page-tabs { display: flex; gap: 24px; margin: 0 0 24px; border-bottom: 1px solid var(--border); }
+.source-page-tabs > button { position: relative; padding: 12px 0; border: 0; color: var(--muted); background: transparent; font-size: 14px; cursor: pointer; }
+.source-page-tabs > button[aria-selected=true] { color: var(--gold); }
+.source-page-tabs > button[aria-selected=true]::after { position: absolute; right: 0; bottom: -1px; left: 0; height: 2px; content: ""; background: var(--gold); }
+.source-page-tabs span { margin-left: 8px; font-variant-numeric: tabular-nums; }
+.source-plugin-attribution { color: var(--muted); font-size: 11px; }
+.plugin-instance-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 20px 0; }
+.plugin-manager { display: grid; gap: 14px; }
+.plugin-manager > header { display: flex; justify-content: space-between; align-items: center; gap: 14px; }
+.plugin-manager p { color: var(--muted); font-size: 12px; }
+.plugin-package-row { display: flex; align-items: center; gap: 16px; padding: 20px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); }
+.plugin-package-row > svg { color: var(--gold); flex-shrink: 0; }
+.plugin-package-row > div { flex: 1; min-width: 0; }
+.plugin-package-row h2 { margin: 0; font-size: 16px; } .plugin-package-row p { margin: 7px 0; }
+.plugin-package-row h2 > small { display: inline-block; margin-left: 12px; padding: 3px 6px; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; font-size: 10px; font-weight: 400; }
+.plugin-package-row code { color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
+.plugin-package-row > span { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.plugin-instance-form { display: grid; gap: 18px; }
+.plugin-instance-form label { display: grid; gap: 7px; color: var(--muted); font-size: 12px; }
+.plugin-instance-form input, .plugin-instance-form select { width: 100%; padding: 10px; color: var(--text); border: 1px solid var(--border); border-radius: 6px; background: var(--surface-raised); }
+.plugin-remove-data { display: flex; align-items: center; gap: 10px; margin: 18px 0; color: var(--muted); font-size: 12px; }
+@media (max-width: 800px) { .plugin-package-row { flex-wrap: wrap; padding: 16px; gap: 12px; } .plugin-package-row > div { flex-basis: 70%; } .plugin-manager > header { align-items: start; flex-direction: column; } }

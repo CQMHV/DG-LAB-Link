@@ -345,12 +345,7 @@ describe("DG-LAB Link 前端", () => {
             expect(document.activeElement).toBe(closeButton);
         });
         await user.tab({ shift: true });
-        const emergencyButton = screen.getByRole("button", { name: "紧急停止全部设备" });
-        expect(document.activeElement).toBe(emergencyButton);
-        await user.tab({ shift: true });
         expect(document.activeElement).toBe(copyButton);
-        await user.tab();
-        expect(document.activeElement).toBe(emergencyButton);
         await user.tab();
         expect(document.activeElement).toBe(closeButton);
 

@@ -195,6 +195,18 @@
           "markdownDescription": "Enables the choose_audio_file command without any pre-configured scope."
         },
         {
+          "description": "Enables the choose_plugin_file command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-choose-plugin-file",
+          "markdownDescription": "Enables the choose_plugin_file command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the choose_plugin_package command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-choose-plugin-package",
+          "markdownDescription": "Enables the choose_plugin_package command without any pre-configured scope."
+        },
+        {
           "description": "Enables the choose_recording_destination command without any pre-configured scope.",
           "type": "string",
           "const": "allow-choose-recording-destination",
@@ -241,12 +253,6 @@
           "type": "string",
           "const": "allow-disconnect-relay",
           "markdownDescription": "Enables the disconnect_relay command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the emergency_stop command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-emergency-stop",
-          "markdownDescription": "Enables the emergency_stop command without any pre-configured scope."
         },
         {
           "description": "Enables the get_app_preferences command without any pre-configured scope.",
@@ -301,6 +307,12 @@
           "type": "string",
           "const": "allow-parse-waveform-files",
           "markdownDescription": "Enables the parse_waveform_files command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the plugin_call command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-plugin-call",
+          "markdownDescription": "Enables the plugin_call command without any pre-configured scope."
         },
         {
           "description": "Enables the refresh_connection_pairing command without any pre-configured scope.",
@@ -453,6 +465,18 @@
           "markdownDescription": "Denies the choose_audio_file command without any pre-configured scope."
         },
         {
+          "description": "Denies the choose_plugin_file command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-choose-plugin-file",
+          "markdownDescription": "Denies the choose_plugin_file command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the choose_plugin_package command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-choose-plugin-package",
+          "markdownDescription": "Denies the choose_plugin_package command without any pre-configured scope."
+        },
+        {
           "description": "Denies the choose_recording_destination command without any pre-configured scope.",
           "type": "string",
           "const": "deny-choose-recording-destination",
@@ -499,12 +523,6 @@
           "type": "string",
           "const": "deny-disconnect-relay",
           "markdownDescription": "Denies the disconnect_relay command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the emergency_stop command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-emergency-stop",
-          "markdownDescription": "Denies the emergency_stop command without any pre-configured scope."
         },
         {
           "description": "Denies the get_app_preferences command without any pre-configured scope.",
@@ -559,6 +577,12 @@
           "type": "string",
           "const": "deny-parse-waveform-files",
           "markdownDescription": "Denies the parse_waveform_files command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the plugin_call command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-plugin-call",
+          "markdownDescription": "Denies the plugin_call command without any pre-configured scope."
         },
         {
           "description": "Denies the refresh_connection_pairing command without any pre-configured scope.",

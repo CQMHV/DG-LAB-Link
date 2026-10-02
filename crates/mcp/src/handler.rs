@@ -59,6 +59,10 @@ fn resource_error(error: ControlError) -> ErrorData {
     ErrorData::internal_error(error.message.clone(), Some(json!(error)))
 }
 
+pub(crate) fn priority_tool(name: &str, arguments: Value) -> bool {
+    ControlCommand::from_call(name, arguments).is_ok_and(|command| command.is_safety())
+}
+
 fn tools() -> Vec<Tool> {
     ControlCommand::descriptors()
         .into_iter()
@@ -164,7 +168,8 @@ impl ServerHandler for McpServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, ErrorData> {
-        let resources = [
+        let snapshot = self.snapshot().await?;
+        let mut resources: Vec<Resource> = [
             ("status", "共享状态", "共享 Hub 完整最新快照"),
             ("devices", "设备", "当前配对设备及 controlId"),
             ("connections", "连接", "V4、V3 和蓝牙连接状态与配对信息"),
@@ -174,6 +179,7 @@ impl ServerHandler for McpServer {
                 "最近一次主动扫描的郊狼 3.0 设备；读取资源不触发扫描",
             ),
             ("sources", "输入源", "输入源分配及可用波形目录"),
+            ("plugins", "插件", "已安装本地插件包、版本与发布者"),
             ("logs", "运行记录", "最近的有界运行记录"),
         ]
         .into_iter()
@@ -184,6 +190,12 @@ impl ServerHandler for McpServer {
                 .with_mime_type("application/json")
         })
         .collect();
+        resources.extend(snapshot.sources.iter().map(|source| {
+            Resource::new(format!("dglab://sources/{}", source.id), source.id.clone())
+                .with_title(source.name.clone())
+                .with_description("输入源实例元数据、配置、运行状态和插件发布状态；读取不启动插件")
+                .with_mime_type("application/json")
+        }));
         Ok(ListResourcesResult::with_all_items(resources))
     }
 
@@ -199,9 +211,21 @@ impl ServerHandler for McpServer {
             "dglab://connections" => json!(snapshot.connections),
             "dglab://bluetooth" => json!(snapshot.bluetooth),
             "dglab://sources" => {
-                json!({ "sources": snapshot.sources, "officialWaveforms": self.official_waveforms().await?, "customWaveforms": snapshot.custom_waveforms, "defaultSourceId": snapshot.default_source_id })
+                json!({ "sources": snapshot.sources, "bindings": snapshot.source_bindings, "officialWaveforms": self.official_waveforms().await?, "customWaveforms": snapshot.custom_waveforms, "defaultSourceId": snapshot.default_source_id })
             }
+            "dglab://plugins" => json!(snapshot.plugins),
             "dglab://logs" => json!(snapshot.logs),
+            uri if uri.starts_with("dglab://sources/") => {
+                let source_id = uri.trim_start_matches("dglab://sources/");
+                let source = snapshot
+                    .sources
+                    .iter()
+                    .find(|source| source.id == source_id)
+                    .ok_or_else(|| {
+                        ErrorData::resource_not_found("输入源实例不存在", Some(json!({"uri":uri})))
+                    })?;
+                json!(source)
+            }
             _ => {
                 return Err(ErrorData::resource_not_found(
                     "资源不存在",
@@ -214,5 +238,29 @@ impl ServerHandler for McpServer {
                 .with_mime_type("application/json"),
         ])
         .into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn priority_dispatch_uses_validated_core_commands() {
+        assert!(priority_tool(
+            "stop_output",
+            json!({"deviceId":"explicit-device"})
+        ));
+        assert!(priority_tool("disconnect_relay", json!({})));
+        assert!(priority_tool(
+            "disconnect_connection",
+            json!({"connectionId":"ws-v3"})
+        ));
+        assert!(!priority_tool("stop_output", json!({})));
+        assert!(!priority_tool("emergency_stop", json!({})));
+        assert!(!priority_tool(
+            "set_source_config",
+            json!({"sourceId":"source-test","config":{}})
+        ));
     }
 }

@@ -194,7 +194,7 @@ where
                     return None;
                 }
                 let safety = matches!(&request.request, ClientRequest::CallToolRequest(call)
-                    if matches!(call.params.name.as_ref(), "emergency_stop" | "stop_output" | "disconnect_relay"));
+                    if crate::handler::priority_tool(call.params.name.as_ref(), call.params.arguments.clone().map(serde_json::Value::Object).unwrap_or_else(|| json!({}))));
                 let queue = if safety {
                     &self.safety_requests
                 } else {
@@ -391,7 +391,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn full_normal_queue_reserves_stop_capacity_and_cancels_old_output() {
+    async fn full_normal_queue_reserves_disconnect_capacity_and_cancels_old_output() {
         let fixture = CoreFixture::start().await;
         let (host, mut peer) = tokio::io::duplex(64 * 1024);
         let (reader, writer) = tokio::io::split(host);
@@ -417,7 +417,7 @@ mod tests {
         peer.write_all(&request(33, "get_hub_snapshot"))
             .await
             .unwrap();
-        peer.write_all(&request(34, "emergency_stop"))
+        peer.write_all(&request(34, "disconnect_relay"))
             .await
             .unwrap();
         let stop = timeout(Duration::from_secs(1), transport.receive())
@@ -443,7 +443,7 @@ mod tests {
         assert_eq!(stale.code, "queue_busy");
         fixture
             .client
-            .call_received(ControlCommand::EmergencyStop, epoch)
+            .call_received(ControlCommand::DisconnectRelay, epoch)
             .await
             .unwrap();
         assert!(state.fault.lock().unwrap().is_none());
@@ -460,7 +460,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blocked_stdout_does_not_delay_stop_and_has_a_deadline() {
+    async fn blocked_stdout_does_not_delay_disconnect_and_has_a_deadline() {
         let fixture = CoreFixture::start().await;
         let (writer, mut slow_peer) = tokio::io::duplex(1);
         let (reader, mut input) = tokio::io::duplex(4096);
@@ -478,7 +478,7 @@ mod tests {
             .unwrap()
             .unwrap();
         input
-            .write_all(&request(2, "emergency_stop"))
+            .write_all(&request(2, "disconnect_relay"))
             .await
             .unwrap();
         timeout(Duration::from_millis(500), async {
@@ -488,12 +488,12 @@ mod tests {
             let epoch = stop.request.extensions().get::<CommandEpoch>().unwrap().0;
             fixture
                 .client
-                .call_received(ControlCommand::EmergencyStop, epoch)
+                .call_received(ControlCommand::DisconnectRelay, epoch)
                 .await
                 .unwrap();
         })
         .await
-        .expect("a slow stdout must not delay emergency stop");
+        .expect("a slow stdout must not delay relay disconnect");
         assert!(
             timeout(Duration::from_secs(2), sending)
                 .await

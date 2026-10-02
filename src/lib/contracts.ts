@@ -82,6 +82,8 @@ export interface DeviceSnapshot {
     capabilities: DeviceCapabilities;
     bleParameters: BleParameters | null;
     configurationStatus: string | null;
+    bindingIdA?: string | null;
+    bindingIdB?: string | null;
     id: string | number;
     name: string;
     type: string;
@@ -111,6 +113,11 @@ export interface SourceSnapshot {
     assignedChannelCount: number;
     selectedPresetId: string | null;
     selectedPresetName: string | null;
+    pluginId?: string | null;
+    runtimeStatus?: "stopped" | "starting" | "running" | "faulted" | "disabled";
+    lastError?: string | null;
+    config?: Record<string, unknown>;
+    state?: Record<string, unknown>;
 }
 
 export interface WaveformConfig {
@@ -162,6 +169,7 @@ export interface HubSnapshot {
     syncAllDevices: boolean;
     outputDeviceCount: number;
     sources: SourceSnapshot[];
+    plugins?: InstalledPlugin[];
     customWaveforms: CustomWaveformSnapshot[];
     defaultSourceId: string | null;
     inputModes: InputModesSnapshot;
@@ -257,3 +265,19 @@ export interface AppPreferences {
     autoStart: boolean;
     startMinimized: boolean;
 }
+
+export interface PluginManifest {
+    id: string; version: string; protocolVersion: number; name: string; publisher: string; license: string; executable: string;
+}
+export interface InstalledPlugin {
+    manifest: PluginManifest; digest: string; installedAt?: string; preinstalled?: boolean;
+}
+export type UiNodeKind = "page" | "section" | "stack" | "group" | "form" | "list" | "text" | "status" | "key_value" | "progress" | "divider" | "button" | "switch" | "text_field" | "integer_field" | "number_field" | "select" | "slider" | "xy_pad" | "grid" | "audio_player" | "meter" | "curve" | "waveform_picker" | "file_field";
+export interface UiNode {
+    id: string; type: UiNodeKind; label?: string; value?: unknown; configKey?: string; action?: string; input?: string; props?: Record<string, unknown>; children?: UiNode[];
+}
+export interface UiDocument {
+    title: string; nodes: UiNode[]; actions?: { id: string; label: string; description: string; paramsSchema: unknown }[]; revision?: number;
+}
+export interface SourceActionParams { action: string; value?: unknown; bindingId?: string; }
+export interface SourceInputParams extends SourceActionParams { owner: string; sequence: number; }

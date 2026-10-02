@@ -7,22 +7,20 @@ interface SafetyActionBarProps {
     snapshot: HubSnapshot | null;
     deviceId: string | null;
     pendingAction: string | null;
-    emergencyPending: boolean;
+    stoppingDeviceIds?: string[];
     showOutputControl: boolean;
     onStartOutput: (deviceId: string) => void;
     onStopOutput: (deviceId: string) => void;
-    onEmergencyStop: () => void;
 }
 
 export const SafetyActionBar = ({
     snapshot,
     deviceId,
     pendingAction,
-    emergencyPending,
+    stoppingDeviceIds = [],
     showOutputControl,
     onStartOutput,
     onStopOutput,
-    onEmergencyStop,
 }: SafetyActionBarProps) => {
     const device = snapshot?.devices.find((item) => item.controlId === deviceId);
     const connection = snapshot?.connections.find((item) => item.connectionId === device?.connectionId);
@@ -54,28 +52,15 @@ export const SafetyActionBar = ({
                 <button
                     aria-label={`${device.outputActive ? "停止" : "开始"} ${device.name} 的波形输出`}
                     className={`safety-output-action ${device.outputActive ? "is-running" : ""}`}
-                    disabled={pendingAction !== null || emergencyPending || (!device.outputActive && !canStart)}
+                    disabled={stoppingDeviceIds.includes(device.controlId) || (!device.outputActive && (pendingAction !== null || !canStart))}
                     onClick={() => device.outputActive ? onStopOutput(device.controlId) : onStartOutput(device.controlId)}
                     title={!device.outputActive && !canStart ? "设备就绪并为 A/B 通道分配输入源后可开始输出" : undefined}
                     type="button"
                 >
-                    {pendingAction === `output-${device.controlId}` ? <SpinnerGap aria-hidden="true" className="spin" size={18} /> : device.outputActive ? <Stop aria-hidden="true" size={17} weight="fill" /> : <Play aria-hidden="true" size={17} weight="fill" />}
+                    {stoppingDeviceIds.includes(device.controlId) || pendingAction === `output-${device.controlId}` ? <SpinnerGap aria-hidden="true" className="spin" size={18} /> : device.outputActive ? <Stop aria-hidden="true" size={17} weight="fill" /> : <Play aria-hidden="true" size={17} weight="fill" />}
                     {device.outputActive ? "停止输出" : "开始输出"}
                 </button>
             )}
-            <button
-                aria-label="紧急停止全部设备"
-                className="emergency-stop-button"
-                data-emergency-stop
-                disabled={emergencyPending}
-                onClick={onEmergencyStop}
-                title="清空全部设备波形、归零 A/B 强度并停止音频"
-                type="button"
-            >
-                {emergencyPending ? <SpinnerGap aria-hidden="true" className="spin" size={18} /> : <Stop aria-hidden="true" size={18} weight="fill" />}
-                <strong>{emergencyPending ? "正在停止…" : "紧急停止"}</strong>
-                <span>全部设备</span>
-            </button>
         </footer>
     );
 };

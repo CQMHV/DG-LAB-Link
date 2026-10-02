@@ -202,7 +202,16 @@ async fn cold_stdio_protocol_and_http_share_one_core_and_eof_releases_the_last_h
     let tools = stdio.request("tools/list", json!({})).await;
     let tools = tools["result"]["tools"].as_array().unwrap();
     assert_eq!(tools.len(), ControlCommand::descriptors().len());
-    assert!(tools.iter().any(|tool| tool["name"] == "emergency_stop"));
+    assert!(!tools.iter().any(|tool| tool["name"] == "emergency_stop"));
+    for name in [
+        "install_plugin",
+        "create_source",
+        "set_source_config",
+        "source_action",
+        "source_input",
+    ] {
+        assert!(tools.iter().any(|tool| tool["name"] == name));
+    }
     assert!(
         !tools
             .iter()
@@ -226,6 +235,7 @@ async fn cold_stdio_protocol_and_http_share_one_core_and_eof_releases_the_last_h
         "dglab://connections",
         "dglab://bluetooth",
         "dglab://sources",
+        "dglab://plugins",
         "dglab://logs",
     ] {
         assert!(resources.iter().any(|resource| resource["uri"] == uri));
@@ -238,6 +248,35 @@ async fn cold_stdio_protocol_and_http_share_one_core_and_eof_releases_the_last_h
     assert_eq!(status["connection"]["state"], "disconnected");
     assert!(status["connection"]["controllerId"].is_null());
     assert_eq!(status["outputDeviceCount"], 0);
+    let plugin_resource = stdio
+        .request("resources/read", json!({"uri":"dglab://plugins"}))
+        .await;
+    let plugins: Value = serde_json::from_str(
+        plugin_resource["result"]["contents"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(plugins, status["plugins"]);
+    let source_uri = format!(
+        "dglab://sources/{}",
+        status["sources"][0]["id"].as_str().unwrap()
+    );
+    assert!(
+        resources
+            .iter()
+            .any(|resource| resource["uri"] == source_uri)
+    );
+    let source_resource = stdio
+        .request("resources/read", json!({"uri":source_uri}))
+        .await;
+    let source: Value = serde_json::from_str(
+        source_resource["result"]["contents"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(source, status["sources"][0]);
     for (uri, field) in [
         ("dglab://connections", "connections"),
         ("dglab://bluetooth", "bluetooth"),
@@ -343,6 +382,10 @@ async fn cold_stdio_protocol_and_http_share_one_core_and_eof_releases_the_last_h
         sources["customWaveforms"],
         observer.call(ControlCommand::GetHubSnapshot).await.unwrap()["customWaveforms"]
     );
+    assert_eq!(
+        sources["bindings"],
+        observer.call(ControlCommand::GetHubSnapshot).await.unwrap()["sourceBindings"]
+    );
     let selected = http_call(
         &config,
         "set_default_source",
@@ -374,6 +417,7 @@ async fn cold_stdio_protocol_and_http_share_one_core_and_eof_releases_the_last_h
     assert_eq!(stdio_error["result"]["structuredContent"], json!(error));
     assert_eq!(http_error["result"]["structuredContent"], json!(error));
     assert_eq!(observer.runtime_info().await.unwrap().pid, runtime.pid);
+    exercise_shared_plugin(&mut stdio, &config, &observer).await;
     assert_eq!(
         observer.runtime_info().await.unwrap().holder_count,
         2,
@@ -383,6 +427,179 @@ async fn cold_stdio_protocol_and_http_share_one_core_and_eof_releases_the_last_h
     stdio.finish_with_eof().await;
     http.wait_core_closed().await;
     core_exited(&config).await;
+}
+
+#[cfg(windows)]
+async fn exercise_shared_plugin(stdio: &mut McpProcess, config: &LocalConfig, observer: &Client) {
+    let package_directory = tempfile::tempdir().unwrap();
+    let payload = package_directory.path().join("payload");
+    std::fs::create_dir(&payload).unwrap();
+    let executable =
+        Path::new(env!("CARGO_BIN_EXE_dg-lab-link-mcp")).with_file_name("dg-lab-link-touch.exe");
+    assert!(
+        executable.is_file(),
+        "build the native touch plugin before MCP integration tests"
+    );
+    std::fs::copy(executable, payload.join("touch.exe")).unwrap();
+    std::fs::write(payload.join("plugin.json"),json!({
+        "id":"test.dglab.touch","version":"1.0.0","protocolVersion":1,
+        "name":"本地第三方触控示例","publisher":"Integration test","license":"AGPL-3.0-only","executable":"touch.exe"
+    }).to_string()).unwrap();
+    let package = package_directory.path().join("touch.dglabplugin");
+    let packaging_payload = payload.clone();
+    let packaging_output = package.clone();
+    tokio::task::spawn_blocking(move || {
+        dg_lab_link_plugin_runtime::package::pack_directory(&packaging_payload, &packaging_output)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let installed = stdio
+        .call("install_plugin", json!({"path":package.to_string_lossy()}))
+        .await;
+    assert_eq!(installed["result"]["isError"], false, "{installed}");
+    assert_eq!(
+        installed["result"]["structuredContent"]["preinstalled"],
+        false
+    );
+    let packages = observer.call(ControlCommand::ListPlugins).await.unwrap();
+    assert!(
+        packages
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|package| package["manifest"]["id"] == "test.dglab.touch")
+    );
+    let created = http_call(
+        config,
+        "create_source",
+        json!({"pluginId":"test.dglab.touch","name":"跨入口输入源"}),
+    )
+    .await;
+    assert_eq!(created["result"]["isError"], false, "{created}");
+    let source_id = created["result"]["structuredContent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let document = stdio
+        .call(
+            "get_source_ui",
+            json!({"sourceId":source_id,"params":{"surface":"settings"}}),
+        )
+        .await;
+    assert_eq!(document["result"]["isError"], false, "{document}");
+    assert_eq!(
+        document["result"]["structuredContent"]["nodes"][0]["type"],
+        "form"
+    );
+    let mut touch_config =
+        serde_json::to_value(dg_lab_link_core::sources::touch::TouchConfig::default()).unwrap();
+    touch_config["swapAxes"] = json!(true);
+    let configured = http_call(
+        config,
+        "set_source_config",
+        json!({"sourceId":source_id,"config":touch_config}),
+    )
+    .await;
+    assert_eq!(configured["result"]["isError"], false, "{configured}");
+    let snapshot = observer.call(ControlCommand::GetHubSnapshot).await.unwrap();
+    let source = snapshot["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["id"] == source_id)
+        .unwrap();
+    assert_eq!(source["config"]["swapAxes"], true);
+    let uri = format!("dglab://sources/{source_id}");
+    let resource = stdio.request("resources/read", json!({"uri":uri})).await;
+    let resource: Value =
+        serde_json::from_str(resource["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(resource["config"], source["config"]);
+    assert_eq!(resource["state"]["touchConfig"]["swapAxes"], true);
+    let action = stdio.call("source_action",json!({"sourceId":source_id,"params":{"action":"release_owner","value":{"ownerId":"test-owner"}}})).await;
+    assert_eq!(action["result"]["isError"], false, "{action}");
+    assert_eq!(
+        action["result"]["structuredContent"]["touchConfig"]["swapAxes"],
+        true
+    );
+    let invalid_params =
+        json!({"sourceId":source_id,"params":{"action":"unknown_action","value":{}}});
+    let direct_error = observer
+        .call(ControlCommand::from_call("source_action", invalid_params.clone()).unwrap())
+        .await
+        .unwrap_err();
+    for result in [
+        stdio.call("source_action", invalid_params.clone()).await,
+        http_call(config, "source_action", invalid_params).await,
+    ] {
+        assert_eq!(result["result"]["structuredContent"], json!(direct_error));
+    }
+    let uninstalled = http_call(
+        config,
+        "uninstall_plugin",
+        json!({"pluginId":"test.dglab.touch"}),
+    )
+    .await;
+    assert_eq!(uninstalled["result"]["isError"], false, "{uninstalled}");
+    let snapshot = observer.call(ControlCommand::GetHubSnapshot).await.unwrap();
+    let retained = snapshot["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["id"] == source_id)
+        .unwrap();
+    assert_eq!(
+        retained["enabled"], false,
+        "uninstall revokes availability while preserving config/data"
+    );
+    assert_eq!(retained["runtimeStatus"], "missing");
+    assert_eq!(retained["config"]["swapAxes"], true);
+    assert!(
+        !snapshot["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|plugin| plugin["manifest"]["id"] == "test.dglab.touch")
+    );
+    let reinstalled = stdio
+        .call("install_plugin", json!({"path":package.to_string_lossy()}))
+        .await;
+    assert_eq!(reinstalled["result"]["isError"], false, "{reinstalled}");
+    let snapshot = observer.call(ControlCommand::GetHubSnapshot).await.unwrap();
+    let retained = snapshot["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["id"] == source_id)
+        .unwrap();
+    assert_eq!(
+        retained["runtimeStatus"], "stopped",
+        "reinstall preserves config but does not resume the instance"
+    );
+    assert_eq!(retained["config"]["swapAxes"], true);
+    let removed = http_call(
+        config,
+        "uninstall_plugin",
+        json!({"pluginId":"test.dglab.touch","deleteData":true}),
+    )
+    .await;
+    assert_eq!(removed["result"]["isError"], false, "{removed}");
+    let snapshot = observer.call(ControlCommand::GetHubSnapshot).await.unwrap();
+    assert!(
+        !snapshot["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|source| source["id"] == source_id)
+    );
+}
+
+#[cfg(not(windows))]
+async fn exercise_shared_plugin(
+    _stdio: &mut McpProcess,
+    _config: &LocalConfig,
+    _observer: &Client,
+) {
 }
 
 #[tokio::test]
