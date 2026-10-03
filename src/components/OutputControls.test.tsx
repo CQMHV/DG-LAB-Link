@@ -6,7 +6,7 @@ import App from "../App";
 import { __emitMockSnapshot, __resetMockBridge, connectBluetooth, getHubSnapshot, scanBluetooth } from "../lib/bridge";
 import { asObject } from "../lib/json";
 import type { AudioSnapshot } from "../lib/contracts";
-import { SafetyActionBar } from "./SafetyActionBar";
+import { DashboardPage } from "../pages/DashboardPage";
 
 beforeEach(() => {
     __resetMockBridge();
@@ -14,13 +14,37 @@ beforeEach(() => {
     vi.spyOn(HTMLElement.prototype, "getClientRects").mockReturnValue([{ width: 100, height: 40 }] as unknown as DOMRectList);
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
-describe("设备输出操作栏", () => {
+describe("设备输出控制", () => {
     it("其他普通请求未完成时仍可停止当前设备", async () => {
         const snapshot = await getHubSnapshot();
         snapshot.devices[0].outputActive = true;
         const stop = vi.fn();
         const user = userEvent.setup();
-        render(<SafetyActionBar deviceId={snapshot.devices[0].controlId} onStartOutput={vi.fn()} onStopOutput={stop} pendingAction="source-config" showOutputControl snapshot={snapshot} />);
+        const noop = () => {};
+        render(<DashboardPage
+            activeTabId="test-tab"
+            activeDeviceId={snapshot.devices[0].controlId}
+            detachedTabs={[]}
+            tabs={[{ id: "test-tab", deviceId: snapshot.devices[0].controlId }]}
+            snapshot={snapshot}
+            pendingAction="source-config"
+            onAdjust={noop}
+            onCloseTab={noop}
+            onConnect={noop}
+            onDetachTab={noop}
+            onMoveTab={noop}
+            onNewDeviceTab={noop}
+            onFocusDetachedTab={noop}
+            onOpenPairing={noop}
+            onSelectDevice={noop}
+            onSelectCustomWaveform={noop}
+            onSelectTab={noop}
+            onSetDeviceChannelSource={noop}
+            onSetDeviceChannelSourceSync={noop}
+            onSetFixedWaveform={noop}
+            onStartOutput={noop}
+            onStopOutput={stop}
+        />);
         const button = screen.getByRole("button", { name: "停止 郊狼 3.0 的波形输出" });
         expect((button as HTMLButtonElement).disabled).toBe(false);
         await user.click(button);
@@ -51,11 +75,5 @@ describe("设备输出操作栏", () => {
         await user.tab(); expect(document.activeElement).toBe(screen.getByText("蓝牙参数"));
         await user.tab({ shift: true }); expect(document.activeElement).toBe(close);
         await user.keyboard("{Escape}"); expect(screen.queryByRole("dialog")).toBeNull();
-    });
-    it("未读取快照时显示未知限制且没有设备写操作", () => {
-        render(<SafetyActionBar deviceId={null} onStartOutput={vi.fn()} onStopOutput={vi.fn()} pendingAction="connect" showOutputControl snapshot={null} />);
-        expect(screen.getByText("未选择设备")).toBeTruthy();
-        expect(screen.queryByRole("button")).toBeNull();
-        expect(screen.getByText("正在读取状态")).toBeTruthy();
     });
 });

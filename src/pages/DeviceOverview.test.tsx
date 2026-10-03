@@ -17,8 +17,6 @@ import {
 beforeEach(() => __resetMockBridge());
 afterEach(() => cleanup());
 
-const safetyBar = () => screen.getByRole("contentinfo", { name: "安全限制与输出控制" });
-
 describe("设备总览", () => {
     it("首先展示已连接设备，按需打开连接管理并可用键盘返回", async () => {
         const user = userEvent.setup();
@@ -64,7 +62,8 @@ describe("设备总览", () => {
             expect(snapshot.devices.map((device) => [device.intensityA, device.intensityB]))
                 .toEqual([[base.intensityA, base.intensityB], [base.intensityA, base.intensityB]]);
         });
-        expect(within(safetyBar()).getByText("郊狼 3.0 · V4")).toBeTruthy();
+        await user.click(screen.getByRole("button", { name: "控制台" }));
+        expect(screen.getByText("郊狼 3.0", { selector: ".device-scope-title strong" })).toBeTruthy();
     });
 
     it("普通停止只停止所选设备并保留两台设备的基础强度", async () => {
@@ -86,7 +85,8 @@ describe("设备总览", () => {
                 .toEqual(initial.devices.map((device) => [device.intensityA, device.intensityB]));
             expect(snapshot.outputDeviceCount).toBe(1);
         });
-        expect(within(safetyBar()).getByText("1 台设备输出中")).toBeTruthy();
+        expect(within(deviceCard).queryByRole("button", { name: "停止 郊狼 2.0 输出" })).toBeNull();
+        expect(screen.getByRole("button", { name: "停止 郊狼 3.0 输出" })).toBeTruthy();
     });
 
     it("离开设备页再返回时保留选定的对齐基准", async () => {
@@ -118,14 +118,13 @@ describe("设备总览", () => {
         await waitFor(async () => expect((await getHubSnapshot()).syncAllDevices).toBe(false));
     });
 
-    it("断开所选蓝牙设备后安全栏选择现存设备，不能继续操作旧目标", async () => {
+    it("断开所选蓝牙设备后关闭详情，现存设备仍可操作", async () => {
         await scanBluetooth();
         await connectBluetooth("ble-demo-030");
         const user = userEvent.setup();
         render(<App />);
         await user.click(await screen.findByRole("button", { name: "设备" }));
         await user.click(screen.getByRole("button", { name: /^选择 郊狼 3\.0 蓝牙 · BLE/ }));
-        expect(within(safetyBar()).getByText("郊狼 3.0 蓝牙 · BLE")).toBeTruthy();
         await user.click(screen.getByRole("button", { name: "郊狼 3.0 蓝牙 设备详情" }));
         const details = screen.getByRole("dialog", { name: "郊狼 3.0 蓝牙 · 设备详情" });
         await user.click(within(details).getByRole("button", { name: "断开蓝牙设备" }));
@@ -134,7 +133,6 @@ describe("设备总览", () => {
             expect(screen.queryByRole("heading", { name: /郊狼 3\.0 蓝牙/, level: 2 })).toBeNull();
             expect(screen.queryByRole("dialog", { name: "郊狼 3.0 蓝牙 · 设备详情" })).toBeNull();
         });
-        expect(within(safetyBar()).getByText("郊狼 3.0 · V4")).toBeTruthy();
         const existingDevice = screen.getByRole("heading", { level: 2, name: /郊狼 3\.0/ }).closest(".device-card") as HTMLElement;
         await user.click(within(existingDevice).getByRole("button", { name: "在新标签页中打开" }));
         expect(screen.queryByRole("button", { name: "开始 郊狼 3.0 蓝牙 的波形输出" })).toBeNull();

@@ -10,7 +10,6 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { PairingModal } from "./components/PairingModal";
-import { SafetyActionBar } from "./components/SafetyActionBar";
 import type { DeviceViewTab } from "./components/DeviceTabs";
 import { WindowChrome } from "./components/WindowChrome";
 import { useHubSnapshot } from "./hooks/useHubSnapshot";
@@ -426,9 +425,6 @@ export default function App() {
     const selectedOverviewDeviceId = snapshot?.devices.some((device) => device.controlId === overviewDeviceId)
         ? overviewDeviceId
         : snapshot?.devices[0]?.controlId ?? null;
-    const safetyDeviceId = !windowContext.detached && page === "devices"
-        ? selectedOverviewDeviceId
-        : activeDashboardDeviceId;
     const ordinaryPendingAction = pendingAction;
 
     useEffect(() => {
@@ -596,7 +592,7 @@ export default function App() {
                                     activeDashboardDeviceId
                                 }
                                 detached={windowContext.detached}
-                                outputControlsInFooter
+                                stoppingDeviceIds={stoppingDeviceIds}
                                 detachedTabs={detachedTabs}
                                 onAdjust={handleAdjust}
                                 onCloseTab={handleCloseDeviceTab}
@@ -755,16 +751,6 @@ export default function App() {
                     </div>
                 )}
             </main>
-
-            <SafetyActionBar
-                deviceId={safetyDeviceId}
-                stoppingDeviceIds={stoppingDeviceIds}
-                onStartOutput={handleStartOutput}
-                onStopOutput={handleStopOutput}
-                pendingAction={pendingAction}
-                showOutputControl={windowContext.detached || page === "dashboard"}
-                snapshot={snapshot}
-            />
 
             {pairingConnectionId && pairingConnection?.pairingUrl && (
                 <PairingModal

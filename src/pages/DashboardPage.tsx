@@ -32,7 +32,7 @@ interface DashboardPageProps {
     activeTabId: string;
     activeDeviceId: string | null;
     detached?: boolean;
-    outputControlsInFooter?: boolean;
+    stoppingDeviceIds?: string[];
     detachedTabs: DeviceViewTab[];
     onAdjust: (channel: HubChannel, delta: number, deviceId: string) => void;
     onCloseTab: (tabId: string) => void;
@@ -74,7 +74,7 @@ export const DashboardPage = ({
     activeTabId,
     activeDeviceId,
     detached = false,
-    outputControlsInFooter = false,
+    stoppingDeviceIds = [],
     detachedTabs,
     onAdjust,
     onCloseTab,
@@ -135,7 +135,8 @@ export const DashboardPage = ({
             (pendingAction?.startsWith(`source-${device.controlId}-`) ||
                 pendingAction === `source-sync-${device.controlId}`),
     );
-    const outputPending = pendingAction === `output-${device?.controlId}`;
+    const outputPending = Boolean(device && stoppingDeviceIds.includes(device.controlId)) ||
+        pendingAction === `output-${device?.controlId}`;
     const canStartOutput = Boolean(
         isConnected &&
             deviceSources.a?.enabled &&
@@ -273,12 +274,12 @@ export const DashboardPage = ({
                                         已发送 {snapshot.output.framesSent.toLocaleString("zh-CN")} 帧
                                     </span>
                                 </div>
-                                {!outputControlsInFooter && <button
+                                <button
                                     aria-label={`${device.outputActive ? "停止" : "开始"} ${device.name} 的波形输出`}
                                     className={`device-output-button ${device.outputActive ? "is-running" : ""}`}
                                     disabled={
                                         outputPending ||
-                                        (!device.outputActive && !canStartOutput)
+                                        (!device.outputActive && (busy || !canStartOutput))
                                     }
                                     onClick={() =>
                                         device.outputActive
@@ -299,7 +300,7 @@ export const DashboardPage = ({
                                         <Play aria-hidden="true" size={16} weight="fill" />
                                     )}
                                     {device.outputActive ? "停止输出" : "开始输出"}
-                                </button>}
+                                </button>
                             </header>
                             <div className="device-dashboard-content">
                                     <div className="realtime-stage" aria-label="双通道实时控制">

@@ -332,7 +332,7 @@ describe("DG-LAB Link 前端", () => {
         expect(document.activeElement).toBe(openButton);
     });
 
-    it("仪表盘只显示当前设备控制并保留固定安全操作栏", async () => {
+    it("仪表盘只显示当前设备控制，输出操作位于设备顶部", async () => {
         const user = userEvent.setup();
         render(<App />);
 
@@ -340,7 +340,11 @@ describe("DG-LAB Link 前端", () => {
             await screen.findByRole("region", { name: "当前设备仪表盘" }),
         ).toBeTruthy();
         expect(screen.queryByRole("region", { name: "全局控制" })).toBeNull();
-        expect(screen.getByRole("contentinfo", { name: "安全限制与输出控制" })).toBeTruthy();
+        expect(screen.queryByRole("contentinfo")).toBeNull();
+        expect(
+            screen.getByRole("button", { name: "开始 郊狼 3.0 的波形输出" })
+                .closest(".device-workspace-heading"),
+        ).toBeTruthy();
         expect(
             screen.getByText("郊狼 3.0", {
                 selector: ".device-scope-title strong",
