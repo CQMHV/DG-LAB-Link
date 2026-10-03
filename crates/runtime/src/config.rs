@@ -10,19 +10,11 @@ pub const DEFAULT_PORT: u16 = 17845;
 pub const DEFAULT_MCP_PORT: u16 = 17846;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LocalConfig {
     pub port: u16,
     pub mcp_port: u16,
     pub token: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct StoredConfig {
-    port: u16,
-    mcp_port: Option<u16>,
-    token: String,
 }
 
 impl LocalConfig {
@@ -35,43 +27,7 @@ impl LocalConfig {
     fn load_unlocked(directory: &Path) -> Result<Self, ControlError> {
         let path = directory.join("local-runtime.json");
         match File::open(&path) {
-            Ok(file) => {
-                let stored = read_stored(file)?;
-                let legacy = stored.mcp_port.is_none();
-                let config = Self {
-                    port: if legacy {
-                        if stored.port == DEFAULT_PORT {
-                            DEFAULT_MCP_PORT
-                        } else {
-                            DEFAULT_PORT
-                        }
-                    } else {
-                        stored.port
-                    },
-                    mcp_port: stored.mcp_port.unwrap_or(stored.port),
-                    token: stored.token,
-                };
-                config.validate()?;
-                if legacy {
-                    let lock = OpenOptions::new()
-                        .read(true)
-                        .write(true)
-                        .create(true)
-                        .truncate(false)
-                        .open(directory.join("core.lock"))?;
-                    match lock.try_lock() {
-                        Ok(()) => config.save_unlocked(directory)?,
-                        Err(std::fs::TryLockError::WouldBlock) => {
-                            return Err(ControlError::new(
-                                "runtime_config_migration_required",
-                                "请先退出旧版 GUI 和 CLI 并等待共享核心关闭，再迁移独立 MCP 端口配置",
-                            ));
-                        }
-                        Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
-                    }
-                }
-                Ok(config)
-            }
+            Ok(file) => read_config(file),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let config = Self {
                     port: DEFAULT_PORT,
@@ -99,18 +55,9 @@ impl LocalConfig {
 
     // Saves replace the whole file atomically. Runtime info can read the latest
     // address without waiting for a configuration transaction on its WS loop.
-    #[cfg(feature = "server")]
+    #[cfg(any(feature = "server", test))]
     pub(crate) fn saved_mcp_url(directory: &Path) -> Result<String, ControlError> {
-        let stored = read_stored(File::open(directory.join("local-runtime.json"))?)?;
-        let config = Self {
-            port: stored.port,
-            mcp_port: stored
-                .mcp_port
-                .ok_or_else(|| ControlError::new("runtime_config_invalid", "本机配置尚未迁移"))?,
-            token: stored.token,
-        };
-        config.validate()?;
-        Ok(config.mcp_url())
+        Ok(read_config(File::open(directory.join("local-runtime.json"))?)?.mcp_url())
     }
 
     /// Change only the MCP HTTP port while its server is offline. The core may
@@ -190,7 +137,7 @@ impl LocalConfig {
     }
 }
 
-fn read_stored(file: File) -> Result<StoredConfig, ControlError> {
+fn read_config(file: File) -> Result<LocalConfig, ControlError> {
     let mut bytes = Vec::new();
     file.take(4097).read_to_end(&mut bytes)?;
     if bytes.len() > 4096 {
@@ -199,8 +146,10 @@ fn read_stored(file: File) -> Result<StoredConfig, ControlError> {
             "本机运行时配置超过 4 KiB",
         ));
     }
-    serde_json::from_slice(&bytes)
-        .map_err(|error| ControlError::new("runtime_config_invalid", error.to_string()))
+    let config: LocalConfig = serde_json::from_slice(&bytes)
+        .map_err(|error| ControlError::new("runtime_config_invalid", error.to_string()))?;
+    config.validate()?;
+    Ok(config)
 }
 
 fn configuration_lock(directory: &Path) -> Result<File, ControlError> {
@@ -226,38 +175,17 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn legacy_configuration_preserves_mcp_port_and_token() {
-        for old_port in [17846, 19046, DEFAULT_PORT] {
-            let directory = tempfile::tempdir().unwrap();
-            let token = "a".repeat(64);
-            fs::write(
-                directory.path().join("local-runtime.json"),
-                serde_json::to_vec(&serde_json::json!({"port": old_port, "token": token})).unwrap(),
-            )
-            .unwrap();
-            let config = LocalConfig::load(directory.path()).unwrap();
-            assert_eq!(config.mcp_port, old_port);
-            assert_eq!(config.token, token);
-            assert_ne!(config.port, config.mcp_port);
-            assert_eq!(
-                LocalConfig::load(directory.path()).unwrap().port,
-                config.port
-            );
-            let persisted: serde_json::Value = serde_json::from_slice(
-                &fs::read(directory.path().join("local-runtime.json")).unwrap(),
-            )
-            .unwrap();
-            assert_eq!(persisted["mcpPort"], old_port);
-        }
-    }
-
-    #[test]
-    fn live_legacy_core_prevents_migration_without_changing_the_file() {
+    fn initializes_and_reloads_one_configuration_format() {
         let directory = tempfile::tempdir().unwrap();
-        let original =
-            serde_json::to_vec(&serde_json::json!({"port":17846,"token":"b".repeat(64)})).unwrap();
+        let initial = LocalConfig::load(directory.path()).unwrap();
+        assert_eq!(
+            (initial.port, initial.mcp_port),
+            (DEFAULT_PORT, DEFAULT_MCP_PORT)
+        );
+        assert_eq!(initial.token.len(), 64);
+        initial.validate().unwrap();
         let path = directory.path().join("local-runtime.json");
-        fs::write(&path, &original).unwrap();
+        let original = fs::read(&path).unwrap();
         let core = OpenOptions::new()
             .read(true)
             .write(true)
@@ -266,13 +194,40 @@ mod tests {
             .open(directory.path().join("core.lock"))
             .unwrap();
         core.try_lock().unwrap();
+        let reloaded = LocalConfig::load(directory.path()).unwrap();
         assert_eq!(
-            LocalConfig::load(directory.path()).unwrap_err().code,
-            "runtime_config_migration_required"
+            (reloaded.port, reloaded.mcp_port),
+            (initial.port, initial.mcp_port)
         );
-        assert_eq!(fs::read(&path).unwrap(), original);
-        drop(core);
-        assert_eq!(LocalConfig::load(directory.path()).unwrap().mcp_port, 17846);
+        assert_eq!(reloaded.token, initial.token);
+        assert_eq!(fs::read(path).unwrap(), original);
+    }
+
+    #[test]
+    fn invalid_configuration_is_rejected_without_rewriting_the_file() {
+        for invalid in [
+            serde_json::json!({"port":17845,"token":"a".repeat(64)}),
+            serde_json::json!({"port":17845,"mcpPort":null,"token":"a".repeat(64)}),
+            serde_json::json!({"port":17845,"mcpPort":17845,"token":"a".repeat(64)}),
+            serde_json::json!({"port":17845,"mcpPort":17846,"token":"short"}),
+            serde_json::json!({"port":17845,"mcpPort":17846,"token":"a".repeat(64),"unexpected":true}),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("local-runtime.json");
+            let original = serde_json::to_vec(&invalid).unwrap();
+            fs::write(&path, &original).unwrap();
+            assert_eq!(
+                LocalConfig::load(directory.path()).unwrap_err().code,
+                "runtime_config_invalid"
+            );
+            assert_eq!(
+                LocalConfig::saved_mcp_url(directory.path())
+                    .unwrap_err()
+                    .code,
+                "runtime_config_invalid"
+            );
+            assert_eq!(fs::read(path).unwrap(), original);
+        }
     }
 
     #[test]

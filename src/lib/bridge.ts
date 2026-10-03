@@ -151,7 +151,7 @@ const createDefaultMockSnapshot = (): HubSnapshot => {
         { id: "source-touch", revision: 0, kind: "plugin", pluginId: "cn.dglab.link.touch", runtimeStatus: "stopped", lastError: null, config: defaultTouchConfig() as unknown as Record<string, unknown>, state: {}, name: "触控模式", enabled: true, assignedChannelCount: 0, selectedPresetId: null, selectedPresetName: null },
         { id: "source-audio", revision: 0, kind: "plugin", pluginId: "cn.dglab.link.audio", runtimeStatus: "stopped", lastError: null, config: { defaultChannelConfig: defaultAudioConfig() }, state: { audio: defaultDemoAudio() }, name: "音频模式", enabled: true, assignedChannelCount: 0, selectedPresetId: null, selectedPresetName: null },
     ],
-    plugins: [{ manifest: { id: "cn.dglab.link.touch", version: "0.1.0", protocolVersion: 2, name: "触控输入", publisher: "DG-LAB Link", license: "AGPL-3.0-only", executable: "touch.exe" }, digest: "demo-touch", preinstalled: true }, { manifest: { id: "cn.dglab.link.audio", version: "0.1.0", protocolVersion: 2, name: "音频输入", publisher: "DG-LAB Link", license: "AGPL-3.0-only", executable: "audio.exe" }, digest: "demo-audio", preinstalled: true }],
+    plugins: [{ manifest: { id: "cn.dglab.link.touch", version: "0.1.0", protocolVersion: 1, name: "触控输入", publisher: "DG-LAB Link", license: "AGPL-3.0-only", executable: "touch.exe" }, digest: "demo-touch", preinstalled: true }, { manifest: { id: "cn.dglab.link.audio", version: "0.1.0", protocolVersion: 1, name: "音频输入", publisher: "DG-LAB Link", license: "AGPL-3.0-only", executable: "audio.exe" }, digest: "demo-audio", preinstalled: true }],
     customWaveforms: [
         {
             id: "custom-demo",
@@ -1055,7 +1055,7 @@ export const pluginDemoCall = async (command: PluginCommand): Promise<unknown> =
             const id = "example.sample";
             const existing = snapshot.plugins?.find((item) => item.manifest.id === id);
             if (existing) { if (command.command === "install_plugin") throw new Error("插件已安装，请使用更新"); existing.manifest.version = "0.2.0"; }
-            else { if (command.command === "update_plugin") throw new Error("插件尚未安装"); snapshot.plugins ??= []; snapshot.plugins.push({ manifest: { id, name: "示例插件", version: "0.1.0", protocolVersion: 2, publisher: "示例开发者", license: "MIT", executable: "sample.exe" }, digest: "demo-sample", preinstalled: false }); }
+            else { if (command.command === "update_plugin") throw new Error("插件尚未安装"); snapshot.plugins ??= []; snapshot.plugins.push({ manifest: { id, name: "示例插件", version: "0.1.0", protocolVersion: 1, publisher: "示例开发者", license: "MIT", executable: "sample.exe" }, digest: "demo-sample", preinstalled: false }); }
         }).plugins;
         case "uninstall_plugin": return updateMockSnapshot((snapshot) => {
             const ids = snapshot.sources.filter((item) => item.pluginId === params.pluginId).map((item) => item.id);

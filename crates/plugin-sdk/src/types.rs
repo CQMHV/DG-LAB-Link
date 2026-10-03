@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_BINDINGS: usize = 64;
 pub const FRAME_INTERVAL_MS: u64 = 100;
 pub const MAX_INSTANCES: usize = 32;

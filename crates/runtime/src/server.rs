@@ -196,8 +196,6 @@ pub async fn run_core(
     relay_endpoint: Option<String>,
 ) -> Result<(), ControlError> {
     std::fs::create_dir_all(&directory)?;
-    // Migrate a legacy shared HTTP/control port before acquiring our own core
-    // lock; migration must not disturb an already running legacy process.
     let mut config = LocalConfig::load(&directory)?;
     let lock = OpenOptions::new()
         .read(true)

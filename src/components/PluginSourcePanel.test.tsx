@@ -103,7 +103,7 @@ describe("插件管理与公开语义界面", () => {
         expect(save).not.toHaveBeenCalled();
     });
 
-    it("陈旧草稿保留旧版本，冲突后显式载入新配置再提交", async () => {
+    it("陈旧草稿保留原修订号，冲突后显式载入当前配置再提交", async () => {
         vi.spyOn(plugins, "getSourceUi").mockResolvedValue(doc());
         const save = vi.spyOn(plugins, "setSourceConfig").mockRejectedValueOnce({ code: "config_conflict", message: "配置已更新" }).mockResolvedValue({});
         const instance = source("revision");

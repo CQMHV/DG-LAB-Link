@@ -315,7 +315,7 @@ mod tests {
             serde_json::json!({"fixedWaveform":{"presetId":"bad","presetName":"Bad","frames":["FFFFFFFFFFFFFFFF"]}}),
             serde_json::json!({"relayEndpoints":{"ws_v3":"https://example.test"}}),
             serde_json::json!({"bleParameters":{"device":{"maxStrengthA":201}}}),
-            serde_json::json!({"touchConfig":{}}),
+            serde_json::json!({"unexpected":{}}),
         ] {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join(PREFERENCES_FILE_NAME);
@@ -407,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    fn older_preferences_files_receive_the_new_default() {
+    fn omitted_optional_preferences_use_defaults() {
         let config_dir = temporary_config_dir();
         fs::create_dir_all(&config_dir).unwrap();
         fs::write(
@@ -470,14 +470,8 @@ mod tests {
     }
 
     #[test]
-    fn transport_configuration_migrates_and_persists_only_durable_parameters() {
+    fn transport_configuration_persists_only_durable_parameters() {
         let config_dir = temporary_config_dir();
-        fs::create_dir_all(&config_dir).unwrap();
-        fs::write(
-            config_dir.join(PREFERENCES_FILE_NAME),
-            "{\"closeToTray\":false}",
-        )
-        .unwrap();
         let state = PreferencesState::load(config_dir.clone()).unwrap();
         assert_eq!(state.relay_endpoint(TransportKind::WsV3), None);
         assert_eq!(state.ble_parameters("peripheral"), BleParameters::default());

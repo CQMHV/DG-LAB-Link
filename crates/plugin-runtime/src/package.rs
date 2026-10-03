@@ -428,6 +428,19 @@ mod tests {
     }
 
     #[test]
+    fn bundled_manifests_match_the_sdk_protocol() {
+        for content in [
+            include_str!("../../builtin-plugins/packages/touch/plugin.json"),
+            include_str!("../../builtin-plugins/packages/audio/plugin.json"),
+            include_str!("../../plugin-sdk/examples/package/plugin.json"),
+            include_str!("../../plugin-sdk/templates/rust/plugin.json"),
+        ] {
+            let manifest: PluginManifest = serde_json::from_str(content).unwrap();
+            validate_manifest(&manifest).unwrap();
+        }
+    }
+
+    #[test]
     fn validates_windows_aliases_and_traversal() {
         for name in [
             "../out",

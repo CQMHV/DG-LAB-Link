@@ -1,7 +1,7 @@
 {
     "id": "cn.dglab.link.touch",
     "version": "0.1.0",
-    "protocolVersion": 2,
+    "protocolVersion": 1,
     "name": "触控",
     "publisher": "DG-LAB Link",
     "license": "AGPL-3.0-only",
