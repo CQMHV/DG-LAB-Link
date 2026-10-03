@@ -103,12 +103,12 @@ $binding = $state.sourceBindings | Where-Object { $_.controlId -eq $device -and 
 & $cli sources action $source.id core_snapshot --json
 & $cli sources stop $source.id --json
 & $cli sources enable $source.id off --json
-& $cli plugins update .\example-source-v2.dglabplugin --json
+& $cli plugins update .\example-source-update.dglabplugin --json
 & $cli plugins uninstall example.pulse-source --json
 # 卸载默认保留实例、配置和数据；彻底删除需显式 --delete-data
 ```
 
-`call clear_device_channel --params` 可按设备及通道清空旧波形并保持输出活动；返回绑定代次，不代表设备确认。实例配置通过 `sources config` 持久保存；`--binding <bindingId>` 修改当前设备通道的会话配置，要求插件实现通道配置。上述 SDK 示例只提供实例配置，音频插件的通道配置示例见下文。`--expected-revision` 必填：实例配置从 `sources list` 对应实例的 `revision` 获取，通道配置从 `status.sourceBindings` 对应绑定的 `revision` 获取。它们均不是整个 Hub 的 `revision`。旧版本写入返回 `config_conflict`；重新读取、合并用户修改后再显式提交，不自动重试。`configure`／`configure_binding` 是保留动作，不能用 `sources action` 绕过配置事务。
+`call clear_device_channel --params` 可按设备及通道清空旧波形并保持输出活动；返回绑定代次，不代表设备确认。实例配置通过 `sources config` 持久保存；`--binding <bindingId>` 修改当前设备通道的会话配置，要求插件实现通道配置。上述 SDK 示例只提供实例配置，音频插件的通道配置示例见下文。`--expected-revision` 必填：实例配置从 `sources list` 对应实例的 `revision` 获取，通道配置从 `status.sourceBindings` 对应绑定的 `revision` 获取。它们均不是整个 Hub 的 `revision`。陈旧修订号写入返回 `config_conflict`；重新读取、合并用户修改后再显式提交，不自动重试。`configure`／`configure_binding` 是保留动作，不能用 `sources action` 绕过配置事务。
 
 `bindingId` 为核心生成的 UUID，必须原样使用 `devices[].bindingIdA/B` 或 `sourceBindings[].bindingId`，不能从设备 ID 和通道拼接。替换输入源或重新建立绑定后读取新 ID，避免向已失效的绑定提交配置或输入。`sources input <id> --file` 接收公共 `InputParams` 对象，包含 `action`、`value`、`owner`、递增 `sequence` 及可选 `bindingId`。
 
@@ -228,7 +228,7 @@ HTTP 服务关闭后，在创建持有者的终端运行 `& $cli holders release
 }
 ```
 
-两种传输的 MCP 工具名称都与 `ControlCommand` 的 snake_case 名称一致，例如 `get_hub_snapshot`、`connect_transport`、`adjust_intensity`、`start_output`、`stop_output`、`import_waveform_files`。设备写参数仍为 `{ "deviceId": "<controlId>" }`。插件操作使用 `source_action`／`source_input`；配置使用 `set_source_config`，参数包含 `sourceId`、`config`、`expectedRevision` 和可选 `bindingId`，版本来源与 CLI 相同。工具使用相同核心校验、持久化、回滚、队列和停止优先级；Hub 快照、设备、输入源与运行记录还通过只读资源 `dglab://status`、`dglab://devices`、`dglab://sources`、`dglab://plugins`、`dglab://sources/<sourceId>`、`dglab://logs` 提供。
+两种传输的 MCP 工具名称都与 `ControlCommand` 的 snake_case 名称一致，例如 `get_hub_snapshot`、`connect_transport`、`adjust_intensity`、`start_output`、`stop_output`、`import_waveform_files`。设备写参数仍为 `{ "deviceId": "<controlId>" }`。插件操作使用 `source_action`／`source_input`；配置使用 `set_source_config`，参数包含 `sourceId`、`config`、`expectedRevision` 和可选 `bindingId`，修订号来源与 CLI 相同。工具使用相同核心校验、持久化、回滚、队列和停止优先级；Hub 快照、设备、输入源与运行记录还通过只读资源 `dglab://status`、`dglab://devices`、`dglab://sources`、`dglab://plugins`、`dglab://sources/<sourceId>`、`dglab://logs` 提供。
 
 HTTP 使用 `initialize` 协商协议版本，后续请求带 `MCP-Protocol-Version` 和 `Accept: application/json, text/event-stream`。服务使用无状态 HTTP，不要求 `Mcp-Session-Id`。例如用 PowerShell 验证 HTTP 初始化（core 已被持有，独立 HTTP MCP 已启动）：
 
@@ -248,11 +248,9 @@ Invoke-WebRequest -Uri $mcp.url -Method Post -Headers $headers -ContentType "app
 
 本机配置的 `port` 是 core `/control` 端口（默认 `17845`），`mcpPort` 是独立 HTTP MCP 端口（默认 `17846`）。执行 `mcp config --transport http --port 17847` 只更新 `mcpPort`；先关闭该配置目录的 HTTP MCP 服务，`mcp-http.lock` 被占用时会拒绝修改，GUI、CLI 和 stdio MCP 可继续持有 core。重新启动 HTTP 服务使用新值，token 和 core 端口保持不变；端口不能与 core 相同，绑定失败明确报错，不自动选择其他端口。
 
-旧本机配置只含 `port` 时会将原值迁为 HTTP MCP 端口，core 使用 `17845`；若原 HTTP 端口恰为 `17845`，core 改用 `17846` 避免冲突。迁移保留原令牌。若旧 core 还在运行，会返回 `runtime_config_migration_required`，先退出旧 core 后重试，防止改变运行中的控制地址。
+首次使用时生成包含 `port`、`mcpPort` 和随机令牌 `token` 的本机配置。现有文件按这一格式读取和校验；缺少必填字段或包含无效值时返回 `runtime_config_invalid`，保留文件原样。
 
 如果 GUI、CLI 或 MCP 找不到 core，确认 `dg-lab-link-core` 与客户端位于同一目录，并运行 `npm run build:headless` 或重新执行桌面构建。配置中的 MCP 命令找不到时，确认 `dg-lab-link-mcp` 已构建，并重新导出配置。HTTP MCP 连接失败时先运行 GUI 或 CLI `serve`；能读取 CLI 状态但无法访问 `/mcp` 时，确认独立 HTTP MCP 进程已启动及 URL 端口正确。GUI 不依赖 CLI 可执行文件，CLI/MCP 不承载核心服务。
-
-含版本 1 插件清单的旧 profile 会在 core 启动校验时失败，不能原地执行 `plugins update` 升级。先备份旧目录，再用 `--config-dir <新的空目录>` 重新安装版本 2 包、创建实例及绑定。GUI 固定使用默认 profile，需要备份并移走旧默认目录后由新版 GUI 重建。完整命令与数据恢复要求见 [破坏性升级](PLUGINS.md#破坏性升级)。
 
 排障时可直接执行 `dg-lab-link-core --json --config-dir <目录>`，端口占用等启动错误以 `{code, message}` 写入 stderr；core 的 `--port` 在绑定成功后持久保存控制端口，`--relay-endpoint` 用于覆盖模拟 Relay 地址。直接启动 core 不增加持有者，十秒内没有 GUI/CLI/stdio MCP 持有时仍按原生命周期退出；HTTP observer 不延长这个期限。需要长期运行时使用 CLI `serve` 或保持 stdio MCP 会话。
 
